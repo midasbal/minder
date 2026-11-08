@@ -2,8 +2,9 @@
 
 Scope so far: pure policy state and evaluation, the local NEAR enforcement path (the agent moves
 NEAR or NEP-141 tokens held by this contract, gated by policy, with a reserve/settle/release
-lifecycle), and fund custody (owner withdrawal and deposits). The cross-chain signing gate and
-access-key mandates are not built yet.
+lifecycle), fund custody (owner withdrawal and deposits), and the pure EVM transaction encoder
+that the cross-chain signing gate will use. The gate itself (MPC requests, yield/resume, state,
+wiring) and access-key mandates are not built yet.
 
 ## Layout
 
@@ -12,6 +13,8 @@ access-key mandates are not built yet.
 | `src/types.rs` | `AssetId`, `Status`, `Config`, `AssetPolicy`, `Mandate`, `DenyReason`, `Decision` |
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
+| `src/evm.rs` | Pure EIP-1559 transfer encoding: `Eip1559Tx`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`. No state, not yet called by any contract method |
+| `vectors/gen-evm-vectors.mjs` | Generates the reference serializations (viem) that `src/evm.rs` tests hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, and custody |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
@@ -139,6 +142,69 @@ MVP scope; the Tier 2 policy-change timelock is the eventual mitigation.
   `ft_on_transfer`, so tokens without a policy can still arrive that way. They are harmless and the
   owner can withdraw them.
 
+## EVM transaction module (`src/evm.rs`)
+
+Pure functions over plain data, written for the cross-chain signing gate. The module has no state
+and does no I/O. It is exported but no contract method calls it yet; the spend path, MPC request
+and broadcast come in later sub-chunks.
+
+### Type
+
+`Eip1559Tx { chain_id: u64, nonce: u64, max_priority_fee_per_gas: u128, max_fee_per_gas: u128,
+gas_limit: u64, to: [u8; 20], value: u128 }`. A native ETH transfer only: **data and access list are
+empty** (ERC-20 calldata is a later sub-chunk). Widths follow the Ethereum fields: `u128` holds any
+wei value or fee that fits in practice, `u64` holds nonce, gas and chain id.
+
+### Functions
+
+| Function | Result |
+| --- | --- |
+| `encode_unsigned(&tx)` | `0x02 \|\| rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list])` with empty data and access list |
+| `signing_hash(&tx)` | `keccak256(encode_unsigned(tx))`, the 32 bytes handed to the signer |
+| `normalize_s(s, recovery_id)` | `(s, y_parity)`: if `s > n/2` then `s = n - s` and the parity flips, else unchanged |
+| `encode_signed(&tx, r, s, y_parity)` | `0x02 \|\| rlp([...same fields, y_parity, r, s])`, ready to broadcast |
+
+### Rules
+
+- **No EIP-155.** A type-2 transaction carries its chain id inside the signed payload. `y_parity` is
+  the recovery id itself (0 or 1): never `+ 27`, never `chain_id * 2 + 35`. This matches what the
+  spike observed from chainsig.js (`yParity = v - 27`).
+- **Low-s.** Ethereum rejects `s > n/2` (EIP-2). `n/2` is rounded down, so `s == n/2` is already low.
+  Negating `s` negates the recovered point, which is why the parity flips with it. `normalize_s` must
+  run before `encode_signed`.
+- **Integers are RLP integers,** including `r` and `s`: big-endian, no leading zeros, zero is the
+  empty string (`0x80`). A 32-byte `r` with leading zero bytes therefore encodes shorter.
+- **RLP is hand-written** for exactly this structure (about 40 lines) rather than a crate: it avoids a
+  dependency in a security contract and the vectors, not inspection, establish correctness. The
+  generic length prefix is also checked against published RLP spec values for lengths this
+  structure cannot reach.
+- **Keccak is `env::keccak256_array`,** a deterministic host function (cheaper than a crate, nothing
+  extra in the wasm). It is checked against the empty-string and `"abc"` Keccak vectors and the
+  viem signing hashes.
+- **Invalid input panics:** `normalize_s` rejects `recovery_id > 1` and `s` outside `1..n`;
+  `encode_signed` rejects `y_parity > 1`. Better a loud failure than a transaction that recovers to
+  another signer. The signing gate must validate the signer's output *before* calling these, because
+  it may not panic inside a settlement callback.
+
+### Reference vectors
+
+The audit anchor is `vectors/gen-evm-vectors.mjs`, which uses viem 2.57.16 (an independent
+implementation) to serialize fixed field sets with fixed signatures, and prints the unsigned bytes,
+the signing hash and the signed bytes. The Rust tests hard-code those outputs and require byte-for-byte
+equality for all three. Run it from a directory with viem installed (the spike has it) to reproduce.
+
+| Vector | What it pins down |
+| --- | --- |
+| `plain_transfer` | A realistic Sepolia transfer; short-form unsigned list, long-form signed list |
+| `zero_fields` | Zero nonce, priority fee and value encode as `0x80`; `r` and `s` with leading zero bytes are trimmed; `y_parity` 0 |
+| `single_byte_boundaries` | 127 stays one raw byte, 128 becomes `0x81 0x80`, 255 `0x81 0xff`, 256 `0x82 0x01 0x00`; `r = 0x80` |
+| `list_payload_55_bytes`, `list_payload_56_bytes` | The exact switch from short list header `0xf7` to long form `0xf8 0x38` |
+| `high_top_bytes` | `u64::MAX`, `u128::MAX` and an all-`0xff` address and `r`: full-width, high top byte values |
+
+A mutation check was run when writing these: deliberately breaking the list-length threshold, the
+single-byte rule, leading-zero trimming, the type byte, the data encoding, the parity flip, the
+half-order comparison and the borrow in the subtraction each made the tests fail.
+
 ## Evaluation order
 
 The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevoked`,
@@ -196,7 +262,7 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
 
 ## Invariant to test map
 
-Unit tests are in `src/window.rs`, `src/policy.rs`, `src/lifecycle_tests.rs` and
+Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/lifecycle_tests.rs` and
 `src/custody_tests.rs`. Integration tests are in `tests/invariants.rs` (policy), `tests/transfers.rs`
 (local transfer path) and `tests/custody.rs` (custody), and run against a near-workspaces sandbox.
 
@@ -234,6 +300,11 @@ Unit tests are in `src/window.rs`, `src/policy.rs`, `src/lifecycle_tests.rs` and
 | `ft_on_transfer` accepts a token with a policy (refund 0) | unit `custody_tests::ft_on_transfer_accepts_an_allowlisted_token_in_full`; sandbox `custody::ft_on_transfer_accepts_a_token_that_has_a_policy` |
 | `ft_on_transfer` refunds any other token in full, and keys on the caller, not the claimed sender | unit `custody_tests::ft_on_transfer_refunds_a_token_without_a_policy_in_full`, `ft_on_transfer_keys_on_the_calling_token_not_the_claimed_sender`; sandbox `custody::ft_on_transfer_refunds_a_token_without_a_policy_in_full` |
 | `ft_on_transfer` changes no accounting | unit `custody_tests::ft_on_transfer_does_not_change_accounting`; sandbox `custody::ft_on_transfer_leaves_accounting_alone` |
+| EVM encoding: unsigned bytes, signing hash and signed bytes match viem byte for byte | unit `evm::unsigned_encoding_matches_viem`, `signing_hash_matches_viem`, `signed_encoding_matches_viem` (all six vectors) |
+| Minimal-length integers and RLP header boundaries | the `zero_fields`, `single_byte_boundaries`, `list_payload_55_bytes`, `list_payload_56_bytes` and `high_top_bytes` vectors; unit `evm::vector_set_covers_the_list_header_boundary_and_zero_integers`, `length_prefix_matches_the_rlp_specification` |
+| Keccak is correct | unit `evm::keccak_matches_known_vectors`, plus the viem signing hashes |
+| High `s` is flipped and parity toggled; low `s` passes through | unit `evm::high_s_is_flipped_and_parity_toggled`, `low_s_passes_through_unchanged` (including `n/2` itself and `n-1`), `normalizing_twice_changes_nothing_more` |
+| Invalid signer output is rejected, not encoded | unit `evm::zero_s_is_rejected`, `s_at_or_above_the_order_is_rejected`, `recovery_id_other_than_0_or_1_is_rejected`, `encoding_rejects_a_y_parity_other_than_0_or_1` |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time

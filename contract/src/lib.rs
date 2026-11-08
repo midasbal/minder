@@ -3,6 +3,7 @@
 //! only through `request_local_transfer`, which reserves budget before the
 //! transfer and settles it in a callback. Nothing here signs for other chains.
 
+pub mod evm;
 pub mod policy;
 pub mod types;
 pub mod window;
