@@ -201,18 +201,53 @@ async fn a_failing_signer_releases_the_reservation_and_settles_nothing() {
     assert_eq!(events(&next)[0]["data"][0]["raw_tx"], RAW_NONCE_1);
 }
 
-#[tokio::test]
-async fn an_unusable_signature_is_rejected_and_nothing_settles() {
+/// G1: the signer's receipt succeeded, so whatever it returned is public and
+/// possibly broadcastable. The outlay must be booked even though the contract
+/// cannot turn the output into a transaction, and nothing must be emitted.
+async fn assert_booked_but_not_emitted(mode: &str, expected_log: &str) {
     let (f, signer) = armed_evm().await;
-    set_mode(&signer, "BadSignature").await;
+    set_mode(&signer, mode).await;
 
     let result = pay(&f, &f.agent, RECIPIENT, VALUE).await;
-    assert!(result.is_success(), "{result:?}");
+    assert!(result.is_success(), "{mode}: {result:?}");
 
-    assert!(events(&result).is_empty());
-    assert!(logs_contain(&result, "signature rejected"));
-    assert_eq!(f.reserved(evm()).await, 0);
-    assert_eq!(f.live_spend(evm()).await, 0);
+    assert!(events(&result).is_empty(), "{mode}: nothing is emitted");
+    assert!(
+        logs_contain(&result, "booked, no transaction emitted"),
+        "{mode}"
+    );
+    assert!(
+        logs_contain(&result, expected_log),
+        "{mode}: {expected_log}"
+    );
+    assert_eq!(f.reserved(evm()).await, 0, "{mode}: released");
+    assert_eq!(f.live_spend(evm()).await, OUTLAY, "{mode}: booked");
+    assert_eq!(nonce(&f).await, "1", "{mode}: the nonce stays consumed");
+    // The booked spend is real budget: it shows up in what is left.
+    assert_eq!(f.live_spend(near()).await, 0);
+}
+
+#[tokio::test]
+async fn a_signature_that_cannot_sign_a_transaction_is_booked_but_not_emitted() {
+    // Recovery id 2: well-formed, rejected by try_assemble_signed.
+    assert_booked_but_not_emitted("BadSignature", "signature rejected").await;
+}
+
+#[tokio::test]
+async fn valid_json_of_the_wrong_shape_is_booked_but_not_emitted() {
+    assert_booked_but_not_emitted("WrongShape", "signature rejected").await;
+}
+
+#[tokio::test]
+async fn a_non_json_result_is_booked_but_not_emitted() {
+    assert_booked_but_not_emitted("Garbage", "signature rejected").await;
+}
+
+#[tokio::test]
+async fn a_genuine_signature_beyond_the_read_buffer_is_booked_but_not_emitted() {
+    // The clearest G1 case: a real, assemblable signature the contract cannot
+    // read because it exceeds the 4096-byte buffer.
+    assert_booked_but_not_emitted("Oversized", "unreadable signer result").await;
 }
 
 // ---- TOCTOU ----

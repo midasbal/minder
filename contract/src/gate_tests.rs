@@ -107,6 +107,12 @@ fn settle(
     logs
 }
 
+/// The mocked environment keeps storage across `testing_env!` calls within a
+/// thread. Tests that loop over cases clear it so each case starts empty.
+fn clear_storage() {
+    let _ = near_sdk::mock::with_mocked_blockchain(|blockchain| blockchain.take_storage());
+}
+
 fn event_lines(logs: &[String]) -> Vec<Value> {
     logs.iter()
         .filter_map(|line| line.strip_prefix("EVENT_JSON:"))
@@ -528,8 +534,25 @@ fn a_failed_signer_call_releases_and_commits_nothing() {
     assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(1));
 }
 
+/// A genuine, assemblable signature padded past the contract's read buffer: the
+/// bytes are unreadable to the contract but the signer did sign.
+fn oversized_valid_signature() -> Vec<u8> {
+    json!({
+        "scheme": "Secp256k1",
+        "big_r": { "affine_point": format!("02{R}") },
+        "s": { "scalar": S },
+        "recovery_id": 1,
+        "padding": "x".repeat(5000),
+    })
+    .to_string()
+    .into_bytes()
+}
+
 #[test]
-fn unusable_signatures_release_and_commit_nothing() {
+fn a_successful_receipt_we_cannot_use_is_booked_but_emits_nothing() {
+    // G1: the signer's receipt succeeded, so whatever it returned is public and
+    // possibly broadcastable. The outlay is booked whether or not the contract
+    // could read, parse or assemble it; only the event depends on that.
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("recovery id 2", signature(&format!("02{R}"), S, 2)),
         ("zero s", signature(&format!("02{R}"), &"00".repeat(32), 0)),
@@ -544,11 +567,17 @@ fn unusable_signatures_release_and_commit_nothing() {
         ("bad point prefix", signature(&format!("04{R}"), S, 0)),
         ("short point", signature("02ab", S, 0)),
         ("not hex", signature("zz", S, 0)),
+        (
+            "wrong shape",
+            br#"{"big_r":"02","s":"00","recovery_id":1}"#.to_vec(),
+        ),
         ("not json", b"not json".to_vec()),
         ("empty", Vec::new()),
-        ("oversized", vec![b'x'; 5000]),
+        ("oversized garbage", vec![b'x'; 5000]),
+        ("oversized valid signature", oversized_valid_signature()),
     ];
     for (name, payload) in cases {
+        clear_storage();
         let mut minder = armed_evm();
         request(&mut minder, 1000);
         let logs = settle(
@@ -559,14 +588,73 @@ fn unusable_signatures_release_and_commit_nothing() {
             PromiseResult::Successful(payload),
         );
 
-        assert_eq!(reserved(&minder, evm_asset()), 0, "{name}");
-        assert_eq!(committed(&minder, evm_asset()), 0, "{name}");
-        assert!(event_lines(&logs).is_empty(), "{name}");
+        assert_eq!(reserved(&minder, evm_asset()), 0, "{name}: released");
+        assert_eq!(
+            committed(&minder, evm_asset()),
+            1000 + FEE_COST,
+            "{name}: booked"
+        );
+        assert!(event_lines(&logs).is_empty(), "{name}: nothing emitted");
         assert!(
-            logs.iter().any(|line| line.contains("not settled")),
-            "{name}: the rejection is logged"
+            logs.iter()
+                .any(|line| line.contains("booked, no transaction emitted")),
+            "{name}: the outcome is logged"
         );
     }
+}
+
+#[test]
+fn an_unreadable_but_successful_result_is_logged_as_unreadable() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let logs = settle(
+        &mut minder,
+        1000 + FEE_COST,
+        0,
+        1000,
+        PromiseResult::Successful(oversized_valid_signature()),
+    );
+    assert!(logs
+        .iter()
+        .any(|line| line.contains("unreadable signer result")));
+}
+
+#[test]
+fn booked_unusable_output_counts_against_the_window() {
+    let mut minder = armed_evm();
+    // Two requests whose results we cannot use. Each books 42e12 + 1000.
+    for nonce in 0..2 {
+        request(&mut minder, 1000);
+        settle(
+            &mut minder,
+            1000 + FEE_COST,
+            nonce,
+            1000,
+            PromiseResult::Successful(b"garbage".to_vec()),
+        );
+    }
+    assert_eq!(committed(&minder, evm_asset()), 2 * (1000 + FEE_COST));
+    // Limit 150e12, 84e12+2000 booked: a payment with outlay 62e12 fits, one
+    // with outlay 92e12 does not.
+    let ask =
+        |value: u128| minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(value));
+    assert_eq!(ask(20_000_000_000_000), Decision::Allow);
+    assert_eq!(
+        ask(50_000_000_000_000),
+        Decision::Deny(DenyReason::WindowLimitExceeded)
+    );
+}
+
+#[test]
+fn only_a_failed_receipt_books_nothing() {
+    // The converse of the above, and the only unbooked outcome.
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let logs = settle(&mut minder, 1000 + FEE_COST, 0, 1000, PromiseResult::Failed);
+    assert_eq!(reserved(&minder, evm_asset()), 0);
+    assert_eq!(committed(&minder, evm_asset()), 0);
+    assert!(event_lines(&logs).is_empty());
+    assert!(logs.iter().any(|line| line.contains("not signed")));
 }
 
 #[test]

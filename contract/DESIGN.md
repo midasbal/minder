@@ -21,7 +21,7 @@ and ERC-20 payments are not built yet.
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, and the EVM gate |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
 | `../test-contracts/mock-ft` | Test double for a NEP-141 token: records `ft_transfer`, can fail or stretch it over blocks, and `ft_transfer_call` drives a receiver's `ft_on_transfer`. Never deployed |
-| `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, returns a fixed valid signature, a bad one, or fails; can stretch the answer over blocks. Never deployed |
+| `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, and returns a fixed valid signature, a bad one, valid JSON of the wrong shape, a non-JSON blob, a genuine signature padded past 4096 bytes, or fails; can stretch the answer over blocks. Never deployed |
 
 ## State
 
@@ -236,14 +236,33 @@ transfer, with a `sign` call to the Chain Signatures contract in place of the tr
    1 yoctoNEAR and 30 Tgas (the signer needs 15), then `.then` the private
    `on_sign_complete(asset, outlay, tx)` with 25 Tgas reserved for it. Its arguments are borsh.
 
-`on_sign_complete` never panics. In order: release the reservation (saturating, unconditional);
-read the result with `promise_result_checked` and parse the JSON itself (never `#[callback_result]`);
-on a failed or unreadable result stop; otherwise run `try_assemble_signed`. If it returns a raw
-transaction, commit the spend (`record_spend`) and log a NEP-297 event
-`EVENT_JSON:{"standard":"minder","version":"1.0.0","event":"evm_payment_signed","data":[{chain_id,
-nonce, to, value, raw_tx}]}` for an off-chain relayer to broadcast. If it returns an error, commit
-nothing and log the rejection. `PromiseError` is non-exhaustive, so `Failed` and "anything else" are
-separate arms.
+`on_sign_complete` never panics. In order:
+
+1. Release the reservation (saturating, unconditional).
+2. Read the result with `promise_result_checked` and parse the JSON ourselves (never
+   `#[callback_result]`). The helper separates the cases: `Err(Failed)` means the signer's receipt
+   failed (its own timeout included); `Err(TooLong)` means the receipt **succeeded** but its output
+   exceeds our 4096-byte read buffer; `Ok(bytes)` is a readable output. `PromiseError` is
+   non-exhaustive, so a variant added later is treated as "not proven failed".
+3. **`Err(Failed)`: nothing was signed.** Log it and stop. Nothing is booked.
+4. **Anything else: the receipt did not fail, so book the outlay (`record_spend`) unconditionally.**
+5. Only then try to use the output. If it was readable and `try_assemble_signed` returns a raw
+   transaction, log the NEP-297 event
+   `EVENT_JSON:{"standard":"minder","version":"1.0.0","event":"evm_payment_signed","data":[{chain_id,
+   nonce, to, value, raw_tx}]}` for an off-chain relayer to broadcast. Otherwise (unreadable,
+   unparseable, or refused by the assembler) log `evm payment booked, no transaction emitted: <why>`
+   and emit nothing.
+
+**Principle (G1 fix): a successful signer receipt books spend regardless of whether the contract could
+parse, size-fit or emit the signature, because that signature is public and broadcastable.** The
+signer's response sits in a public receipt (the agent can read it from its own transaction's
+outcome), so a signature this contract fails to read is still a signature anyone can assemble and
+broadcast. Booking only after our own assembly succeeded left exactly that spend unaccounted; a
+response-format change by the signer, or a response past the read buffer, was enough to trigger it.
+Booking keys on the receipt, never on our ability to read it. This matches the local path
+(`on_transfer_complete` books unless the transfer definitely failed). The cost is deliberate
+over-counting: a signature we refuse (for instance recovery id 2, which cannot sign an Ethereum
+transaction) still uses budget for one window.
 
 ### EVM policy surface
 
@@ -294,13 +313,15 @@ value.
 ### Nonce gaps and other limits
 
 - **A failed signing leaves a nonce gap.** The nonce was taken at request time. If the signer fails or
-  times out, or the signature is unusable, the reservation is released but that nonce is consumed; on
+  times out, or the output is unusable, the reservation is released but that nonce is consumed; on
   the destination chain, later transactions from the address queue behind the missing one until the
   owner fills it (for instance with a self-transfer at that nonce signed outside Minder) or they are
   never mined. This is the accepted outbound-only liveness limit and is not reclaimed here.
-- **An unusable signature is not settled.** If the signer returns something `try_assemble_signed`
-  refuses, nothing is committed. The signer is trusted, so this should not occur; the refused cases
-  are signatures that cannot form a valid Ethereum transaction.
+- **Unusable signer output is booked, not ignored.** If the signer's receipt succeeds but the
+  output cannot be turned into a transaction (wrong shape, not JSON, past the read buffer, or refused
+  by `try_assemble_signed`), the outlay is still booked and no event is emitted. The signer is
+  trusted, so this should not occur; booking makes the failure safe if it does. Only a failed receipt
+  books nothing.
 - **The signed transaction is public** (it is in the event log, and the signer's own response is in
   its receipt). Anyone can broadcast it; broadcasting is not a policy decision. It can be broadcast
   only once, by nonce.
@@ -438,8 +459,9 @@ Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
 | Hash integrity: the signer is sent a hash the contract computed from owner config, its nonce and the validated recipient and value | unit `gate_tests::the_contract_sends_the_signer_a_hash_it_computed_itself`; sandbox `evm_gate::the_signer_is_sent_the_hash_the_contract_computed` (viem's hash for nonces 0 and 1, predecessor is the contract, configured path, domain 0) |
 | The callback carries exactly the hashed transaction | unit `gate_tests::the_contract_sends_the_signer_a_hash_it_computed_itself` (borsh args equal asset, outlay, tx) |
 | Settlement: a returned signature commits the spend once and emits the signed transaction | unit `gate_tests::a_returned_signature_settles_once_and_emits_the_signed_transaction`, `a_high_s_signature_is_normalized_before_the_transaction_is_emitted`; sandbox `evm_gate::a_returned_signature_settles_once_and_emits_the_signed_transaction` (event `raw_tx` equals viem's) |
-| Clean reversion: a failed signer call releases and commits nothing; the nonce stays consumed | unit `gate_tests::a_failed_signer_call_releases_and_commits_nothing`; sandbox `evm_gate::a_failing_signer_releases_the_reservation_and_settles_nothing` |
-| An unusable signature releases and commits nothing | unit `gate_tests::unusable_signatures_release_and_commit_nothing` (nine cases incl. oversized and malformed); sandbox `evm_gate::an_unusable_signature_is_rejected_and_nothing_settles` |
+| Clean reversion: a failed signer receipt (timeout or error) releases and books nothing; the nonce stays consumed | unit `gate_tests::a_failed_signer_call_releases_and_commits_nothing`; sandbox `evm_gate::a_failing_signer_releases_the_reservation_and_settles_nothing` |
+| G1: a successful signer receipt books the outlay even if the output cannot be read, parsed or assembled; nothing is emitted | unit `gate_tests::a_successful_receipt_we_cannot_use_is_booked_but_emits_nothing` (eleven cases: recovery id 2, zero s, s at the order, bad prefix, short point, not hex, wrong shape, not JSON, empty, oversized garbage, oversized *valid* signature), `an_unreadable_but_successful_result_is_logged_as_unreadable`, `booked_unusable_output_counts_against_the_window`; sandbox `evm_gate::a_signature_that_cannot_sign_a_transaction_is_booked_but_not_emitted`, `valid_json_of_the_wrong_shape_is_booked_but_not_emitted`, `a_non_json_result_is_booked_but_not_emitted`, `a_genuine_signature_beyond_the_read_buffer_is_booked_but_not_emitted` |
+| Only a failed receipt books nothing | unit `gate_tests::only_a_failed_receipt_books_nothing`, `a_failed_signer_call_releases_and_commits_nothing`; sandbox `evm_gate::a_failing_signer_releases_the_reservation_and_settles_nothing` |
 | Callback never panics, even over-releasing | unit `gate_tests::settlement_never_panics_even_if_it_releases_more_than_is_reserved`, `settlement_is_independent_of_changes_made_in_flight`; `gate::tests::malformed_responses_are_rejected_without_panicking` |
 | TOCTOU: a second request sees the first's reservation before its callback | unit `gate_tests::a_second_request_sees_the_first_ones_reservation`; sandbox `evm_gate::a_second_request_sees_the_first_ones_reservation_before_it_settles` (observes the reservation mid-flight, the denial, then both nonces settle) |
 | Fees count against caps and the window; tiny payments cannot drain through fees | unit `gate_tests::fees_count_toward_the_per_transaction_cap`, `many_tiny_payments_cannot_drain_through_fees`; sandbox `evm_gate::denied_requests_change_nothing_and_never_reach_the_signer` |

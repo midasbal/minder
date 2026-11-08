@@ -8,6 +8,9 @@ use near_sdk::{
     assert_one_yocto, env, near, require, AccountId, Gas, PanicOnDefault, PromiseOrValue,
 };
 
+/// Padding that pushes an otherwise valid response past 4096 bytes.
+const OVERSIZED_PADDING: usize = 5000;
+
 /// The `r` and `s` of the fixed signature (low `s`), as 32-byte hex.
 const R: &str = "5b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9";
 const S: &str = "2a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
@@ -22,6 +25,13 @@ pub enum Mode {
     BadSignature,
     /// Panic, as the real signer does when it times out.
     Fail,
+    /// A successful receipt carrying valid JSON of the wrong shape.
+    WrongShape,
+    /// A successful receipt carrying bytes that are not JSON.
+    Garbage,
+    /// A successful receipt carrying a genuine, assemblable signature padded
+    /// past any sensible read buffer.
+    Oversized,
 }
 
 #[near(serializers = [json, borsh])]
@@ -93,6 +103,13 @@ impl MockSigner {
         self.answer(remaining)
     }
 
+    /// A successful result that is not JSON: borsh-encoded bytes.
+    #[private]
+    #[result_serializer(borsh)]
+    pub fn garbage(&self) -> Vec<u8> {
+        b"\xff\xfe not a signature".to_vec()
+    }
+
     pub fn get_requests(&self) -> Vec<Request> {
         self.requests.clone()
     }
@@ -106,15 +123,29 @@ impl MockSigner {
             );
         }
         let recovery_id = match self.mode {
-            Mode::Sign => 1,
+            Mode::Sign | Mode::Oversized => 1,
             Mode::BadSignature => 2,
             Mode::Fail => env::panic_str("mock signer: set to fail"),
+            Mode::WrongShape => {
+                return PromiseOrValue::Value(json!({
+                    "big_r": format!("02{R}"),
+                    "s": S,
+                    "recovery_id": 1,
+                }));
+            }
+            Mode::Garbage => {
+                return PromiseOrValue::Promise(Self::ext(env::current_account_id()).garbage());
+            }
         };
-        PromiseOrValue::Value(json!({
+        let mut response = json!({
             "scheme": "Secp256k1",
             "big_r": { "affine_point": format!("02{R}") },
             "s": { "scalar": S },
             "recovery_id": recovery_id,
-        }))
+        });
+        if self.mode == Mode::Oversized {
+            response["padding"] = json!("x".repeat(OVERSIZED_PADDING));
+        }
+        PromiseOrValue::Value(response)
     }
 }

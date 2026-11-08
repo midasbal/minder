@@ -176,12 +176,20 @@ impl Minder {
     }
 
     /// Settles a payment started by `request_evm_payment`. Must never panic,
-    /// or the reservation would be stranded. It releases the reservation first
-    /// and unconditionally. Then, only if the signer returned a signature that
-    /// assembles into a valid transaction, it commits the spend and emits the
-    /// raw signed transaction for an off-chain relayer to broadcast. A failed
-    /// result (including the signer's timeout) or an unusable signature
-    /// commits nothing.
+    /// or the reservation would be stranded.
+    ///
+    /// It releases the reservation first and unconditionally. Whether to book
+    /// the spend then depends only on whether the signer's receipt *succeeded*,
+    /// never on whether this contract could read, size-fit, parse or assemble
+    /// what it returned:
+    /// - **Receipt failed** (`PromiseError::Failed`, which includes the signer's
+    ///   own timeout): nothing was signed. Nothing is booked.
+    /// - **Receipt did not fail**: the signer produced output that sits in a
+    ///   public receipt and may be broadcastable by anyone, whether or not we can
+    ///   use it. The outlay is booked unconditionally. Only if the output then
+    ///   assembles into a valid transaction is the raw signed transaction
+    ///   emitted for an off-chain relayer; otherwise the spend stays booked, the
+    ///   rejection is logged, and nothing is emitted.
     ///
     /// The arguments are borsh, not JSON: they are produced only by this
     /// contract, and the transaction carries `u128` fields.
@@ -195,31 +203,34 @@ impl Minder {
         self.release(&asset, outlay);
 
         // Read bytes and parse them ourselves: `#[callback_result]` would
-        // panic on a payload that does not deserialize.
+        // panic on a payload that does not deserialize. The size cap only
+        // decides whether we can read the bytes; it says nothing about
+        // whether the receipt succeeded.
         let response = match env::promise_result_checked(0, MAX_SIGNATURE_RESPONSE_BYTES) {
-            Ok(bytes) => bytes,
-            // The signer failed, including by its own timeout: nothing was signed.
+            Ok(bytes) => Some(bytes),
+            // The only proof that nothing was signed.
             Err(PromiseError::Failed) => {
                 env::log_str("evm payment not signed: the signer call failed");
                 return;
             }
-            // Too long to be a signature, or an error added later
-            // (`PromiseError` is non_exhaustive).
-            Err(_) => {
-                env::log_str("evm payment not settled: unreadable signer result");
-                return;
-            }
+            // `TooLong`: the receipt succeeded but its output exceeds our read
+            // buffer. Any variant added later (`PromiseError` is non_exhaustive)
+            // is likewise not proof of failure.
+            Err(_) => None,
+        };
+
+        // Fail-safe: a receipt that did not fail may hold a usable signature.
+        self.record_spend(&asset, outlay);
+
+        let Some(response) = response else {
+            env::log_str("evm payment booked, no transaction emitted: unreadable signer result");
+            return;
         };
         match assemble_from_response(&tx, &response) {
-            Ok(raw_tx) => {
-                self.record_spend(&asset, outlay);
-                env::log_str(&signed_payment_event(&tx, &raw_tx));
-            }
-            Err(rejection) => {
-                env::log_str(&format!(
-                    "evm payment not settled: signature rejected ({rejection:?})"
-                ));
-            }
+            Ok(raw_tx) => env::log_str(&signed_payment_event(&tx, &raw_tx)),
+            Err(rejection) => env::log_str(&format!(
+                "evm payment booked, no transaction emitted: signature rejected ({rejection:?})"
+            )),
         }
     }
 
