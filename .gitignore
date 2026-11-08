@@ -1,0 +1,7 @@
+target/
+node_modules/
+.env
+.env.*
+# Disposable spike with its own secrets; kept out of the real repository.
+spikes/
+CLAUDE.md

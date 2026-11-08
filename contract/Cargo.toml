@@ -1,0 +1,35 @@
+[package]
+name = "minder"
+description = "Policy firewall between an AI agent and funds"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Adds an owner-only method that records spend directly, so the sliding window
+# can be exercised before the reservation lifecycle exists. Never enable it for
+# a deployed build.
+test-helpers = []
+
+[dependencies]
+near-sdk = "=5.29.1"
+
+[dev-dependencies]
+near-sdk = { version = "=5.29.1", features = ["unit-testing"] }
+near-workspaces = "=0.23.0"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(near)']
