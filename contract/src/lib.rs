@@ -4,6 +4,7 @@
 //! transfer and settles it in a callback. Nothing here signs for other chains.
 
 pub mod evm;
+mod gate;
 pub mod policy;
 pub mod types;
 pub mod window;
@@ -16,7 +17,7 @@ use near_sdk::{
     PromiseError,
 };
 
-pub use types::{AssetId, AssetPolicy, Config, Decision, DenyReason, Mandate, Status};
+pub use types::{AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, Mandate, Status};
 
 use policy::EvalInput;
 use window::SpendRing;
@@ -31,6 +32,8 @@ const MAX_PAGE_SIZE: u32 = 100;
 const FT_TRANSFER_GAS: Gas = Gas::from_tgas(30);
 const SETTLE_CALLBACK_GAS: Gas = Gas::from_tgas(15);
 
+const LOCAL_ONLY: &str = "EVM assets are paid through request_evm_payment";
+
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
@@ -38,6 +41,8 @@ enum StorageKey {
     Recipients,
     Spend,
     Reserved,
+    EvmRecipients,
+    EvmNonces,
 }
 
 #[near(contract_state)]
@@ -57,6 +62,12 @@ pub struct Minder {
     /// from `spend`: it is added when a transfer is requested and removed when
     /// its callback runs, whatever the outcome.
     reserved: LookupMap<AssetId, u128>,
+    /// Absent until the owner configures EVM payments.
+    evm_config: Option<EvmConfig>,
+    /// Allowed 20-byte EVM recipients; separate from the NEAR `recipients`.
+    evm_recipients: IterableSet<[u8; 20]>,
+    /// Next nonce to hand out per chain id. Only ever increases.
+    evm_nonces: LookupMap<u64, u64>,
 }
 
 #[near]
@@ -93,6 +104,9 @@ impl Minder {
             recipients: IterableSet::new(StorageKey::Recipients),
             spend: LookupMap::new(StorageKey::Spend),
             reserved: LookupMap::new(StorageKey::Reserved),
+            evm_config: None,
+            evm_recipients: IterableSet::new(StorageKey::EvmRecipients),
+            evm_nonces: LookupMap::new(StorageKey::EvmNonces),
         }
     }
 
@@ -173,6 +187,7 @@ impl Minder {
     /// the agent, not the owner.
     pub fn owner_withdraw(&mut self, asset: AssetId, amount: U128, to: AccountId) -> Promise {
         self.assert_owner();
+        Self::require_local(&asset);
         Self::transfer_promise(&asset, amount, to)
     }
 
@@ -220,6 +235,7 @@ impl Minder {
         amount: U128,
         recipient: AccountId,
     ) -> Promise {
+        Self::require_local(&asset);
         let caller = env::predecessor_account_id();
         if let Decision::Deny(reason) = self.evaluate_request(&caller, &asset, amount.0, &recipient)
         {
@@ -263,6 +279,7 @@ impl Minder {
         amount: U128,
         recipient: AccountId,
     ) -> Decision {
+        Self::require_local(&asset);
         self.evaluate_request(&caller, &asset, amount.0, &recipient)
     }
 
@@ -347,10 +364,17 @@ impl Minder {
                 NearToken::from_yoctonear(1),
                 FT_TRANSFER_GAS,
             ),
+            AssetId::Evm(_) => env::panic_str(LOCAL_ONLY),
         }
     }
 
-    fn assert_owner(&self) {
+    /// The NEAR entry points handle NEAR and NEP-141 assets only; EVM assets
+    /// have no NEAR recipient and are paid through `request_evm_payment`.
+    fn require_local(asset: &AssetId) {
+        require!(!matches!(asset, AssetId::Evm(_)), LOCAL_ONLY);
+    }
+
+    pub(crate) fn assert_owner(&self) {
         require!(
             env::predecessor_account_id() == self.config.owner,
             "Only the owner can call this method"
@@ -397,8 +421,8 @@ impl Minder {
             .record(now, slot_len, amount);
     }
 
-    /// Gathers state and defers every decision to [`policy::evaluate`]. Used
-    /// by both `dry_run` and `request_local_transfer`.
+    /// Evaluation for the NEAR recipient allowlist. Used by both `dry_run` and
+    /// `request_local_transfer`.
     fn evaluate_request(
         &self,
         caller: &AccountId,
@@ -406,13 +430,26 @@ impl Minder {
         amount: u128,
         recipient: &AccountId,
     ) -> Decision {
+        self.evaluate_with(caller, asset, amount, self.recipients.contains(recipient))
+    }
+
+    /// Gathers state and defers every decision to [`policy::evaluate`]. The
+    /// one place an `EvalInput` is built, whichever allowlist the recipient
+    /// came from.
+    fn evaluate_with(
+        &self,
+        caller: &AccountId,
+        asset: &AssetId,
+        amount: u128,
+        recipient_allowed: bool,
+    ) -> Decision {
         policy::evaluate(&EvalInput {
             status: self.config.status,
             mandate: self.mandate.as_ref(),
             now: env::block_timestamp(),
             caller,
             policy: self.policies.get(asset),
-            recipient_allowed: self.recipients.contains(recipient),
+            recipient_allowed,
             amount,
             effective_spend: policy::effective_spend(
                 self.live_spend(asset),
@@ -422,7 +459,7 @@ impl Minder {
     }
 }
 
-fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize) {
+pub(crate) fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize) {
     let skip = from_index.unwrap_or(0) as usize;
     let take = limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE) as usize;
     (skip, take)
@@ -430,6 +467,8 @@ fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize) {
 
 #[cfg(test)]
 mod custody_tests;
+#[cfg(test)]
+mod gate_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

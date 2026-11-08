@@ -24,6 +24,7 @@ pub const WINDOW_LIMIT: u128 = 100;
 
 static WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
 static MOCK_FT_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
+static MOCK_SIGNER_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 /// Builds a contract crate with `cargo near`, into its own target directory so
 /// it never disturbs the production build.
@@ -68,6 +69,18 @@ async fn mock_ft_wasm() -> &'static Vec<u8> {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../test-contracts/mock-ft"),
                 &[],
                 "mock_ft.wasm",
+            )
+        })
+        .await
+}
+
+async fn mock_signer_wasm() -> &'static Vec<u8> {
+    MOCK_SIGNER_WASM
+        .get_or_init(|| async {
+            build_wasm(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../test-contracts/mock-signer"),
+                &[],
+                "mock_signer.wasm",
             )
         })
         .await
@@ -167,6 +180,23 @@ impl Fixture {
             .unwrap();
         let asset = json!({ "Nep141": token.id() });
         (token, asset)
+    }
+
+    /// Deploys the mock Chain Signatures contract.
+    pub async fn deploy_signer(&self) -> Contract {
+        let signer = self
+            .worker
+            .dev_deploy(mock_signer_wasm().await)
+            .await
+            .unwrap();
+        signer
+            .call("new")
+            .transact()
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap();
+        signer
     }
 
     pub async fn set_policy(&self, asset: Value, per_tx_cap: u128, window_limit: u128) {

@@ -52,7 +52,9 @@ pub fn committed(minder: &Minder, asset: AssetId) -> u128 {
 }
 
 pub struct FunctionCall {
+    /// The arguments as JSON, or `null` if they are not JSON (borsh callbacks).
     pub args: Value,
+    pub raw_args: Vec<u8>,
     pub deposit: NearToken,
     pub gas: Gas,
 }
@@ -70,7 +72,8 @@ pub fn function_call(receipts: &[Receipt], receiver: &str, method: &str) -> Func
                 prepaid_gas,
                 ..
             } if method_name == method.as_bytes() => Some(FunctionCall {
-                args: near_sdk::serde_json::from_slice(args).unwrap(),
+                args: near_sdk::serde_json::from_slice(args).unwrap_or(Value::Null),
+                raw_args: args.clone(),
                 deposit: *attached_deposit,
                 gas: *prepaid_gas,
             }),

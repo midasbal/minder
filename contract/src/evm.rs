@@ -14,7 +14,7 @@
 //!   because Ethereum rejects `s > n / 2` (EIP-2).
 //! - Data and access list are empty: this is a plain value transfer.
 
-use near_sdk::env;
+use near_sdk::{env, near};
 
 /// EIP-2718 transaction type byte for EIP-1559 transactions.
 const TX_TYPE: u8 = 0x02;
@@ -32,6 +32,7 @@ const SECP256K1_HALF_ORDER: [u8; 32] = [
 ];
 
 /// An EIP-1559 native transfer: empty data, empty access list.
+#[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eip1559Tx {
     pub chain_id: u64,
@@ -86,6 +87,107 @@ pub fn encode_signed(tx: &Eip1559Tx, r: [u8; 32], s: [u8; 32], y_parity: u8) -> 
     payload.extend(rlp_uint(&r));
     payload.extend(rlp_uint(&s));
     with_type(rlp_list(&payload))
+}
+
+/// Why a raw signature from the signer was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvmError {
+    /// `recovery_id` is not 0 or 1.
+    RecoveryId,
+    /// `scalar` is not exactly 32 bytes, or not in `1..n`.
+    Scalar,
+    /// `affine_point` is not 33 bytes starting with `0x02` or `0x03`.
+    AffinePoint,
+    /// The x coordinate taken from `affine_point` is not in `1..n`, so it is
+    /// not a usable ECDSA `r`.
+    R,
+}
+
+/// The gate-facing assembler: takes the MPC's raw signature components and
+/// returns the raw signed transaction, or an error for any input that could not
+/// come from a valid signature. **Never panics.** Every precondition of
+/// [`normalize_s`] and [`encode_signed`] is checked here first, so their
+/// asserts are unreachable on this path.
+///
+/// - `affine_point`: the signer's `big_r.affine_point`, a 33-byte compressed
+///   point. `r` is its x coordinate, `affine_point[1..]`. (The `02`/`03` byte
+///   is not compared with `recovery_id`; the signer may have flipped `s`.)
+/// - `scalar`: the signer's `s.scalar`, 32 bytes big-endian.
+/// - `recovery_id`: 0 or 1, used as `y_parity` after low-s normalization.
+pub fn try_assemble_signed(
+    tx: &Eip1559Tx,
+    affine_point: &[u8],
+    scalar: &[u8],
+    recovery_id: u8,
+) -> Result<Vec<u8>, EvmError> {
+    if recovery_id > 1 {
+        return Err(EvmError::RecoveryId);
+    }
+    let s: [u8; 32] = scalar.try_into().map_err(|_| EvmError::Scalar)?;
+    if !is_valid_scalar(&s) {
+        return Err(EvmError::Scalar);
+    }
+    let point: [u8; 33] = affine_point.try_into().map_err(|_| EvmError::AffinePoint)?;
+    if point[0] != 0x02 && point[0] != 0x03 {
+        return Err(EvmError::AffinePoint);
+    }
+    let mut r = [0u8; 32];
+    r.copy_from_slice(&point[1..]);
+    if !is_valid_scalar(&r) {
+        return Err(EvmError::R);
+    }
+    let (s, y_parity) = normalize_s(s, recovery_id);
+    Ok(encode_signed(tx, r, s, y_parity))
+}
+
+/// `1 <= value < n`.
+fn is_valid_scalar(value: &[u8; 32]) -> bool {
+    *value != [0u8; 32] && *value < SECP256K1_ORDER
+}
+
+// ---- Hex and addresses ----
+
+/// Lowercase hex without a prefix.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[usize::from(byte >> 4)] as char);
+        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
+/// Hex without a prefix, either case. `None` on odd length or a non-hex digit.
+pub fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    digits
+        .chunks(2)
+        .map(|pair| Some(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?))
+        .collect()
+}
+
+fn hex_digit(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        b'A'..=b'F' => Some(digit - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// `0x` followed by exactly 40 hex digits. The EIP-55 checksum, if the casing
+/// carries one, is not verified.
+pub fn parse_address(text: &str) -> Option<[u8; 20]> {
+    hex_decode(text.strip_prefix("0x")?)?.try_into().ok()
+}
+
+/// Lowercase `0x`-prefixed address.
+pub fn format_address(address: &[u8; 20]) -> String {
+    format!("0x{}", hex_encode(address))
 }
 
 /// RLP items shared by the unsigned and signed forms, concatenated.
@@ -436,5 +538,139 @@ mod tests {
     fn encoding_rejects_a_y_parity_other_than_0_or_1() {
         let v = vectors().remove(0);
         encode_signed(&v.tx, hex32(v.r), hex32(v.s), 27);
+    }
+
+    // ---- try_assemble_signed ----
+
+    fn vector(name: &str) -> Vector {
+        vectors().into_iter().find(|v| v.name == name).unwrap()
+    }
+
+    /// The signer's wire form of a vector's signature: `affine_point` is a
+    /// compressed point whose x coordinate is `r`.
+    fn affine(prefix: u8, r: &str) -> Vec<u8> {
+        let mut point = vec![prefix];
+        point.extend(hex(r));
+        point
+    }
+
+    #[test]
+    fn assembling_a_valid_signature_matches_viem() {
+        for name in ["plain_transfer", "zero_fields", "single_byte_boundaries"] {
+            let v = vector(name);
+            for prefix in [0x02, 0x03] {
+                let raw = try_assemble_signed(&v.tx, &affine(prefix, v.r), &hex(v.s), v.y_parity)
+                    .unwrap();
+                assert_eq!(raw, hex(v.signed), "{name} with prefix {prefix:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn assembling_a_high_s_signature_normalizes_it_to_the_viem_encoding() {
+        // The mirrored signature (n - s, opposite parity) must come out as the
+        // low-s form that viem encoded.
+        let v = vector("plain_transfer");
+        let high_s = sub_be(&SECP256K1_ORDER, &hex32(v.s));
+        let raw = try_assemble_signed(&v.tx, &affine(0x02, v.r), &high_s, v.y_parity ^ 1).unwrap();
+        assert_eq!(raw, hex(v.signed));
+    }
+
+    #[test]
+    fn assembling_rejects_each_invalid_input() {
+        let v = vector("plain_transfer");
+        let point = affine(0x02, v.r);
+        let s = hex(v.s);
+        let assemble = |point: &[u8], scalar: &[u8], recovery_id: u8| {
+            try_assemble_signed(&v.tx, point, scalar, recovery_id)
+        };
+        // recovery id
+        assert_eq!(assemble(&point, &s, 2), Err(EvmError::RecoveryId));
+        assert_eq!(assemble(&point, &s, 255), Err(EvmError::RecoveryId));
+        // scalar: zero, the order, above the order, wrong length
+        assert_eq!(assemble(&point, &[0u8; 32], 0), Err(EvmError::Scalar));
+        assert_eq!(assemble(&point, &SECP256K1_ORDER, 0), Err(EvmError::Scalar));
+        assert_eq!(assemble(&point, &[0xff; 32], 0), Err(EvmError::Scalar));
+        assert_eq!(assemble(&point, &s[1..], 0), Err(EvmError::Scalar));
+        assert_eq!(
+            assemble(&point, &[&s[..], &[0u8]].concat(), 0),
+            Err(EvmError::Scalar)
+        );
+        assert_eq!(assemble(&point, &[], 0), Err(EvmError::Scalar));
+        // affine point: wrong prefix, wrong length
+        for prefix in [0x00, 0x01, 0x04, 0x05, 0xff] {
+            assert_eq!(
+                assemble(&affine(prefix, v.r), &s, 0),
+                Err(EvmError::AffinePoint)
+            );
+        }
+        assert_eq!(assemble(&point[1..], &s, 0), Err(EvmError::AffinePoint));
+        assert_eq!(
+            assemble(&[&point[..], &[0u8]].concat(), &s, 0),
+            Err(EvmError::AffinePoint)
+        );
+        assert_eq!(assemble(&[], &s, 0), Err(EvmError::AffinePoint));
+        // r: zero, the order, above the order
+        let with_r = |r: &[u8]| [&[0x02u8][..], r].concat();
+        assert_eq!(assemble(&with_r(&[0u8; 32]), &s, 0), Err(EvmError::R));
+        assert_eq!(assemble(&with_r(&SECP256K1_ORDER), &s, 0), Err(EvmError::R));
+        assert_eq!(assemble(&with_r(&[0xff; 32]), &s, 0), Err(EvmError::R));
+    }
+
+    #[test]
+    fn assembling_never_panics_on_any_combination_of_edge_inputs() {
+        // Exercises the contract that the asserts in normalize_s and
+        // encode_signed are unreachable through this function.
+        let tx = vector("plain_transfer").tx;
+        let scalars: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0u8; 32],
+            vec![1u8; 31],
+            vec![1u8; 32],
+            SECP256K1_HALF_ORDER.to_vec(),
+            SECP256K1_ORDER.to_vec(),
+            vec![0xff; 32],
+            vec![0xff; 33],
+        ];
+        let points: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x02; 33],
+            vec![0x03; 33],
+            [&[0x02u8][..], &SECP256K1_ORDER[..]].concat(),
+            [&[0x02u8][..], &[0u8; 32][..]].concat(),
+            vec![0x04; 65],
+            vec![0xff; 33],
+        ];
+        for scalar in &scalars {
+            for point in &points {
+                for recovery_id in [0u8, 1, 2, 27, 255] {
+                    let _ = try_assemble_signed(&tx, point, scalar, recovery_id);
+                }
+            }
+        }
+    }
+
+    // ---- hex and addresses ----
+
+    #[test]
+    fn hex_round_trips_and_rejects_bad_input() {
+        assert_eq!(hex_encode(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+        assert_eq!(hex_decode("000FA0ff"), Some(vec![0x00, 0x0f, 0xa0, 0xff]));
+        assert_eq!(hex_decode(""), Some(vec![]));
+        assert_eq!(hex_decode("abc"), None, "odd length");
+        assert_eq!(hex_decode("zz"), None, "non-hex digit");
+        assert_eq!(hex_decode("0x00"), None, "prefix is not accepted here");
+    }
+
+    #[test]
+    fn addresses_parse_and_format() {
+        let text = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+        let address = parse_address(text).unwrap();
+        assert_eq!(format_address(&address), text.to_lowercase());
+        assert_eq!(parse_address(&text.to_lowercase()), Some(address));
+        assert_eq!(parse_address(&text[2..]), None, "needs the 0x prefix");
+        assert_eq!(parse_address("0x1234"), None, "too short");
+        assert_eq!(parse_address(&format!("{text}00")), None, "too long");
+        assert_eq!(parse_address(&format!("0x{}", "g".repeat(40))), None);
     }
 }
