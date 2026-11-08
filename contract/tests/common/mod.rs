@@ -10,6 +10,7 @@ use near_sdk::serde::de::DeserializeOwned;
 use near_sdk::serde_json::{json, Value};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::types::Gas;
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use tokio::sync::OnceCell;
 
@@ -22,30 +23,54 @@ pub const PER_TX_CAP: u128 = 50;
 pub const WINDOW_LIMIT: u128 = 100;
 
 static WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
+static MOCK_FT_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
+
+/// Builds a contract crate with `cargo near`, into its own target directory so
+/// it never disturbs the production build.
+fn build_wasm(manifest_dir: &str, extra_args: &[&str], wasm_name: &str) -> Vec<u8> {
+    let out_dir = format!("{manifest_dir}/target/test-wasm");
+    let status = Command::new("cargo")
+        .args([
+            "near",
+            "build",
+            "non-reproducible-wasm",
+            "--locked",
+            "--no-abi",
+        ])
+        .args(extra_args)
+        .args(["--out-dir", &out_dir])
+        .env(
+            "CARGO_TARGET_DIR",
+            format!("{manifest_dir}/target/test-build"),
+        )
+        .current_dir(manifest_dir)
+        .status()
+        .expect("cargo near must be installed");
+    assert!(status.success(), "building {wasm_name} failed");
+    std::fs::read(format!("{out_dir}/{wasm_name}")).expect("built wasm missing")
+}
 
 async fn contract_wasm() -> &'static Vec<u8> {
     WASM.get_or_init(|| async {
-        let out_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-wasm");
-        let status = Command::new("cargo")
-            .args(["near", "build", "non-reproducible-wasm", "--locked"])
-            .args([
-                "--features",
-                "test-helpers",
-                "--no-abi",
-                "--out-dir",
-                out_dir,
-            ])
-            .env(
-                "CARGO_TARGET_DIR",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-build"),
-            )
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .status()
-            .expect("cargo near must be installed");
-        assert!(status.success(), "building the test wasm failed");
-        std::fs::read(format!("{out_dir}/minder.wasm")).expect("test wasm missing")
+        build_wasm(
+            env!("CARGO_MANIFEST_DIR"),
+            &["--features", "test-helpers"],
+            "minder.wasm",
+        )
     })
     .await
+}
+
+async fn mock_ft_wasm() -> &'static Vec<u8> {
+    MOCK_FT_WASM
+        .get_or_init(|| async {
+            build_wasm(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../test-contracts/mock-ft"),
+                &[],
+                "mock_ft.wasm",
+            )
+        })
+        .await
 }
 
 pub fn near() -> Value {
@@ -128,6 +153,51 @@ impl Fixture {
             )
             .await;
         fixture
+    }
+
+    /// Deploys the mock NEP-141 token and returns it with its asset JSON.
+    pub async fn deploy_token(&self) -> (Contract, Value) {
+        let token = self.worker.dev_deploy(mock_ft_wasm().await).await.unwrap();
+        token
+            .call("new")
+            .transact()
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap();
+        let asset = json!({ "Nep141": token.id() });
+        (token, asset)
+    }
+
+    pub async fn set_policy(&self, asset: Value, per_tx_cap: u128, window_limit: u128) {
+        self.owner_ok(
+            "set_asset_policy",
+            json!({ "asset": asset, "per_tx_cap": per_tx_cap.to_string(), "window_limit": window_limit.to_string() }),
+        )
+        .await;
+    }
+
+    /// The agent asks for a transfer to `recipient`, with ample gas.
+    pub async fn request_transfer(
+        &self,
+        asset: Value,
+        amount: u128,
+        recipient: &AccountId,
+    ) -> ExecutionFinalResult {
+        self.agent
+            .call(self.contract.id(), "request_local_transfer")
+            .args_json(
+                json!({ "asset": asset, "amount": amount.to_string(), "recipient": recipient }),
+            )
+            .gas(Gas::from_tgas(300))
+            .transact()
+            .await
+            .unwrap()
+    }
+
+    pub async fn reserved(&self, asset: Value) -> u128 {
+        let reserved: String = self.view("get_reserved", json!({ "asset": asset })).await;
+        reserved.parse().unwrap()
     }
 
     pub async fn call(&self, who: &Account, method: &str, args: Value) -> ExecutionFinalResult {

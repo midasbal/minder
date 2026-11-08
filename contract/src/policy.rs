@@ -16,8 +16,16 @@ pub struct EvalInput<'a> {
     pub policy: Option<&'a AssetPolicy>,
     pub recipient_allowed: bool,
     pub amount: u128,
-    /// Spend already committed inside the live window for this asset.
-    pub live_spend: u128,
+    /// Spend counted against the window limit: committed spend plus in-flight
+    /// reservations. See [`effective_spend`].
+    pub effective_spend: u128,
+}
+
+/// What the window limit is checked against: spend already committed inside
+/// the live window plus amounts reserved for transfers still in flight.
+/// Saturates, so an impossible overflow fails closed (over any limit).
+pub fn effective_spend(committed_live: u128, reserved: u128) -> u128 {
+    committed_live.saturating_add(reserved)
 }
 
 /// Checks run in a fixed order, from the broadest gate to the narrowest limit,
@@ -57,7 +65,7 @@ fn deny_reason(input: &EvalInput) -> Option<DenyReason> {
         return Some(DenyReason::PerTxCapExceeded);
     }
     // An overflowing total is over any limit.
-    match input.live_spend.checked_add(input.amount) {
+    match input.effective_spend.checked_add(input.amount) {
         Some(total) if total <= policy.window_limit.0 => None,
         _ => Some(DenyReason::WindowLimitExceeded),
     }
@@ -97,7 +105,7 @@ mod tests {
             policy: Some(&POLICY),
             recipient_allowed: true,
             amount: 5,
-            live_spend: 0,
+            effective_spend: 0,
         };
         adjust(&mut input);
         evaluate(&input)
@@ -118,14 +126,29 @@ mod tests {
         assert_eq!(
             run(|i| {
                 i.amount = 10;
-                i.live_spend = 15;
+                i.effective_spend = 15;
             }),
             Decision::Allow
         );
         assert_eq!(
             run(|i| {
                 i.amount = 10;
-                i.live_spend = 16;
+                i.effective_spend = 16;
+            }),
+            Decision::Deny(DenyReason::WindowLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn effective_spend_includes_reservations() {
+        assert_eq!(effective_spend(10, 5), 15);
+        assert_eq!(effective_spend(0, 7), 7);
+        assert_eq!(effective_spend(u128::MAX, 1), u128::MAX);
+        // A reservation alone can use up the window limit.
+        assert_eq!(
+            run(|i| {
+                i.amount = 10;
+                i.effective_spend = effective_spend(0, 16);
             }),
             Decision::Deny(DenyReason::WindowLimitExceeded)
         );
@@ -134,7 +157,7 @@ mod tests {
     #[test]
     fn overflowing_total_is_denied() {
         assert_eq!(
-            run(|i| i.live_spend = u128::MAX),
+            run(|i| i.effective_spend = u128::MAX),
             Decision::Deny(DenyReason::WindowLimitExceeded)
         );
     }

@@ -1,14 +1,19 @@
-//! Minder policy core: owner-managed limits, allowlists and a time-boxed agent
-//! mandate, with a single pure evaluation function. This module moves no value
-//! and signs nothing.
+//! Minder: owner-managed limits, allowlists and a time-boxed agent mandate,
+//! enforced by a single pure evaluation function. The agent moves value on NEAR
+//! only through `request_local_transfer`, which reserves budget before the
+//! transfer and settles it in a callback. Nothing here signs for other chains.
 
 pub mod policy;
 pub mod types;
 pub mod window;
 
 use near_sdk::json_types::{U128, U64};
+use near_sdk::serde_json::json;
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
-use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
+use near_sdk::{
+    env, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError,
+};
 
 pub use types::{AssetId, AssetPolicy, Config, Decision, DenyReason, Mandate, Status};
 
@@ -19,12 +24,19 @@ use window::SpendRing;
 const MAX_NUM_BUCKETS: u32 = 64;
 const MAX_PAGE_SIZE: u32 = 100;
 
+/// Gas for the token's `ft_transfer`. Gas for the settlement callback is
+/// reserved separately and up front: if the callback could run out of gas the
+/// reservation would never be released.
+const FT_TRANSFER_GAS: Gas = Gas::from_tgas(30);
+const SETTLE_CALLBACK_GAS: Gas = Gas::from_tgas(15);
+
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
     Policies,
     Recipients,
     Spend,
+    Reserved,
 }
 
 #[near(contract_state)]
@@ -40,6 +52,10 @@ pub struct Minder {
     /// Spend history is kept when a policy is removed, so removing and
     /// re-adding a policy cannot reset the window.
     spend: LookupMap<AssetId, SpendRing>,
+    /// Amount per asset reserved for transfers still in flight. Kept apart
+    /// from `spend`: it is added when a transfer is requested and removed when
+    /// its callback runs, whatever the outcome.
+    reserved: LookupMap<AssetId, u128>,
 }
 
 #[near]
@@ -75,6 +91,7 @@ impl Minder {
             policies: IterableMap::new(StorageKey::Policies),
             recipients: IterableSet::new(StorageKey::Recipients),
             spend: LookupMap::new(StorageKey::Spend),
+            reserved: LookupMap::new(StorageKey::Reserved),
         }
     }
 
@@ -147,11 +164,67 @@ impl Minder {
         self.config.status = Status::Active;
     }
 
+    // ---- Agent ----
+
+    /// Moves `amount` of `asset` from this contract to `recipient`, if policy
+    /// allows. A denial reverts, so nothing changes. On allow, the amount is
+    /// reserved before the transfer promise exists, so any later call already
+    /// counts it. The reservation persists only because this method returns
+    /// the promise; `on_transfer_complete` releases it.
+    pub fn request_local_transfer(
+        &mut self,
+        asset: AssetId,
+        amount: U128,
+        recipient: AccountId,
+    ) -> Promise {
+        let caller = env::predecessor_account_id();
+        if let Decision::Deny(reason) = self.evaluate_request(&caller, &asset, amount.0, &recipient)
+        {
+            env::panic_str(&format!("Denied: {reason:?}"));
+        }
+
+        self.reserve(&asset, amount.0);
+
+        let transfer = match &asset {
+            AssetId::Near => Promise::new(recipient).transfer(NearToken::from_yoctonear(amount.0)),
+            // Plain `ft_transfer` with the 1 yoctoNEAR the standard requires;
+            // never `ft_transfer_call`, which would hand control to the recipient.
+            AssetId::Nep141(token) => Promise::new(token.clone()).function_call(
+                "ft_transfer".to_string(),
+                json!({ "receiver_id": recipient, "amount": amount, "memo": null })
+                    .to_string()
+                    .into_bytes(),
+                NearToken::from_yoctonear(1),
+                FT_TRANSFER_GAS,
+            ),
+        };
+        transfer.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(SETTLE_CALLBACK_GAS)
+                .on_transfer_complete(asset, amount),
+        )
+    }
+
+    /// Settles a transfer started by `request_local_transfer`. Must never
+    /// panic, or the reservation would be stranded: it releases the
+    /// reservation first and unconditionally, then commits the spend unless
+    /// the transfer definitely failed. A result that is merely unexpected (for
+    /// instance a token returning data) still counts as spent, because
+    /// over-counting is safe and under-counting is not.
+    #[private]
+    pub fn on_transfer_complete(&mut self, asset: AssetId, amount: U128) {
+        self.release(&asset, amount.0);
+        if !matches!(env::promise_result_checked(0, 0), Err(PromiseError::Failed)) {
+            self.record_spend(&asset, amount.0);
+        }
+    }
+
     // ---- Views ----
 
-    /// Evaluates a hypothetical action as `caller` would experience it. A view
-    /// has no authenticated caller, so the agent identity is an argument; the
-    /// real action path will pass the predecessor account instead.
+    /// Evaluates a hypothetical action as `caller` would experience it,
+    /// counting in-flight reservations. A view has no authenticated caller, so
+    /// the agent identity is an argument; `request_local_transfer` uses the
+    /// predecessor account instead.
     pub fn dry_run(
         &self,
         caller: AccountId,
@@ -211,19 +284,19 @@ impl Minder {
         U128(self.live_spend(&asset))
     }
 
+    /// Amount of `asset` reserved for transfers still in flight.
+    pub fn get_reserved(&self, asset: AssetId) -> U128 {
+        U128(self.reserved_of(&asset))
+    }
+
     // ---- Test support ----
 
-    /// Records spend into the current slot. Compiled only with the
-    /// `test-helpers` feature; stands in for the settle step added later.
+    /// Seeds committed spend without moving value. Compiled only with the
+    /// `test-helpers` feature.
     #[cfg(feature = "test-helpers")]
     pub fn test_record_spend(&mut self, asset: AssetId, amount: U128) {
         self.assert_owner();
-        let (now, slot_len) = (env::block_timestamp(), self.slot_len());
-        let num_buckets = self.config.num_buckets;
-        self.spend
-            .entry(asset)
-            .or_insert_with(|| SpendRing::new(num_buckets))
-            .record(now, slot_len, amount.0);
+        self.record_spend(&asset, amount.0);
     }
 }
 
@@ -239,13 +312,44 @@ impl Minder {
         self.config.window_len.0 / u64::from(self.config.num_buckets)
     }
 
+    /// Committed spend inside the live window.
     fn live_spend(&self, asset: &AssetId) -> u128 {
         self.spend.get(asset).map_or(0, |ring| {
             ring.live_sum(env::block_timestamp(), self.slot_len())
         })
     }
 
-    /// Gathers state and defers every decision to [`policy::evaluate`].
+    fn reserved_of(&self, asset: &AssetId) -> u128 {
+        self.reserved.get(asset).copied().unwrap_or(0)
+    }
+
+    fn reserve(&mut self, asset: &AssetId, amount: u128) {
+        let total = self.reserved_of(asset).saturating_add(amount);
+        self.reserved.insert(asset.clone(), total);
+    }
+
+    /// Saturating, so a release can never panic.
+    fn release(&mut self, asset: &AssetId, amount: u128) {
+        let remaining = self.reserved_of(asset).saturating_sub(amount);
+        if remaining == 0 {
+            self.reserved.remove(asset);
+        } else {
+            self.reserved.insert(asset.clone(), remaining);
+        }
+    }
+
+    /// Commits spend into the window slot containing the current block.
+    fn record_spend(&mut self, asset: &AssetId, amount: u128) {
+        let (now, slot_len) = (env::block_timestamp(), self.slot_len());
+        let num_buckets = self.config.num_buckets;
+        self.spend
+            .entry(asset.clone())
+            .or_insert_with(|| SpendRing::new(num_buckets))
+            .record(now, slot_len, amount);
+    }
+
+    /// Gathers state and defers every decision to [`policy::evaluate`]. Used
+    /// by both `dry_run` and `request_local_transfer`.
     fn evaluate_request(
         &self,
         caller: &AccountId,
@@ -261,7 +365,10 @@ impl Minder {
             policy: self.policies.get(asset),
             recipient_allowed: self.recipients.contains(recipient),
             amount,
-            live_spend: self.live_spend(asset),
+            effective_spend: policy::effective_spend(
+                self.live_spend(asset),
+                self.reserved_of(asset),
+            ),
         })
     }
 }
@@ -271,3 +378,6 @@ fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize) {
     let take = limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE) as usize;
     (skip, take)
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

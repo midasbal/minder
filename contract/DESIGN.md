@@ -1,8 +1,8 @@
-# Minder policy core: design
+# Minder: design
 
-Scope of this chunk: pure policy state and evaluation. It moves no value and
-signs nothing. The reservation lifecycle and the cross-chain signing gate come
-later and will call the same `evaluate` function.
+Scope so far: pure policy state and evaluation, and the local NEAR enforcement path (the agent moves
+NEAR or NEP-141 tokens held by this contract, gated by policy, with a reserve/settle/release
+lifecycle). The cross-chain signing gate and access-key mandates are not built yet.
 
 ## Layout
 
@@ -11,7 +11,9 @@ later and will call the same `evaluate` function.
 | `src/types.rs` | `AssetId`, `Status`, `Config`, `AssetPolicy`, `Mandate`, `DenyReason`, `Decision` |
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
-| `src/lib.rs` | Contract state, owner-only methods, views. Gathers state into `EvalInput` and calls `evaluate` |
+| `src/lib.rs` | Contract state, owner-only methods, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate` |
+| `src/lifecycle_tests.rs` | Unit tests for reserve, dispatch and settlement under the mocked environment |
+| `../test-contracts/mock-ft` | Test double for a NEP-141 token (records `ft_transfer`, can fail or stretch it over blocks). Never deployed |
 
 ## State
 
@@ -22,7 +24,8 @@ later and will call the same `evaluate` function.
 | `last_mandate_epoch` | `u64` | Incremented on every grant, never reset, so epochs are never reused |
 | `policies` | `IterableMap<AssetId, AssetPolicy>` | Having an entry allowlists the asset |
 | `recipients` | `IterableSet<AccountId>` | Allowed recipients |
-| `spend` | `LookupMap<AssetId, SpendRing>` | Per-asset window accounting |
+| `spend` | `LookupMap<AssetId, SpendRing>` | Per-asset committed window accounting |
+| `reserved` | `LookupMap<AssetId, u128>` | Per-asset amount reserved for transfers still in flight. Absent means zero |
 
 `AssetId` is `Near | Nep141(AccountId)`. The EVM variant is appended later.
 
@@ -51,18 +54,58 @@ internal.
   two slots.
 - **Overflow:** sums saturate. A saturated value exceeds every limit, so it fails closed.
 
+## Effective spend and the reserved counter
+
+`reserved[asset]` is the sum of amounts for transfers that have been requested and not yet settled.
+It is kept apart from the window ring, which holds only committed spend.
+
+**Effective spend = `ring.live_sum(now) + reserved[asset]`** (saturating). It is the only spend figure
+`evaluate` sees (`EvalInput.effective_spend`, built by `policy::effective_spend`). `dry_run` and
+`request_local_transfer` both go through `Minder::evaluate_request`, so a view always agrees with the
+real path, in-flight reservations included. `get_live_spend` still reports committed spend only;
+`get_reserved` reports the reservation.
+
+## Reservation lifecycle
+
+`request_local_transfer(asset, amount, recipient)` is called by the agent:
+
+1. Build the evaluation input (caller is the predecessor) and call `evaluate`. On `Deny` the method
+   panics with `Denied: <Reason>`, so nothing is reserved and no promise exists.
+2. On `Allow`, `reserved[asset] += amount` (saturating) **before any promise is created**. A call that
+   interleaves later, in a later receipt, therefore already sees the reservation. This is what stops
+   a burst of requests from each passing the limit against the same unspent budget.
+3. Dispatch the transfer: `AssetId::Near` is a native `Promise::transfer`; `AssetId::Nep141(token)`
+   is a plain `ft_transfer` on `token` with 1 yoctoNEAR. Never `ft_transfer_call`.
+4. Chain `on_transfer_complete(asset, amount)` with `.then` and return the promise.
+
+The reservation exists on chain only if the method returns normally. Any panic after step 2 (for
+example the promise cannot be created for lack of gas) reverts the whole receipt, reservation
+included.
+
+`on_transfer_complete` is `#[private]` (the predecessor must be the contract account) and **must
+never panic**, because a panic would leave `reserved` inflated for good. In order:
+
+1. `reserved[asset] -= amount`, saturating, unconditionally. The entry is removed at zero.
+2. Read the transfer result. Unless it is a definite failure, `ring.record(now, slot_len, amount)`
+   commits the spend into the window at settle time.
+
+Steps 1 and 2 are one receipt, so effective spend does not move when a transfer succeeds: the amount
+leaves `reserved` and enters the ring atomically. On failure it leaves `reserved` and enters nothing,
+which returns the budget. NEAR runs a callback exactly once, and the code relies on that for
+exactly-once settlement.
+
 ## Evaluation order
 
 The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevoked`,
 `MandateExpired` (`now >= expiry`), `NotAuthorized` (caller is not the mandated agent),
 `AssetNotAllowed`, `RecipientNotAllowed`, `PerTxCapExceeded` (`amount > cap`),
-`WindowLimitExceeded` (`live_spend + amount > limit`, or overflow).
+`WindowLimitExceeded` (`effective_spend + amount > limit`, or overflow).
 
 ## Choices that need your review
 
 - **`dry_run` takes a `caller` argument** (spec: `asset, amount, recipient`). A view has no
-  authenticated caller, so without it `NotAuthorized` could never be produced. The real action
-  path will pass the predecessor.
+  authenticated caller, so without it `NotAuthorized` could never be produced.
+  `request_local_transfer` passes the predecessor instead.
 - **The agent is an `AccountId`**, not an access key. Key-based mandates (function-call key on the
   contract account) are a later chunk.
 - **`init` caller:** must be the owner or the contract account itself, so nobody else can claim
@@ -77,14 +120,33 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
 - **Dependency pins:** `near-sdk =5.29.1` and `near-workspaces =0.23.0`, with `near-sdk-env 0.1.6`
   and `near-sys 0.2.14` in `Cargo.lock`. Newer releases require rustc 1.95; this environment has
   1.94.1.
-- **`test-helpers` feature** adds the owner-only `test_record_spend`, which stands in for the
-  settle step. The integration suite builds its own wasm with it. `cargo near build` without
-  the feature does not export it (checked).
+- **`test-helpers` feature** adds the owner-only `test_record_spend`, which seeds committed spend
+  without moving value. The integration suite builds its own wasm with it. `cargo near build`
+  without the feature does not export it (checked).
+- **Commit unless the transfer definitely failed.** The callback skips the commit only for
+  `PromiseError::Failed`. A success with an unexpected payload (`TooLong`) still commits. Over-counting
+  merely tightens the budget for one window; forgetting a transfer that happened would let the limit
+  be exceeded.
+- **Callback gas is fixed and reserved up front:** 30 Tgas for `ft_transfer` and 15 Tgas for
+  `on_transfer_complete`. The request needs at least their sum plus its own cost prepaid (about 50
+  Tgas); with less, promise creation fails and the whole request reverts. The callback's work (a few
+  storage reads and writes, one ring of at most 65 buckets) is far below 15 Tgas, so it cannot run
+  out and strand a reservation.
+- **Funds live in this contract.** Native transfers pay from the contract's own balance, and a
+  transfer that would breach the storage-staking floor fails like any other failed transfer. Nothing
+  here funds or withdraws; that is owner tooling for later.
+- **Freezing or removing a policy does not recall in-flight transfers.** They were allowed when
+  requested and are already dispatched; their callbacks still settle. Only new requests are denied.
+- **The commit slot is the settle slot,** not the request slot. The reservation covers the gap, so
+  effective spend never dips between request and settlement.
+- **`request_local_transfer` is not payable,** so near-sdk rejects any attached deposit.
+- **`EvalInput.live_spend` was renamed `effective_spend`** to say what it now holds.
 
 ## Invariant to test map
 
-Unit tests are in `src/window.rs` and `src/policy.rs`. Integration tests are in
-`tests/invariants.rs` and run against a near-workspaces sandbox.
+Unit tests are in `src/window.rs`, `src/policy.rs` and `src/lifecycle_tests.rs`. Integration tests
+are in `tests/invariants.rs` (policy) and `tests/transfers.rs` (local transfer path), and run against
+a near-workspaces sandbox.
 
 | Invariant | Test |
 | --- | --- |
@@ -102,6 +164,16 @@ Unit tests are in `src/window.rs` and `src/policy.rs`. Integration tests are in
 | Expired stays expired until an explicit new grant; past expiry cannot be granted | `expired_mandate_stays_expired_until_a_new_grant`; unit `policy::expiry_is_exclusive_of_the_expiry_instant` |
 | Frozen denies everything until `unfreeze` | `frozen_contract_denies_everything_until_unfrozen`; unit `policy::frozen_outranks_every_other_check` |
 | Getters report state | `getters_report_configuration` |
+| Effective spend includes reservations | unit `policy::effective_spend_includes_reservations` |
+| TOCTOU: a reservation is counted before the promise exists, so later calls see it | unit `lifecycle_tests::reservation_is_visible_before_the_callback_runs`, `a_call_made_while_another_is_in_flight_cannot_exceed_the_limit`; sandbox `transfers::reservation_is_visible_and_binding_while_the_transfer_is_in_flight` (observes the reservation mid-flight, `dry_run` honours it) |
+| Reservations are per asset | unit `lifecycle_tests::reservations_are_tracked_per_asset` |
+| Dispatch: native `transfer`, plain `ft_transfer` with 1 yocto, never `ft_transfer_call`, callback args and gas | unit `lifecycle_tests::native_request_creates_a_transfer_then_a_private_callback`, `token_request_calls_plain_ft_transfer_with_one_yocto`; sandbox `transfers::token_transfer_calls_ft_transfer_and_commits_the_spend_once` (mock insists on 1 yocto and has no `ft_transfer_call`) |
+| Exactly-once settlement: a successful transfer commits the amount once | unit `lifecycle_tests::successful_transfer_moves_the_reservation_into_the_window_once`; sandbox `transfers::native_transfer_pays_the_recipient_and_commits_the_spend_once`, `token_transfer_calls_ft_transfer_and_commits_the_spend_once` |
+| Clean reversion: a failed transfer commits nothing and the budget returns | unit `lifecycle_tests::failed_transfer_releases_the_reservation_and_commits_nothing`; sandbox `transfers::failed_native_transfer_restores_the_budget` (nonexistent recipient), `failed_token_transfer_restores_the_budget` (mock `ft_transfer` panics) |
+| Callback never panics, and never over-releases | unit `lifecycle_tests::settlement_never_panics_even_if_it_releases_more_than_is_reserved`, `settlement_is_independent_of_policy_changes_made_in_flight` |
+| Ambiguous success still counts as spent | unit `lifecycle_tests::an_unexpected_success_payload_still_counts_as_spent` |
+| No stranded reservation: a denied or reverted request leaves `reserved` unchanged | unit `lifecycle_tests::a_denied_request_reserves_nothing`; sandbox `transfers::denied_request_reverts_and_reserves_nothing`, `request_without_gas_for_the_callback_reverts_and_reserves_nothing` |
+| Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
 boundary.
@@ -110,5 +182,5 @@ boundary.
 
 ```
 cargo near build non-reproducible-wasm --locked   # production wasm, no test helper
-cargo test                                        # unit + sandbox tests; builds a test wasm itself
+cargo test                                        # unit + sandbox tests; builds the test wasms itself
 ```
