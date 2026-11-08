@@ -164,6 +164,48 @@ impl Minder {
         self.config.status = Status::Active;
     }
 
+    /// Sends `amount` of `asset` from this contract to `to`. Owner recovery:
+    /// it works in any status, including `Frozen`, and is deliberately outside
+    /// policy. It checks no cap or allowlist, and neither reads nor changes
+    /// `reserved` or the spend window. No callback: a failed transfer fails
+    /// the returned promise and there is no accounting to undo. Minder contains
+    /// the agent, not the owner.
+    pub fn owner_withdraw(&mut self, asset: AssetId, amount: U128, to: AccountId) -> Promise {
+        self.assert_owner();
+        Self::transfer_promise(&asset, amount, to)
+    }
+
+    // ---- Funding ----
+
+    /// Receives an attached NEAR deposit, which is credited to this contract's
+    /// balance by the runtime. Exists to make funding explicit; open to anyone,
+    /// since it only adds funds.
+    #[payable]
+    pub fn deposit(&mut self) {
+        let attached = env::attached_deposit();
+        require!(!attached.is_zero(), "Attach a deposit");
+        env::log_str(&format!(
+            "deposit {} yoctoNEAR from {}",
+            attached.as_yoctonear(),
+            env::predecessor_account_id()
+        ));
+    }
+
+    /// NEP-141 receiver hook, called by a token on `ft_transfer_call`. Returns
+    /// the amount not accepted. Tokens are accepted only from a token that has
+    /// a policy, so this contract does not take on arbitrary tokens; any other
+    /// caller gets everything back. The caller here is the token contract, not
+    /// the sender, so `sender_id` and `msg` carry no authority and are ignored.
+    pub fn ft_on_transfer(&self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
+        let _ = (sender_id, msg);
+        let token = AssetId::Nep141(env::predecessor_account_id());
+        if self.policies.contains_key(&token) {
+            U128(0)
+        } else {
+            amount
+        }
+    }
+
     // ---- Agent ----
 
     /// Moves `amount` of `asset` from this contract to `recipient`, if policy
@@ -185,19 +227,7 @@ impl Minder {
 
         self.reserve(&asset, amount.0);
 
-        let transfer = match &asset {
-            AssetId::Near => Promise::new(recipient).transfer(NearToken::from_yoctonear(amount.0)),
-            // Plain `ft_transfer` with the 1 yoctoNEAR the standard requires;
-            // never `ft_transfer_call`, which would hand control to the recipient.
-            AssetId::Nep141(token) => Promise::new(token.clone()).function_call(
-                "ft_transfer".to_string(),
-                json!({ "receiver_id": recipient, "amount": amount, "memo": null })
-                    .to_string()
-                    .into_bytes(),
-                NearToken::from_yoctonear(1),
-                FT_TRANSFER_GAS,
-            ),
-        };
+        let transfer = Self::transfer_promise(&asset, amount, recipient);
         transfer.then(
             Self::ext(env::current_account_id())
                 .with_static_gas(SETTLE_CALLBACK_GAS)
@@ -301,6 +331,24 @@ impl Minder {
 }
 
 impl Minder {
+    /// The transfer itself, shared by the agent path and owner withdrawal:
+    /// a native transfer, or a plain `ft_transfer` with the 1 yoctoNEAR the
+    /// standard requires. Never `ft_transfer_call`, which would hand control
+    /// to the recipient.
+    fn transfer_promise(asset: &AssetId, amount: U128, recipient: AccountId) -> Promise {
+        match asset {
+            AssetId::Near => Promise::new(recipient).transfer(NearToken::from_yoctonear(amount.0)),
+            AssetId::Nep141(token) => Promise::new(token.clone()).function_call(
+                "ft_transfer".to_string(),
+                json!({ "receiver_id": recipient, "amount": amount, "memo": null })
+                    .to_string()
+                    .into_bytes(),
+                NearToken::from_yoctonear(1),
+                FT_TRANSFER_GAS,
+            ),
+        }
+    }
+
     fn assert_owner(&self) {
         require!(
             env::predecessor_account_id() == self.config.owner,
@@ -380,4 +428,8 @@ fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize) {
 }
 
 #[cfg(test)]
+mod custody_tests;
+#[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod test_support;

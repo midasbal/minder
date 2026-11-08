@@ -4,48 +4,14 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::U128;
 use near_sdk::mock::MockAction;
-use near_sdk::serde_json::{json, Value};
-use near_sdk::test_utils::{get_created_receipts, VMContextBuilder};
-use near_sdk::{testing_env, AccountId, Gas, NearToken, PromiseResult, RuntimeFeesConfig};
+use near_sdk::serde_json::json;
+use near_sdk::test_utils::get_created_receipts;
+use near_sdk::{testing_env, Gas, NearToken, PromiseResult, RuntimeFeesConfig};
 
+use crate::test_support::*;
 use crate::{AssetId, Decision, DenyReason, Minder};
-
-const PER_TX_CAP: u128 = 50;
-const WINDOW_LIMIT: u128 = 100;
-
-fn account(name: &str) -> AccountId {
-    name.parse().unwrap()
-}
-
-fn token() -> AssetId {
-    AssetId::Nep141(account("usdc.near"))
-}
-
-fn context(predecessor: &str) -> VMContextBuilder {
-    let mut builder = VMContextBuilder::new();
-    builder
-        .current_account_id(account("minder.near"))
-        .predecessor_account_id(account(predecessor))
-        .block_timestamp(1_000_000)
-        .prepaid_gas(Gas::from_tgas(300));
-    builder
-}
-
-/// Initialized, with policies for NEAR and a token, an allowed recipient and a
-/// mandate for `agent.near`. The environment is left as the agent.
-fn armed_as_agent() -> Minder {
-    testing_env!(context("owner.near").build());
-    let mut minder = Minder::init(account("owner.near"), U64(400), 4);
-    for asset in [AssetId::Near, token()] {
-        minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT));
-    }
-    minder.set_recipient(account("bob.near"), true);
-    minder.grant_mandate(account("agent.near"), U64(u64::MAX));
-    testing_env!(context("agent.near").build());
-    minder
-}
 
 /// Runs the settlement callback as the contract itself, with the given
 /// result for the transfer promise, then returns the environment to the agent.
@@ -72,14 +38,6 @@ fn dry_run(minder: &Minder, asset: AssetId, amount: u128) -> Decision {
         U128(amount),
         account("bob.near"),
     )
-}
-
-fn reserved(minder: &Minder, asset: AssetId) -> u128 {
-    minder.get_reserved(asset).0
-}
-
-fn committed(minder: &Minder, asset: AssetId) -> u128 {
-    minder.get_live_spend(asset).0
 }
 
 // ---- Reservation ----
@@ -271,38 +229,6 @@ fn settlement_is_independent_of_policy_changes_made_in_flight() {
 }
 
 // ---- Helpers ----
-
-struct FunctionCall {
-    args: Value,
-    deposit: NearToken,
-    gas: Gas,
-}
-
-fn function_call(
-    receipts: &[near_sdk::mock::Receipt],
-    receiver: &str,
-    method: &str,
-) -> FunctionCall {
-    receipts
-        .iter()
-        .filter(|receipt| receipt.receiver_id == account(receiver))
-        .flat_map(|receipt| &receipt.actions)
-        .find_map(|action| match action {
-            MockAction::FunctionCallWeight {
-                method_name,
-                args,
-                attached_deposit,
-                prepaid_gas,
-                ..
-            } if method_name == method.as_bytes() => Some(FunctionCall {
-                args: near_sdk::serde_json::from_slice(args).unwrap(),
-                deposit: *attached_deposit,
-                gas: *prepaid_gas,
-            }),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no {method} call to {receiver}"))
-}
 
 fn panic_message(result: std::thread::Result<()>) -> String {
     let payload = result.expect_err("expected a panic");
