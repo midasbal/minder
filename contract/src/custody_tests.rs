@@ -97,12 +97,7 @@ fn owner_withdraw_does_not_touch_accounting() {
     let mut minder = armed_as_agent();
     let _ = minder.request_local_transfer(AssetId::Near, U128(40), account("bob.near"));
     let dry_run = |minder: &crate::Minder| {
-        minder.dry_run(
-            account("agent.near"),
-            AssetId::Near,
-            U128(61),
-            account("bob.near"),
-        )
+        minder.dry_run(agent_key(), AssetId::Near, U128(61), account("bob.near"))
     };
     assert_eq!(reserved(&minder, AssetId::Near), 40);
     let budget_before = dry_run(&minder);
@@ -182,12 +177,7 @@ fn ft_on_transfer_does_not_change_accounting() {
     assert_eq!(reserved(&minder, token()), 30);
     assert_eq!(committed(&minder, token()), 0);
     assert_eq!(
-        minder.dry_run(
-            account("agent.near"),
-            token(),
-            U128(50),
-            account("bob.near")
-        ),
+        minder.dry_run(agent_key(), token(), U128(50), account("bob.near")),
         Decision::Allow
     );
 }

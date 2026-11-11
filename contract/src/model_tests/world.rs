@@ -18,7 +18,9 @@ use near_sdk::json_types::{U128, U64};
 use near_sdk::mock::MockAction;
 use near_sdk::serde_json::{json, Value};
 use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
-use near_sdk::{env, Gas, MockedBlockchain, PromiseResult, RuntimeFeesConfig, VMContext};
+use near_sdk::{
+    env, Gas, MockedBlockchain, PromiseResult, PublicKey, RuntimeFeesConfig, VMContext,
+};
 
 use crate::evm::{self, Eip1559Tx};
 use crate::test_support::{
@@ -27,14 +29,13 @@ use crate::test_support::{
 use crate::types::{Decision, Status};
 use crate::{AssetId, Minder};
 
-use super::actions::{Action, Asset, Outcome, Pick, Recipient, ASSETS};
+use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, ASSETS};
 use super::model::{Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
     MAX_PRIORITY_FEE, NEAR_ALLOWED, NEAR_DISALLOWED, NUM_BUCKETS, T0, WINDOW_LEN,
 };
 
-const AGENT: &str = "agent.near";
 const OWNER: &str = "owner.near";
 const CONTRACT: &str = "minder.near";
 const SIGNER: &str = "signer.near";
@@ -88,7 +89,7 @@ pub struct World {
 impl World {
     /// Initialized, armed for both assets, with a long mandate.
     pub fn boot() -> World {
-        set_env(context(OWNER, T0), Vec::new(), HashMap::new());
+        set_env(context(OWNER, T0, None), Vec::new(), HashMap::new());
         let mut minder = Minder::init(account(OWNER), U64(WINDOW_LEN), NUM_BUCKETS);
         for asset in ASSETS {
             let policy = super::model::Policy::of(super::actions::PolicyVariant::Default);
@@ -105,7 +106,7 @@ impl World {
             U128(MAX_PRIORITY_FEE),
             Some(GAS_LIMIT),
         );
-        minder.grant_mandate(account(AGENT), U64(T0 + LONG_MANDATE));
+        minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE));
         World {
             storage: persist(minder),
             model: Model::new(T0, T0 + LONG_MANDATE),
@@ -154,18 +155,26 @@ impl World {
                 },
             )
         });
-        let (caller, promise_results) = match (action, delivery) {
+        // The agent calls through its function-call key on the contract's own
+        // account: the contract is the predecessor and the key is what tells
+        // the agent from anyone else.
+        let (caller, signer_key, promise_results) = match (action, delivery) {
             (Action::Request { .. } | Action::Advance(_), _) | (Action::Deliver { .. }, None) => {
-                (AGENT, Vec::new())
+                (CONTRACT, Some(agent_key(model.mandate.key)), Vec::new())
             }
-            (Action::Deliver { .. }, Some((index, outcome))) => {
-                (CONTRACT, vec![promise_result(&model.queue[index], outcome)])
+            (Action::StaleKeyRequest(_), _) => {
+                (CONTRACT, Some(agent_key(model.stale_key())), Vec::new())
             }
-            _ => (OWNER, Vec::new()),
+            (Action::Deliver { .. }, Some((index, outcome))) => (
+                CONTRACT,
+                None,
+                vec![promise_result(&model.queue[index], outcome)],
+            ),
+            _ => (OWNER, None, Vec::new()),
         };
 
         set_env(
-            context(caller, model.now),
+            context(caller, model.now, signer_key),
             promise_results,
             self.storage.clone(),
         );
@@ -181,6 +190,18 @@ impl World {
                 amount.outlay(),
                 amount.evm_value(),
                 to,
+                false,
+            )?,
+            // A mid-sized request to an allowed recipient, so that only the
+            // key can be the reason for a denial.
+            Action::StaleKeyRequest(asset) => request(
+                &mut minder,
+                &mut model,
+                asset,
+                Amount::Mid.outlay(),
+                Amount::Mid.evm_value(),
+                Recipient::Allowed,
+                true,
             )?,
             Action::Deliver { .. } => match delivery {
                 Some((index, outcome)) => deliver(&mut minder, &mut model, index, outcome)?,
@@ -194,7 +215,10 @@ impl World {
             }
             Action::GrantMandate(grant) => {
                 let expiry = model.now + grant.lifetime();
-                owner_call(|| minder.grant_mandate(account(AGENT), U64(expiry)))?;
+                // Every grant switches to the other key, as the contract requires
+                // a new key while a mandate is live.
+                let key = agent_key(model.stale_key());
+                owner_call(|| minder.grant_mandate(key, U64(expiry)))?;
                 model.grant(expiry);
                 Observed::Other
             }
@@ -243,11 +267,13 @@ fn request(
     outlay: u128,
     evm_value: u128,
     to: Recipient,
+    stale_key: bool,
 ) -> Result<Observed, Violation> {
-    let predicted = model.decide(asset, outlay, to);
+    let predicted = model.decide(asset, outlay, to, stale_key);
     // Monotonic revocation, from the independent ghost bookkeeping: once the
-    // agent has lost authority nothing is approved, whatever `decide` says.
-    let must_deny = model.authority_is_lost();
+    // agent has lost authority nothing is approved, whatever `decide` says. A
+    // key the mandate no longer names never has authority.
+    let must_deny = model.authority_is_lost() || stale_key;
     ensure!(
         !must_deny || predicted.is_err(),
         "the model approves a request after authority was lost"
@@ -258,10 +284,14 @@ fn request(
     };
 
     // The view and the real path must agree with each other and the model.
-    let agent = account(AGENT);
+    let agent = agent_key(if stale_key {
+        model.stale_key()
+    } else {
+        model.mandate.key
+    });
     let viewed = match asset {
         Asset::Near => minder.dry_run(
-            agent,
+            agent.clone(),
             AssetId::Near,
             U128(outlay),
             account(near_recipient(to)),
@@ -585,13 +615,23 @@ fn live_spend(minder: &Minder, asset: Asset) -> u128 {
     minder.get_live_spend(asset_id(asset)).0
 }
 
-fn context(predecessor: &str, now: u64) -> VMContext {
+/// One of the two keys the harness alternates the agent between.
+fn agent_key(index: u8) -> PublicKey {
+    PublicKey::from_parts(near_sdk::CurveType::ED25519, vec![index + 1; 32]).unwrap()
+}
+
+fn context(predecessor: &str, now: u64, signer_key: Option<PublicKey>) -> VMContext {
     let mut builder = VMContextBuilder::new();
     builder
         .current_account_id(account(CONTRACT))
         .predecessor_account_id(account(predecessor))
         .block_timestamp(now)
         .prepaid_gas(Gas::from_tgas(300));
+    if let Some(key) = signer_key {
+        builder
+            .signer_account_id(account(CONTRACT))
+            .signer_account_pk(key);
+    }
     builder.build()
 }
 

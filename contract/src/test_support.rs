@@ -4,7 +4,7 @@ use near_sdk::json_types::{U128, U64};
 use near_sdk::mock::{MockAction, Receipt};
 use near_sdk::serde_json::Value;
 use near_sdk::test_utils::VMContextBuilder;
-use near_sdk::{testing_env, AccountId, Gas, NearToken};
+use near_sdk::{testing_env, AccountId, CurveType, Gas, NearToken, PublicKey};
 
 use crate::{AssetId, Minder};
 
@@ -29,8 +29,28 @@ pub fn context(predecessor: &str) -> VMContextBuilder {
     builder
 }
 
+/// The agent's access key: the key a granted mandate authenticates.
+pub fn agent_key() -> PublicKey {
+    PublicKey::from_parts(CurveType::ED25519, vec![1; 32]).unwrap()
+}
+
+/// Some other key on the contract account (the deployer's, or a stray one).
+pub fn other_key() -> PublicKey {
+    PublicKey::from_parts(CurveType::ED25519, vec![2; 32]).unwrap()
+}
+
+/// A call as the agent makes it: signed with its function-call key on the
+/// contract's own account, so the contract is both signer and predecessor.
+pub fn agent_context() -> VMContextBuilder {
+    let mut builder = context("minder.near");
+    builder
+        .signer_account_id(account("minder.near"))
+        .signer_account_pk(agent_key());
+    builder
+}
+
 /// Initialized, with policies for NEAR and a token, an allowed recipient and a
-/// mandate for `agent.near`. The environment is left as the agent.
+/// mandate for `agent_key()`. The environment is left as the agent.
 pub fn armed_as_agent() -> Minder {
     testing_env!(context("owner.near").build());
     let mut minder = Minder::init(account("owner.near"), U64(400), 4);
@@ -38,8 +58,8 @@ pub fn armed_as_agent() -> Minder {
         minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT));
     }
     minder.set_recipient(account("bob.near"), true);
-    minder.grant_mandate(account("agent.near"), U64(u64::MAX));
-    testing_env!(context("agent.near").build());
+    minder.grant_mandate(agent_key(), U64(u64::MAX));
+    testing_env!(agent_context().build());
     minder
 }
 

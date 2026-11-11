@@ -10,7 +10,7 @@ use near_sdk::serde::de::DeserializeOwned;
 use near_sdk::serde_json::{json, Value};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::types::Gas;
+use near_workspaces::types::{Gas, KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use tokio::sync::OnceCell;
 
@@ -18,6 +18,13 @@ pub const SECOND: u64 = 1_000_000_000;
 pub const NUM_BUCKETS: u32 = 4;
 pub const SLOT_LEN: u64 = 30 * SECOND;
 pub const WINDOW_LEN: u64 = SLOT_LEN * NUM_BUCKETS as u64;
+
+/// Gas the agent attaches to its calls. The agent's access key has a fixed
+/// gas allowance, and the runtime checks it against the *prepaid* gas at the
+/// sandbox's gas price (10 times the mainnet floor), so the agent attaches
+/// what a request needs (about 55 Tgas for an EVM payment) with margin, not
+/// the 300 Tgas maximum.
+pub const AGENT_TGAS: u64 = 100;
 
 pub const PER_TX_CAP: u128 = 50;
 pub const WINDOW_LIMIT: u128 = 100;
@@ -135,6 +142,13 @@ pub fn fixture_signature(hash: &str, key: &str) -> FixtureSignature {
     }
 }
 
+/// A new, never-granted agent key, in the `ed25519:...` form the contract takes.
+pub fn fresh_key() -> String {
+    SecretKey::from_random(KeyType::ED25519)
+        .public_key()
+        .to_string()
+}
+
 pub fn near() -> Value {
     json!("Near")
 }
@@ -147,7 +161,12 @@ pub struct Fixture {
     pub worker: Worker<Sandbox>,
     pub contract: Contract,
     pub owner: Account,
+    /// The agent: not an account but a function-call access key on the contract's
+    /// own account, which `grant_mandate` provisions. This signs as the
+    /// contract account with that key, and so can reach only what the key allows.
     pub agent: Account,
+    /// The agent key's public half, in the `ed25519:...` form the contract takes.
+    pub agent_key: String,
     pub outsider: Account,
     pub recipient: Account,
 }
@@ -157,9 +176,11 @@ impl Fixture {
     pub async fn deploy() -> Self {
         let worker = near_workspaces::sandbox().await.unwrap();
         let contract = worker.dev_deploy(contract_wasm().await).await.unwrap();
+        let agent_secret = SecretKey::from_random(KeyType::ED25519);
         Self {
             owner: worker.dev_create_account().await.unwrap(),
-            agent: worker.dev_create_account().await.unwrap(),
+            agent_key: agent_secret.public_key().to_string(),
+            agent: Account::from_secret_key(contract.id().clone(), agent_secret, &worker),
             outsider: worker.dev_create_account().await.unwrap(),
             recipient: worker.dev_create_account().await.unwrap(),
             worker,
@@ -211,7 +232,7 @@ impl Fixture {
         fixture
             .owner_ok(
                 "grant_mandate",
-                json!({ "agent": fixture.agent.id(), "expiry": expiry.to_string() }),
+                json!({ "agent_key": fixture.agent_key, "expiry": expiry.to_string() }),
             )
             .await;
         fixture
@@ -293,7 +314,7 @@ impl Fixture {
             .args_json(
                 json!({ "asset": asset, "amount": amount.to_string(), "recipient": recipient }),
             )
-            .gas(Gas::from_tgas(300))
+            .gas(Gas::from_tgas(AGENT_TGAS))
             .transact()
             .await
             .unwrap()
@@ -329,23 +350,39 @@ impl Fixture {
             .unwrap()
     }
 
+    /// `dry_run` for the holder of `agent_key`.
     pub async fn dry_run_as(
         &self,
-        caller: &AccountId,
+        agent_key: &str,
         asset: Value,
         amount: u128,
         recipient: &AccountId,
     ) -> Decision {
         self.view(
             "dry_run",
-            json!({ "caller": caller, "asset": asset, "amount": amount.to_string(), "recipient": recipient }),
+            json!({ "agent_key": agent_key, "asset": asset, "amount": amount.to_string(), "recipient": recipient }),
         )
         .await
     }
 
+    /// The owner grants a mandate to `agent_key`.
+    pub async fn grant(&self, agent_key: &str, expiry: u64) {
+        self.owner_ok(
+            "grant_mandate",
+            json!({ "agent_key": agent_key, "expiry": expiry.to_string() }),
+        )
+        .await;
+    }
+
+    /// As the holder of `agent_key`, to the allowed recipient.
+    pub async fn dry_run_key(&self, agent_key: &str, asset: Value, amount: u128) -> Decision {
+        self.dry_run_as(agent_key, asset, amount, self.recipient.id())
+            .await
+    }
+
     /// As the agent, to the allowed recipient.
     pub async fn dry_run(&self, asset: Value, amount: u128) -> Decision {
-        self.dry_run_as(self.agent.id(), asset, amount, self.recipient.id())
+        self.dry_run_as(&self.agent_key, asset, amount, self.recipient.id())
             .await
     }
 

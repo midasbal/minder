@@ -80,7 +80,7 @@ async fn reinstating_a_policy_keeps_spend_history() {
 async fn recipient_not_on_allowlist_is_denied() {
     let f = Fixture::armed().await;
     assert_eq!(
-        f.dry_run_as(f.agent.id(), near(), 1, f.outsider.id()).await,
+        f.dry_run_as(&f.agent_key, near(), 1, f.outsider.id()).await,
         deny(DenyReason::RecipientNotAllowed)
     );
 
@@ -115,8 +115,7 @@ async fn asset_without_a_policy_is_denied() {
 async fn only_the_mandated_agent_is_authorized() {
     let f = Fixture::armed().await;
     assert_eq!(
-        f.dry_run_as(f.outsider.id(), near(), 1, f.recipient.id())
-            .await,
+        f.dry_run_key(&fresh_key(), near(), 1).await,
         deny(DenyReason::NotAuthorized)
     );
 }
@@ -138,13 +137,14 @@ async fn owner_only_methods_revert_for_everyone_else() {
         ),
         (
             "grant_mandate",
-            json!({ "agent": f.outsider.id(), "expiry": u64::MAX.to_string() }),
+            json!({ "agent_key": fresh_key(), "expiry": u64::MAX.to_string() }),
         ),
         ("revoke_mandate", json!({})),
         ("freeze", json!({})),
         ("unfreeze", json!({})),
     ];
-    for who in [&f.agent, &f.outsider] {
+    // The agent's own key cannot even submit these: see tests/agent_key.rs.
+    for who in [&f.outsider] {
         for (method, args) in &calls {
             assert_reverts(
                 f.call(who, method, args.clone()).await,
@@ -240,9 +240,9 @@ async fn revoked_mandate_stays_revoked_until_a_new_grant() {
     .await;
     assert_reverts(
         f.call(
-            &f.agent,
+            &f.outsider,
             "grant_mandate",
-            json!({ "agent": f.agent.id(), "expiry": u64::MAX.to_string() }),
+            json!({ "agent_key": f.agent_key, "expiry": u64::MAX.to_string() }),
         )
         .await,
         "Only the owner can call this method",
@@ -251,11 +251,7 @@ async fn revoked_mandate_stays_revoked_until_a_new_grant() {
 
     // An explicit new grant is the only way back, under a new epoch.
     let expiry = f.now().await + 3_600 * SECOND;
-    f.owner_ok(
-        "grant_mandate",
-        json!({ "agent": f.agent.id(), "expiry": expiry.to_string() }),
-    )
-    .await;
+    f.grant(&f.agent_key, expiry).await;
     assert_eq!(f.dry_run(near(), 1).await, Decision::Allow);
     let mandate: Option<Mandate> = f.view("get_mandate", json!({})).await;
     let mandate = mandate.unwrap();
@@ -266,39 +262,42 @@ async fn revoked_mandate_stays_revoked_until_a_new_grant() {
 #[tokio::test]
 async fn expired_mandate_stays_expired_until_a_new_grant() {
     let f = Fixture::armed().await;
+    // A live mandate is replaced with a new key, never re-granted to the same one.
+    let (short_lived, renewed) = (fresh_key(), fresh_key());
     let expiry = f.now().await + 120 * SECOND;
-    f.owner_ok(
-        "grant_mandate",
-        json!({ "agent": f.agent.id(), "expiry": expiry.to_string() }),
-    )
-    .await;
-    assert_eq!(f.dry_run(near(), 1).await, Decision::Allow);
+    f.grant(&short_lived, expiry).await;
+    assert_eq!(
+        f.dry_run_key(&short_lived, near(), 1).await,
+        Decision::Allow
+    );
 
     f.advance_to(expiry + SLOT_LEN).await;
-    assert_eq!(f.dry_run(near(), 1).await, deny(DenyReason::MandateExpired));
+    let expired = deny(DenyReason::MandateExpired);
+    assert_eq!(f.dry_run_key(&short_lived, near(), 1).await, expired);
 
     f.owner_ok("freeze", json!({})).await;
     f.owner_ok("unfreeze", json!({})).await;
-    assert_eq!(f.dry_run(near(), 1).await, deny(DenyReason::MandateExpired));
+    assert_eq!(f.dry_run_key(&short_lived, near(), 1).await, expired);
 
     // An already-past expiry cannot be granted.
     assert_reverts(
         f.call(
             &f.owner,
             "grant_mandate",
-            json!({ "agent": f.agent.id(), "expiry": expiry.to_string() }),
+            json!({ "agent_key": renewed, "expiry": expiry.to_string() }),
         )
         .await,
         "Mandate expiry must be in the future",
     );
 
     let new_expiry = f.now().await + 3_600 * SECOND;
-    f.owner_ok(
-        "grant_mandate",
-        json!({ "agent": f.agent.id(), "expiry": new_expiry.to_string() }),
-    )
-    .await;
-    assert_eq!(f.dry_run(near(), 1).await, Decision::Allow);
+    f.grant(&renewed, new_expiry).await;
+    assert_eq!(f.dry_run_key(&renewed, near(), 1).await, Decision::Allow);
+    // The expired key is not the agent any more.
+    assert_eq!(
+        f.dry_run_key(&short_lived, near(), 1).await,
+        deny(DenyReason::NotAuthorized)
+    );
 }
 
 #[tokio::test]
@@ -311,15 +310,15 @@ async fn frozen_contract_denies_everything_until_unfrozen() {
 
     // A fresh grant does not lift a freeze; only unfreeze does.
     let expiry = f.now().await + 3_600 * SECOND;
-    f.owner_ok(
-        "grant_mandate",
-        json!({ "agent": f.agent.id(), "expiry": expiry.to_string() }),
-    )
-    .await;
-    assert_eq!(f.dry_run(near(), 1).await, deny(DenyReason::Frozen));
+    let new_key = fresh_key();
+    f.grant(&new_key, expiry).await;
+    assert_eq!(
+        f.dry_run_key(&new_key, near(), 1).await,
+        deny(DenyReason::Frozen)
+    );
 
     f.owner_ok("unfreeze", json!({})).await;
-    assert_eq!(f.dry_run(near(), 1).await, Decision::Allow);
+    assert_eq!(f.dry_run_key(&new_key, near(), 1).await, Decision::Allow);
 }
 
 #[tokio::test]
@@ -331,7 +330,7 @@ async fn no_mandate_is_denied_and_revoking_nothing_reverts() {
     )
     .await;
     assert_eq!(
-        f.dry_run_as(f.agent.id(), near(), 1, f.recipient.id())
+        f.dry_run_as(&f.agent_key, near(), 1, f.recipient.id())
             .await,
         deny(DenyReason::NoMandate)
     );

@@ -23,8 +23,8 @@ async fn native_budget(f: &Fixture) -> (u128, u128, Decision, Decision) {
     (
         f.live_spend(near()).await,
         f.reserved(near()).await,
-        f.dry_run_as(f.agent.id(), near(), 40, &ghost()).await,
-        f.dry_run_as(f.agent.id(), near(), 41, &ghost()).await,
+        f.dry_run_as(&f.agent_key, near(), 40, &ghost()).await,
+        f.dry_run_as(&f.agent_key, near(), 41, &ghost()).await,
     )
 }
 
@@ -218,7 +218,7 @@ async fn reservation_is_visible_and_binding_while_the_transfer_is_in_flight() {
         .agent
         .call(f.contract.id(), "request_local_transfer")
         .args_json(json!({ "asset": asset, "amount": "50", "recipient": f.recipient.id() }))
-        .gas(Gas::from_tgas(300))
+        .gas(Gas::from_tgas(AGENT_TGAS))
         .transact_async()
         .await
         .unwrap();
@@ -261,7 +261,7 @@ async fn reservation_is_visible_and_binding_while_the_transfer_is_in_flight() {
 #[tokio::test]
 async fn only_the_contract_itself_can_call_the_settlement_callback() {
     let f = Fixture::armed().await;
-    for who in [&f.owner, &f.agent, &f.outsider] {
+    for who in [&f.owner, &f.outsider] {
         assert_reverts(
             f.call(
                 who,

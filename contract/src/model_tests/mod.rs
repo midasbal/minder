@@ -126,6 +126,7 @@ fn exhaustive_authority_and_time() {
     let alphabet = [
         request(Asset::Near, Amount::Mid),
         request(Asset::Evm, Amount::Mid),
+        Action::StaleKeyRequest(Asset::Near),
         deliver(Pick::Oldest, Outcome::Ok),
         deliver(Pick::Oldest, Outcome::Fail),
         Action::Freeze,
@@ -144,6 +145,7 @@ fn exhaustive_authority_and_time() {
             "Denied(Near, Frozen)",
             "Denied(Evm, MandateRevoked)",
             "Denied(Near, MandateExpired)",
+            "Denied(Near, NotAuthorized)",
         ],
     );
 }
@@ -226,6 +228,8 @@ fn random_long_sequences() {
             "Denied(Evm, Frozen)",
             "Denied(Near, MandateRevoked)",
             "Denied(Evm, MandateExpired)",
+            "Denied(Near, NotAuthorized)",
+            "Denied(Evm, NotAuthorized)",
             "Delivered(Near, Ok)",
             "Delivered(Near, Fail)",
             "Delivered(Evm, Ok)",

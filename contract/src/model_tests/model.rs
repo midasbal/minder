@@ -38,6 +38,11 @@ pub struct ModelMandate {
     pub expiry: u64,
     pub epoch: u64,
     pub revoked: bool,
+    /// Which of the two agent keys this mandate authenticates. Each grant
+    /// switches to the other one, so a re-grant always changes the key (the
+    /// contract refuses to re-grant the live key) and the previous key is the
+    /// stale one.
+    pub key: u8,
 }
 
 /// A dispatched request whose callback has not been delivered.
@@ -83,6 +88,7 @@ impl Model {
                 expiry: mandate_expiry,
                 epoch: 1,
                 revoked: false,
+                key: 0,
             },
             last_epoch: 1,
             policy: [Policy::of(PolicyVariant::Default); 2],
@@ -122,7 +128,16 @@ impl Model {
 
     /// The expected decision for a request by the mandated agent, in the
     /// contract's documented order.
-    pub fn decide(&self, asset: Asset, outlay: u128, to: Recipient) -> Result<(), DenyReason> {
+    ///
+    /// `stale_key`: the request is signed with the key the mandate does not
+    /// authenticate. Authentication ranks after the mandate checks.
+    pub fn decide(
+        &self,
+        asset: Asset,
+        outlay: u128,
+        to: Recipient,
+        stale_key: bool,
+    ) -> Result<(), DenyReason> {
         if self.frozen {
             return Err(DenyReason::Frozen);
         }
@@ -131,6 +146,9 @@ impl Model {
         }
         if self.now >= self.mandate.expiry {
             return Err(DenyReason::MandateExpired);
+        }
+        if stale_key {
+            return Err(DenyReason::NotAuthorized);
         }
         let policy = self.policy[asset.index()];
         if to == Recipient::Disallowed {
@@ -178,12 +196,18 @@ impl Model {
         self.ghost_frozen = frozen;
     }
 
+    /// The key the mandate does not authenticate.
+    pub fn stale_key(&self) -> u8 {
+        1 - self.mandate.key
+    }
+
     pub fn grant(&mut self, expiry: u64) {
         self.last_epoch += 1;
         self.mandate = ModelMandate {
             expiry,
             epoch: self.last_epoch,
             revoked: false,
+            key: self.stale_key(),
         };
     }
 

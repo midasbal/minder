@@ -11,7 +11,7 @@
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::Deserialize;
 use near_sdk::serde_json::{self, json};
-use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError, PublicKey};
 
 use crate::evm::{self, Eip1559Tx, EvmError, Signature};
 use crate::types::{AssetId, Decision, EvmConfig, EvmConfigView};
@@ -141,13 +141,13 @@ impl Minder {
     pub fn request_evm_payment(&mut self, recipient: String, amount: U128) -> Promise {
         let config = self.require_evm_config();
         let to = parse_address(&recipient);
-        let caller = env::predecessor_account_id();
+        let caller_key = Self::authenticated_key();
         let asset = AssetId::Evm(config.chain_id);
         let outlay = config.outlay(amount.0);
 
         let recipient_allowed = self.evm_recipients.contains(&to);
         if let Decision::Deny(reason) =
-            self.evaluate_with(&caller, &asset, outlay, recipient_allowed)
+            self.evaluate_with(caller_key.as_ref(), &asset, outlay, recipient_allowed)
         {
             env::panic_str(&format!("Denied: {reason:?}"));
         }
@@ -272,13 +272,13 @@ impl Minder {
 
     // ---- Views ----
 
-    /// `dry_run` for EVM payments: what `caller` would get from
+    /// `dry_run` for EVM payments: what the holder of `agent_key` would get from
     /// `request_evm_payment` right now, counting in-flight reservations.
-    pub fn dry_run_evm(&self, caller: AccountId, recipient: String, amount: U128) -> Decision {
+    pub fn dry_run_evm(&self, agent_key: PublicKey, recipient: String, amount: U128) -> Decision {
         let config = self.require_evm_config();
         let to = parse_address(&recipient);
         self.evaluate_with(
-            &caller,
+            Some(&agent_key),
             &AssetId::Evm(config.chain_id),
             config.outlay(amount.0),
             self.evm_recipients.contains(&to),

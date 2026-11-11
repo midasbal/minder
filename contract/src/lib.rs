@@ -13,8 +13,8 @@ use near_sdk::json_types::{U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
 use near_sdk::{
-    env, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError,
+    env, near, require, AccountId, Allowance, BorshStorageKey, Gas, NearToken, PanicOnDefault,
+    Promise, PromiseError, PublicKey,
 };
 
 pub use types::{
@@ -33,6 +33,21 @@ const MAX_PAGE_SIZE: u32 = 100;
 /// reservation would never be released.
 const FT_TRANSFER_GAS: Gas = Gas::from_tgas(30);
 const SETTLE_CALLBACK_GAS: Gas = Gas::from_tgas(15);
+
+/// The only methods the agent's access key may call, fixed here and never taken
+/// from a parameter. A function-call access key restricts the methods at the
+/// protocol level, before any contract code runs; this list is what makes the
+/// restriction exactly the two agent entry points. It is a comma-separated
+/// list, as the runtime takes it. A sandbox test reads the key back from the
+/// chain and compares it to this.
+const AGENT_METHODS: &str = "request_local_transfer,request_evm_payment";
+
+/// The gas allowance of the agent's access key (0.25 NEAR). It is
+/// the most the key can spend on transaction fees in total, paid from this
+/// contract's balance, so it counts toward the worst-case loss in addition to
+/// the policy limits. A fixed constant, not a parameter: the agent cannot
+/// influence it and the owner's exposure from it is bounded and documented.
+const AGENT_KEY_ALLOWANCE: NearToken = NearToken::from_millinear(250);
 
 const LOCAL_ONLY: &str = "EVM assets are paid through request_evm_payment";
 
@@ -84,6 +99,13 @@ impl Minder {
         require!(
             caller == owner || caller == env::current_account_id(),
             "init must be called by the owner or the contract account"
+        );
+        // The agent's key lives on this contract's account. The owner must be a
+        // different account, so that the contract account's full-access key can
+        // be removed (see DESIGN.md) without losing owner control.
+        require!(
+            owner != env::current_account_id(),
+            "The owner must be a separate account from the contract account"
         );
         require!(
             (1..=MAX_NUM_BUCKETS).contains(&num_buckets),
@@ -144,17 +166,49 @@ impl Minder {
         }
     }
 
-    /// Replaces any existing mandate with a new one under a fresh epoch. This
-    /// is the only way to restore authority after revocation or expiry.
-    pub fn grant_mandate(&mut self, agent: AccountId, expiry: U64) {
+    /// Replaces any existing mandate with a new one under a fresh epoch, and
+    /// provisions `agent_key` as a function-call access key on this contract's
+    /// own account, restricted to the two agent methods and to a fixed gas
+    /// allowance. This is the only way to restore authority after revocation or
+    /// expiry.
+    ///
+    /// A mandate that is still live has its key deleted first, so a replaced
+    /// agent keeps no key. Each key action is its own promise, not one batch:
+    /// the actions of a batch succeed or fail together, and a delete of a key
+    /// that is already gone must not stop the new key from being added. The
+    /// deletion is a cleanup; the new `agent_key` in the mandate is what
+    /// authenticates, so a key left behind by a failed deletion cannot act.
+    ///
+    /// The provisioning is asynchronous: the mandate is recorded now and the
+    /// key appears on the account in a later block. Until then nothing can
+    /// authenticate as the agent, so the delay only withholds authority.
+    pub fn grant_mandate(&mut self, agent_key: PublicKey, expiry: U64) {
         self.assert_owner();
         require!(
             expiry.0 > env::block_timestamp(),
             "Mandate expiry must be in the future"
         );
+        if let Some(previous) = self.mandate.as_ref().filter(|mandate| !mandate.revoked) {
+            // The same key would race its own deletion against its re-addition.
+            // After a revocation the deletion has long landed, so reuse is fine.
+            require!(
+                previous.agent_key != agent_key,
+                "That key is the current agent key; revoke the mandate first or use a new key"
+            );
+            Self::delete_agent_key(previous.agent_key.clone());
+        }
+        Promise::new(env::current_account_id())
+            .add_access_key_allowance(
+                agent_key.clone(),
+                Allowance::limited(AGENT_KEY_ALLOWANCE)
+                    .unwrap_or_else(|| env::panic_str("the allowance is non-zero")),
+                env::current_account_id(),
+                AGENT_METHODS,
+            )
+            .detach();
         self.last_mandate_epoch += 1;
         self.mandate = Some(Mandate {
-            agent,
+            agent_key,
             expiry,
             epoch: self.last_mandate_epoch,
             revoked: false,
@@ -163,12 +217,22 @@ impl Minder {
 
     /// Reverts if there is no mandate. Revoking an already revoked mandate is
     /// a no-op.
+    ///
+    /// Two layers, both applied here. The `revoked` flag is the synchronous
+    /// guard: `evaluate` denies from the next call on, whether or not the key
+    /// deletion has landed, and even if it fails. The deletion of the access
+    /// key is the protocol-level removal, as its own promise; if the key is
+    /// already gone it fails without effect, and this call has already
+    /// succeeded, so it cannot panic.
     pub fn revoke_mandate(&mut self) {
         self.assert_owner();
         let mandate = self.mandate.as_mut().unwrap_or_else(|| {
             env::panic_str("No mandate to revoke");
         });
-        mandate.revoked = true;
+        if !mandate.revoked {
+            mandate.revoked = true;
+            Self::delete_agent_key(mandate.agent_key.clone());
+        }
     }
 
     pub fn freeze(&mut self) {
@@ -238,8 +302,9 @@ impl Minder {
         recipient: AccountId,
     ) -> Promise {
         Self::require_local(&asset);
-        let caller = env::predecessor_account_id();
-        if let Decision::Deny(reason) = self.evaluate_request(&caller, &asset, amount.0, &recipient)
+        let caller_key = Self::authenticated_key();
+        if let Decision::Deny(reason) =
+            self.evaluate_request(caller_key.as_ref(), &asset, amount.0, &recipient)
         {
             env::panic_str(&format!("Denied: {reason:?}"));
         }
@@ -270,19 +335,19 @@ impl Minder {
 
     // ---- Views ----
 
-    /// Evaluates a hypothetical action as `caller` would experience it,
-    /// counting in-flight reservations. A view has no authenticated caller, so
-    /// the agent identity is an argument; `request_local_transfer` uses the
-    /// predecessor account instead.
+    /// Evaluates a hypothetical action as the holder of `agent_key` would
+    /// experience it (signing a call on this contract's own account), counting
+    /// in-flight reservations. A view has no signer, so the key is an argument;
+    /// `request_local_transfer` uses the key that signed the call instead.
     pub fn dry_run(
         &self,
-        caller: AccountId,
+        agent_key: PublicKey,
         asset: AssetId,
         amount: U128,
         recipient: AccountId,
     ) -> Decision {
         Self::require_local(&asset);
-        self.evaluate_request(&caller, &asset, amount.0, &recipient)
+        self.evaluate_request(Some(&agent_key), &asset, amount.0, &recipient)
     }
 
     pub fn get_config(&self) -> Config {
@@ -382,6 +447,27 @@ impl Minder {
         require!(!matches!(asset, AssetId::Evm(_)), LOCAL_ONLY);
     }
 
+    /// The key that signed this call, if the call reached this contract from
+    /// its own account; `None` for a call from any other account.
+    ///
+    /// The agent holds no account. It holds a function-call access key on this
+    /// contract's account, so its transactions have this contract as both
+    /// signer and predecessor, and the key is what tells them apart: the
+    /// contract's own callbacks and any other key on the account carry a
+    /// different (or no) key and never match the mandate's.
+    pub(crate) fn authenticated_key() -> Option<PublicKey> {
+        (env::predecessor_account_id() == env::current_account_id()).then(env::signer_account_pk)
+    }
+
+    /// Removes the agent's access key from this account, as a promise of its
+    /// own. Deliberately not awaited: if the key is already gone the deletion
+    /// fails, which changes nothing, and must not fail the call that issued it.
+    fn delete_agent_key(agent_key: PublicKey) {
+        Promise::new(env::current_account_id())
+            .delete_key(agent_key)
+            .detach();
+    }
+
     pub(crate) fn assert_owner(&self) {
         require!(
             env::predecessor_account_id() == self.config.owner,
@@ -433,12 +519,17 @@ impl Minder {
     /// `request_local_transfer`.
     fn evaluate_request(
         &self,
-        caller: &AccountId,
+        caller_key: Option<&PublicKey>,
         asset: &AssetId,
         amount: u128,
         recipient: &AccountId,
     ) -> Decision {
-        self.evaluate_with(caller, asset, amount, self.recipients.contains(recipient))
+        self.evaluate_with(
+            caller_key,
+            asset,
+            amount,
+            self.recipients.contains(recipient),
+        )
     }
 
     /// Gathers state and defers every decision to [`policy::evaluate`]. The
@@ -446,7 +537,7 @@ impl Minder {
     /// came from.
     fn evaluate_with(
         &self,
-        caller: &AccountId,
+        caller_key: Option<&PublicKey>,
         asset: &AssetId,
         amount: u128,
         recipient_allowed: bool,
@@ -455,7 +546,7 @@ impl Minder {
             status: self.config.status,
             mandate: self.mandate.as_ref(),
             now: env::block_timestamp(),
-            caller,
+            caller_key,
             policy: self.policies.get(asset),
             recipient_allowed,
             amount,
@@ -479,6 +570,8 @@ mod custody_tests;
 mod gate_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod mandate_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]

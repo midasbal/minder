@@ -24,7 +24,7 @@ fn settle(minder: &mut Minder, asset: AssetId, amount: u128, result: PromiseResu
         vec![result]
     );
     minder.on_transfer_complete(asset, U128(amount));
-    testing_env!(context("agent.near").build());
+    testing_env!(agent_context().build());
 }
 
 fn request(minder: &mut Minder, asset: AssetId, amount: u128) {
@@ -32,12 +32,7 @@ fn request(minder: &mut Minder, asset: AssetId, amount: u128) {
 }
 
 fn dry_run(minder: &Minder, asset: AssetId, amount: u128) -> Decision {
-    minder.dry_run(
-        account("agent.near"),
-        asset,
-        U128(amount),
-        account("bob.near"),
-    )
+    minder.dry_run(agent_key(), asset, U128(amount), account("bob.near"))
 }
 
 // ---- Reservation ----

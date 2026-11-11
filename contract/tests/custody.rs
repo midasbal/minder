@@ -53,7 +53,7 @@ async fn only_the_owner_can_withdraw() {
     let f = Fixture::armed().await;
     // Watch the payee, not the caller: callers pay gas for their own attempt.
     let before = balance_of(&f.recipient).await;
-    for who in [&f.agent, &f.outsider] {
+    for who in [&f.outsider] {
         assert_reverts(
             withdraw(&f, who, near(), f.recipient.id()).await,
             "Only the owner can call this method",
@@ -152,7 +152,7 @@ async fn owner_withdraw_does_not_touch_reservations_or_the_window() {
         .agent
         .call(f.contract.id(), "request_local_transfer")
         .args_json(json!({ "asset": asset, "amount": "50", "recipient": f.recipient.id() }))
-        .gas(Gas::from_tgas(300))
+        .gas(Gas::from_tgas(AGENT_TGAS))
         .transact_async()
         .await
         .unwrap();

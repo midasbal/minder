@@ -50,7 +50,7 @@ fn armed_evm() -> Minder {
         U128(MAX_PRIORITY_FEE),
         None,
     );
-    testing_env!(context("agent.near").build());
+    testing_env!(agent_context().build());
     minder
 }
 
@@ -111,7 +111,7 @@ fn settle(
     );
     minder.on_sign_complete(evm_asset(), outlay, expected_tx(nonce, value));
     let logs = get_logs();
-    testing_env!(context("agent.near").build());
+    testing_env!(agent_context().build());
     logs
 }
 
@@ -212,11 +212,7 @@ fn a_second_request_sees_the_first_ones_reservation() {
     // TOCTOU: the first request is still in flight (no callback has run).
     let mut minder = armed_evm();
     request(&mut minder, 50_000_000_000_000); // outlay 92e12 of 150e12
-    let second = minder.dry_run_evm(
-        account("agent.near"),
-        RECIPIENT.to_string(),
-        U128(50_000_000_000_000),
-    );
+    let second = minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(50_000_000_000_000));
     assert_eq!(second, Decision::Deny(DenyReason::WindowLimitExceeded));
 
     let attempt = catch_unwind(AssertUnwindSafe(|| {
@@ -239,15 +235,11 @@ fn fees_count_toward_the_per_transaction_cap() {
     let value = EVM_PER_TX_CAP - FEE_COST + 1;
     assert!(value <= EVM_PER_TX_CAP);
     assert_eq!(
-        minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(value)),
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(value)),
         Decision::Deny(DenyReason::PerTxCapExceeded)
     );
     assert_eq!(
-        minder.dry_run_evm(
-            account("agent.near"),
-            RECIPIENT.to_string(),
-            U128(value - 1)
-        ),
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(value - 1)),
         Decision::Allow
     );
     let attempt = catch_unwind(AssertUnwindSafe(|| request(&mut minder, value)));
@@ -259,9 +251,7 @@ fn many_tiny_payments_cannot_drain_through_fees() {
     // Each payment is 1 wei, but each costs a fee. The window limit stops them.
     let mut minder = armed_evm();
     let mut allowed = 0;
-    while minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(1))
-        == Decision::Allow
-    {
+    while minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1)) == Decision::Allow {
         request(&mut minder, 1);
         allowed += 1;
         assert!(allowed < 100, "the limit must bind");
@@ -275,7 +265,7 @@ fn the_evm_allowlist_is_separate_from_the_near_allowlist() {
     // bob.near is an allowed NEAR recipient; that says nothing about EVM.
     let other = "0x2222222222222222222222222222222222222222";
     assert_eq!(
-        minder.dry_run_evm(account("agent.near"), other.to_string(), U128(1)),
+        minder.dry_run_evm(agent_key(), other.to_string(), U128(1)),
         Decision::Deny(DenyReason::RecipientNotAllowed)
     );
     assert!(!minder.is_evm_recipient_allowed(other.to_string()));
@@ -313,9 +303,9 @@ fn evm_payments_need_a_policy_a_config_and_a_valid_address() {
     // A config without a policy for the chain: the asset is not allowed.
     testing_env!(context("owner.near").build());
     minder.remove_asset_policy(evm_asset());
-    testing_env!(context("agent.near").build());
+    testing_env!(agent_context().build());
     assert_eq!(
-        minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(1)),
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1)),
         Decision::Deny(DenyReason::AssetNotAllowed)
     );
 }
@@ -328,12 +318,7 @@ fn the_local_entry_points_refuse_evm_assets() {
     }));
     assert!(panic_message(attempt).contains("request_evm_payment"));
     let dry = catch_unwind(AssertUnwindSafe(|| {
-        let _ = minder.dry_run(
-            account("agent.near"),
-            evm_asset(),
-            U128(1),
-            account("bob.near"),
-        );
+        let _ = minder.dry_run(agent_key(), evm_asset(), U128(1), account("bob.near"));
     }));
     assert!(panic_message(dry).contains("request_evm_payment"));
     testing_env!(context("owner.near").build());
@@ -687,7 +672,7 @@ fn a_sender_that_differs_from_the_signing_key_blocks_emission() {
         U128(MAX_PRIORITY_FEE),
         None,
     );
-    testing_env!(context("agent.near").build());
+    testing_env!(agent_context().build());
     request(&mut minder, 1000);
     let outlay = 1000 + FEE_COST;
     let logs = settle(
@@ -703,7 +688,7 @@ fn a_sender_that_differs_from_the_signing_key_blocks_emission() {
 #[test]
 fn a_failed_signer_call_releases_and_commits_nothing() {
     let mut minder = armed_evm();
-    let before = minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(1000));
+    let before = minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000));
     request(&mut minder, 1000);
     let logs = settle(&mut minder, 1000 + FEE_COST, 0, 1000, PromiseResult::Failed);
 
@@ -711,7 +696,7 @@ fn a_failed_signer_call_releases_and_commits_nothing() {
     assert_eq!(committed(&minder, evm_asset()), 0);
     assert!(event_lines(&logs).is_empty());
     assert_eq!(
-        minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(1000)),
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000)),
         before
     );
     // The nonce stays consumed: the documented outbound-only gap.
@@ -815,8 +800,7 @@ fn booked_unusable_output_counts_against_the_window() {
     assert_eq!(committed(&minder, evm_asset()), 2 * (1000 + FEE_COST));
     // Limit 150e12, 84e12+2000 booked: a payment with outlay 62e12 fits, one
     // with outlay 92e12 does not.
-    let ask =
-        |value: u128| minder.dry_run_evm(account("agent.near"), RECIPIENT.to_string(), U128(value));
+    let ask = |value: u128| minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(value));
     assert_eq!(ask(20_000_000_000_000), Decision::Allow);
     assert_eq!(
         ask(50_000_000_000_000),

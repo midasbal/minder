@@ -79,7 +79,7 @@ async fn pay(
 ) -> ExecutionFinalResult {
     who.call(f.contract.id(), "request_evm_payment")
         .args_json(json!({ "recipient": recipient, "amount": value.to_string() }))
-        .gas(Gas::from_tgas(300))
+        .gas(Gas::from_tgas(AGENT_TGAS))
         .transact()
         .await
         .unwrap()
@@ -88,7 +88,7 @@ async fn pay(
 async fn dry_run_evm(f: &Fixture, value: u128) -> Decision {
     f.view(
         "dry_run_evm",
-        json!({ "caller": f.agent.id(), "recipient": RECIPIENT, "amount": value.to_string() }),
+        json!({ "agent_key": f.agent_key, "recipient": RECIPIENT, "amount": value.to_string() }),
     )
     .await
 }
@@ -310,7 +310,7 @@ async fn a_second_request_sees_the_first_ones_reservation_before_it_settles() {
         .agent
         .call(f.contract.id(), "request_evm_payment")
         .args_json(json!({ "recipient": RECIPIENT, "amount": VALUE.to_string() }))
-        .gas(Gas::from_tgas(300))
+        .gas(Gas::from_tgas(AGENT_TGAS))
         .transact_async()
         .await
         .unwrap();
@@ -451,7 +451,7 @@ async fn evm_configuration_is_owner_only() {
             json!({ "chain_id": CHAIN_ID, "nonce": "9" }),
         ),
     ];
-    for who in [&f.agent, &f.outsider] {
+    for who in [&f.outsider] {
         for (method, args) in &calls {
             assert_reverts(
                 f.call(who, method, args.clone()).await,
@@ -478,8 +478,12 @@ async fn the_signing_identity_is_fixed_but_fees_can_change() {
     assert_eq!(stored["gas_limit"], 50000);
 
     assert_reverts(
-        f.call(&f.owner, "set_evm_config", config(f.agent.id(), PATH, "1"))
-            .await,
+        f.call(
+            &f.owner,
+            "set_evm_config",
+            config(f.outsider.id(), PATH, "1"),
+        )
+        .await,
         "cannot change once set",
     );
     assert_reverts(
@@ -550,7 +554,7 @@ async fn the_near_entry_points_refuse_evm_assets() {
 #[tokio::test]
 async fn only_the_contract_itself_can_call_the_signing_callback() {
     let (f, _signer) = armed_evm().await;
-    for who in [&f.owner, &f.agent, &f.outsider] {
+    for who in [&f.owner, &f.outsider] {
         let result = who
             .call(f.contract.id(), "on_sign_complete")
             .args(Vec::new())

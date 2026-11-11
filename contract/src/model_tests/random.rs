@@ -37,7 +37,7 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         proptest::sample::select(members)
     };
     prop_oneof![
-        4 => class(|a| matches!(a, Action::Request { .. })),
+        4 => class(|a| matches!(a, Action::Request { .. } | Action::StaleKeyRequest(_))),
         4 => class(|a| matches!(a, Action::Deliver { .. })),
         2 => class(|a| matches!(a, Action::SetPolicy { .. } | Action::GrantMandate(_)
             | Action::RevokeMandate | Action::Freeze | Action::Unfreeze)),

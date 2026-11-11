@@ -1,7 +1,7 @@
 //! Data types shared by state, evaluation and the public interface.
 
 use near_sdk::json_types::{U128, U64};
-use near_sdk::{near, AccountId};
+use near_sdk::{near, AccountId, PublicKey};
 
 /// Identifies an asset a policy can govern. Borsh enum tags are append-only.
 #[near(serializers = [borsh, json])]
@@ -45,10 +45,15 @@ pub struct AssetPolicy {
 
 /// The agent's authority. A grant always carries a fresh, strictly larger
 /// epoch, so a revoked or expired mandate can never be mistaken for a new one.
+///
+/// The agent is identified by a public key, not an account: the key is
+/// provisioned on this contract's own account as a function-call access key
+/// limited to the agent methods, and a call is the agent's only if it is signed
+/// by exactly this key.
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mandate {
-    pub agent: AccountId,
+    pub agent_key: PublicKey,
     /// Block timestamp (ns) at and after which the mandate is expired.
     pub expiry: U64,
     pub epoch: u64,

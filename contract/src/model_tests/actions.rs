@@ -156,6 +156,11 @@ pub enum Action {
         variant: PolicyVariant,
     },
     GrantMandate(Grant),
+    /// A request signed with the key of the mandate granted before the current
+    /// one (or, before any rotation, a key never granted): the agent's old key
+    /// after a re-grant. It must be refused as `NotAuthorized` once the mandate
+    /// checks that rank above it pass, and never approved.
+    StaleKeyRequest(Asset),
     RevokeMandate,
     Freeze,
     Unfreeze,
@@ -207,6 +212,9 @@ pub fn full_alphabet() -> Vec<Action> {
         for outcome in OUTCOMES {
             actions.push(deliver(pick, outcome));
         }
+    }
+    for asset in ASSETS {
+        actions.push(Action::StaleKeyRequest(asset));
     }
     actions.extend([
         Action::GrantMandate(Grant::Short),

@@ -4,8 +4,9 @@ Scope so far: pure policy state and evaluation, the local NEAR enforcement path 
 NEAR or NEP-141 tokens held by this contract, gated by policy, with a reserve/settle/release
 lifecycle), fund custody (owner withdrawal and deposits), the pure EVM transaction encoder, and the
 cross-chain signing gate (`request_evm_payment`): the agent pays native ETH on an EVM chain by getting
-the Chain Signatures contract to sign a transaction the contract built itself. Access-key mandates
-and ERC-20 payments are not built yet.
+the Chain Signatures contract to sign a transaction the contract built itself. The agent is a native
+function-call access key on the contract's own account (see Agent authority). ERC-20 payments are not
+built yet.
 
 ## Layout
 
@@ -18,7 +19,7 @@ and ERC-20 payments are not built yet.
 | `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `on_sign_complete`, EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
-| `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, and the EVM gate |
+| `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
 | `../test-contracts/mock-ft` | Test double for a NEP-141 token: records `ft_transfer`, can fail or stretch it over blocks, and `ft_transfer_call` drives a receiver's `ft_on_transfer`. Never deployed |
 | `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, and returns a fixed valid signature, a bad one, valid JSON of the wrong shape, a non-JSON blob, a genuine signature padded past 4096 bytes, or fails; can stretch the answer over blocks. Never deployed |
@@ -28,7 +29,7 @@ and ERC-20 payments are not built yet.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `config` | `Config { owner, status, window_len, num_buckets }` | Set once in `init`; only `status` changes later |
-| `mandate` | `Option<Mandate { agent, expiry, epoch, revoked }>` | One mandate at a time |
+| `mandate` | `Option<Mandate { agent_key: PublicKey, expiry, epoch, revoked }>` | One mandate at a time; `agent_key` is the function-call key provisioned on the contract account |
 | `last_mandate_epoch` | `u64` | Incremented on every grant, never reset, so epochs are never reused |
 | `policies` | `IterableMap<AssetId, AssetPolicy>` | Having an entry allowlists the asset |
 | `recipients` | `IterableSet<AccountId>` | Allowed recipients |
@@ -104,6 +105,104 @@ Steps 1 and 2 are one receipt, so effective spend does not move when a transfer 
 leaves `reserved` and enters the ring atomically. On failure it leaves `reserved` and enters nothing,
 which returns the budget. NEAR runs a callback exactly once, and the code relies on that for
 exactly-once settlement.
+
+## Agent authority: a function-call key on the contract account
+
+**Auth model, before and after.** Before, the agent was a NEAR account and `evaluate` compared
+`predecessor_account_id` with `Mandate.agent`. Now the agent is a **public key**. `grant_mandate`
+adds it to the contract's own account as a function-call access key, and a request is the agent's
+only if the contract is both its own predecessor and the call was signed by exactly the mandate's key:
+
+```
+predecessor_account_id == current_account_id   AND   signer_account_pk == mandate.agent_key
+```
+
+`Minder::authenticated_key()` returns `signer_account_pk` when the first holds and `None` otherwise;
+`evaluate` denies `NotAuthorized` unless that equals the mandate's key. The contract's own callbacks,
+the deployer's key and any other key on the account carry a different key and never match.
+
+**Topology.**
+
+```
+owner account (separate, init rejects owner == contract)   -- owner methods, own auth
+contract account  minder.near
+  full-access key ........ the deployer's; REMOVED after deploy + init (deployment step below)
+  function-call key ...... the agent's; receiver = minder.near,
+                            method_names = request_local_transfer, request_evm_payment,
+                            allowance = 0.25 NEAR; added by grant_mandate, deleted by revoke_mandate
+```
+
+**Why the scoping is native.** The runtime enforces a function-call key before any contract code runs:
+`method_names` is the fixed list `AGENT_METHODS` in `lib.rs` (never a parameter), the receiver is the
+contract itself, no deposit can be attached, and the key cannot transfer, deploy, or add or delete
+keys. The sandbox suite `tests/agent_key.rs` signs with the real key and shows the runtime refusing
+(`MethodNameMismatch`) every other exported method, owner methods, views, callbacks and `init`
+included, without any contract logic running; refusing a call to the signer directly
+(`ReceiverMismatch`); and refusing transfers, key changes and deployment (`RequiresFullAccess`).
+
+**Provisioning (`grant_mandate(agent_key, expiry)`).** Owner only. It adds the key with
+`Promise::add_access_key_allowance`, records `agent_key` and `expiry` in the `Mandate` and takes a
+fresh epoch. If a live (not revoked) mandate exists its key is deleted first, and re-granting that same
+live key is refused (`revoke` first or use a new key): its deletion and re-addition would race. Each key
+action is **its own promise, never one batch**: the actions of a receipt succeed or fail together, so a
+deletion of a key that is already gone would otherwise also cancel the addition of the new one.
+
+**Revocation (`revoke_mandate`).** Owner only; reverts with no mandate; a second revoke is a no-op.
+Two layers, both applied in the call:
+
+1. The `revoked` flag, checked by `evaluate` before the key. It is synchronous: from the next call on
+   the agent is denied `MandateRevoked`, whether or not the deletion has landed and even if it fails.
+2. A `Promise::delete_key` receipt, the protocol-level removal: once it lands the runtime refuses the
+   key outright (`AccessKeyNotFound`).
+
+The deletion is detached, so a failure (the key is already gone) is a failed receipt that does not
+fail `revoke_mandate`, which has already returned. Revocation is expressed by the flag, not by bumping
+the epoch: the epoch identifies grants, and `evaluate` checks the flag.
+
+**Asynchrony.** The key is added and deleted in a later block than the call. Between a grant and the
+add, nobody can authenticate as the agent, so the delay only withholds authority. Between a revoke and
+the delete, the key still reaches the contract, and the flag refuses it. Tests:
+`after_a_revoke_the_epoch_guard_denies_even_if_the_key_survived_the_delete` puts the key back after a
+revoke and shows the contract still denies it.
+
+**Expiry** is enforced by `evaluate` (`MandateExpired`) and does not remove the key. An expired key
+stays on the account, harmless, until the next revoke or grant deletes it.
+
+**Gas allowance and worst-case loss.** The key's gas allowance is a fixed 0.25 NEAR (`AGENT_KEY_ALLOWANCE`,
+a constant). It is spendable from the contract's own balance, so **the most the agent can lose the
+owner is the policy limits plus this allowance per granted key**: the allowance bounds the transaction
+fees the key can burn, whatever it calls (denied requests burn gas too). The runtime checks the
+allowance against the *prepaid* gas at the current gas price and gives unused gas back, so the agent
+must attach what a request needs, not the 300 Tgas maximum; at the mainnet floor price (1e8 yoctoNEAR
+per gas) 0.25 NEAR covers eight 300 Tgas calls, and the sandbox price is ten times that. The allowance
+does not reset: re-issuing the key (revoke, then grant) is what restores it.
+
+**Deployment (required).** The containment claim holds only if no full-access key remains on the
+contract account. The contract does not delete its own key from a method; this is a deployment step:
+
+1. Deploy the wasm to a fresh account and call `init` (in one batched transaction, with the
+   deployer's key). `init` rejects an owner equal to the contract account, so the owner is always a
+   separate account.
+2. Remove the deployer's full-access key: `near account delete-keys <contract> --public-keys <key>`
+   (or a `DeleteKey` action signed by that key).
+3. Verify: `near account list-keys <contract>` shows no full-access key, and after the first grant
+   exactly one function-call key with the receiver, methods and allowance above.
+
+near-sdk exposes no host function to read an account's keys, so there is no on-chain view or assertion
+for this; step 3 is manual. `tests/agent_key.rs` demonstrates both sides: with the deployer key still
+on the account, its holder passes the `#[private]` guard of the callbacks (the guard only checks the
+predecessor), and after the removal the account holds only the agent's key while the owner keeps full
+control. Removing the key means the contract can no longer be redeployed or upgraded; the owner's
+recovery path is `owner_withdraw`.
+
+**Residual risks.** (a) If the owner grants a key that already exists on the account, such as the
+deployer's own, the addition fails silently and that key is the agent: the owner supplies a fresh key.
+(b) The agent key can burn its allowance on denied calls. (c) The runtime checks the allowance against prepaid gas at the current price (above), so a request attached with too much gas is refused before it runs.
+
+**State schema.** `Mandate` changed (`agent: AccountId` became `agent_key: PublicKey`), which changes
+the borsh layout of the stored state, and `grant_mandate` and `dry_run` take a key where they took an
+account. No migration is written: a testnet deployment from before this change needs a fresh account
+or wiped state.
 
 ## Fund custody
 
@@ -375,19 +474,23 @@ worst-case fee), and the next nonce 2.
 ## Evaluation order
 
 The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevoked`,
-`MandateExpired` (`now >= expiry`), `NotAuthorized` (caller is not the mandated agent),
+`MandateExpired` (`now >= expiry`), `NotAuthorized` (the call is not from the contract's own account, or its key is not the mandate's),
 `AssetNotAllowed`, `RecipientNotAllowed`, `PerTxCapExceeded` (`amount > cap`),
 `WindowLimitExceeded` (`effective_spend + amount > limit`, or overflow).
 
 ## Choices that need your review
 
-- **`dry_run` takes a `caller` argument** (spec: `asset, amount, recipient`). A view has no
-  authenticated caller, so without it `NotAuthorized` could never be produced.
-  `request_local_transfer` passes the predecessor instead.
-- **The agent is an `AccountId`**, not an access key. Key-based mandates (function-call key on the
-  contract account) are a later chunk.
+- **`dry_run` and `dry_run_evm` take an `agent_key` argument** (spec: `asset, amount, recipient`). A
+  view has no signer, so without it `NotAuthorized` could never be produced. The real methods use the
+  key that signed the call instead.
+- **The agent is a function-call key on the contract account** (see Agent authority), not an account.
+  The allowance is a fixed 0.25 NEAR and the method list is fixed in code. Flag: the allowance is a
+  judgment call; it must exceed the prepaid gas times the gas price of one request.
+- **A live mandate's key cannot be granted again**, and revoking does not bump the epoch (the flag is
+  the revocation record).
 - **`init` caller:** must be the owner or the contract account itself, so nobody else can claim
-  ownership by initializing first. Deploy and init in one batched transaction.
+  ownership by initializing first. Deploy and init in one batched transaction. The owner must not be
+  the contract account.
 - **`NoMandate` and `MandateRevoked`** are separate reasons so an audit can tell "never granted"
   from "revoked".
 - **Spend history survives `remove_asset_policy`**, so removing and re-adding a policy cannot reset
@@ -443,9 +546,11 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
 ## Invariant to test map
 
 Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
-`src/lifecycle_tests.rs`, `src/custody_tests.rs` and `src/gate_tests.rs`. Integration tests are in
-`tests/invariants.rs` (policy), `tests/transfers.rs` (local transfer path), `tests/custody.rs`
-(custody) and `tests/evm_gate.rs` (the gate), and run against a near-workspaces sandbox.
+`src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs` and `src/mandate_tests.rs`.
+Integration tests are in `tests/invariants.rs` (policy), `tests/transfers.rs` (local transfer path),
+`tests/custody.rs` (custody), `tests/evm_gate.rs` (the gate) and `tests/agent_key.rs` (the agent key),
+and run against a near-workspaces sandbox. In the sandbox the agent signs as the contract account
+with its real function-call key.
 
 | Invariant | Test |
 | --- | --- |
@@ -456,7 +561,14 @@ Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
 | Spend history survives policy removal | `reinstating_a_policy_keeps_spend_history` |
 | Recipient not allowlisted -> `RecipientNotAllowed` | `recipient_not_on_allowlist_is_denied` |
 | No policy -> `AssetNotAllowed` | `asset_without_a_policy_is_denied` |
-| Non-agent caller -> `NotAuthorized` | `only_the_mandated_agent_is_authorized` |
+| A key other than the mandate's -> `NotAuthorized`; so is the right key from any account but the contract's own | `only_the_mandated_agent_is_authorized`; unit `policy::only_the_mandated_key_is_authorized`, `mandate_tests::another_key_on_the_contract_account_is_not_the_agent`, `the_agent_key_is_not_enough_from_any_other_account`; sandbox `agent_key::another_key_on_the_contract_account_is_not_the_agent` |
+| Grant provisions a function-call key scoped to the two agent methods, on the contract itself, with a limited allowance | unit `mandate_tests::a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods`, `the_key_can_reach_only_methods_that_exist_on_the_contract`; sandbox `agent_key::a_grant_puts_a_scoped_function_call_key_on_the_contract_account` (reads the key back from the chain) |
+| The real key is refused by the protocol everywhere but the two agent methods | sandbox `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` (every other exported method, no contract logic runs), `the_agent_key_cannot_call_another_contract_such_as_the_signer`, `the_agent_key_cannot_do_anything_but_call_the_two_methods`; and it passes the new auth on both: `the_agent_key_passes_the_new_authentication_on_both_agent_methods` |
+| Revoke flags the mandate and deletes the key; the flag denies independent of the delete; a failed delete does not fail the revoke | unit `mandate_tests::revoking_flags_the_mandate_and_deletes_the_key`, `a_request_after_revoking_is_denied_by_the_flag_with_no_deletion_landed`, `revoking_twice_is_a_no_op_and_issues_no_second_deletion`; sandbox `agent_key::revoking_deletes_the_key_and_the_deleted_key_can_no_longer_reach_the_contract`, `after_a_revoke_the_epoch_guard_denies_even_if_the_key_survived_the_delete`, `revoking_when_the_key_is_already_gone_does_not_fail` |
+| Re-grant reissues a fresh key and epoch; replacing a live mandate swaps the keys in separate receipts; the live key cannot be granted again | unit `mandate_tests::granting_after_a_revocation_provisions_a_fresh_key_under_a_new_epoch`, `replacing_a_live_mandate_deletes_the_old_key_and_adds_the_new_one`, `the_live_key_cannot_be_granted_again`; sandbox `agent_key::granting_after_a_revoke_reissues_a_fresh_key_and_epoch`, `replacing_a_live_mandate_swaps_the_keys_on_the_account`, `the_key_of_a_live_mandate_cannot_be_granted_again` |
+| Expiry denies through `evaluate` and leaves the key | unit `mandate_tests::an_expired_mandate_denies_even_for_its_own_key`; sandbox `agent_key::an_expired_mandate_denies_through_evaluate_while_the_key_stays_on_the_account` |
+| `init` rejects the contract account as owner | unit `mandate_tests::init_rejects_the_contract_account_as_owner`; sandbox `agent_key::init_rejects_the_contract_account_as_the_owner` |
+| Deployment step: with the deployer key removed the account holds only the agent key and owner control is intact | sandbox `agent_key::removing_the_deployer_key_leaves_only_the_agent_key_and_control_stays_with_the_owner` |
 | Non-owner calls to owner-only methods revert | `owner_only_methods_revert_for_everyone_else` |
 | Second `init` reverts; takeover by outsider reverts | `second_init_reverts`, `init_rejects_callers_other_than_owner_or_contract_and_bad_windows` |
 | Revoked stays revoked until an explicit new grant | `revoked_mandate_stays_revoked_until_a_new_grant`, `no_mandate_is_denied_and_revoking_nothing_reverts` |
@@ -540,6 +652,9 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
   (timeout), or a successful-but-unusable one (wrong-shape JSON, non-JSON garbage, a genuine signature
   padded past the read buffer); for local transfers success, failure, or success with an unexpected
   payload. This is what exercises reservations, TOCTOU and exactly-once settlement across orderings.
+- The agent is identified by public key, as in production: its calls come from the contract account
+  signed with the mandate's key, and every grant rotates between two keys (the contract refuses to
+  re-grant the live one). A `StaleKeyRequest` action signs a request with the other, stale key.
 - Two assets (NEAR and EVM), an allowlisted and a non-allowlisted recipient, amounts at, below and
   over the per-transaction cap, owner tightening and loosening of a policy, grant, revoke, freeze,
   unfreeze, and time advances inside a slot, across a slot boundary and past a whole window.
@@ -559,9 +674,9 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | Suite (test) | Actions | States | Transitions | Deduplicated | No-ops skipped | Focus |
 | --- | --- | --- | --- | --- | --- | --- |
 | accounting (`exhaustive_accounting_across_interleavings`) | 9 | 20,289 | 87,451 | 63,830 | 2,324 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
-| authority (`exhaustive_authority_and_time`) | 10 | 30,715 | 127,486 | 87,389 | 29,194 | freeze, unfreeze, revoke, short and long grants, slot advances, interleaved with in-flight requests |
+| authority (`exhaustive_authority_and_time`) | 11 | 30,715 | 143,154 | 103,057 | 29,194 | freeze, unfreeze, revoke, short and long grants (each rotating the agent key), slot advances, requests with the current and the stale key, interleaved with in-flight requests |
 | policy (`exhaustive_policy_changes_and_caps`) | 11 | 13,486 | 73,721 | 54,642 | 11,749 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
-| **Total** | | **64,490** | **288,658** | | | |
+| **Total** | | **64,490** | **304,326** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -586,6 +701,7 @@ every step. Every step of every harness driver runs every check.
 | Monotonic revocation: once frozen, revoked or expired, nothing is approved until `unfreeze` or a new grant (stated by separate ghost bookkeeping, not by the oracle's `decide`) | | yes | | yes | |
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
+| Agent authentication is by key: every grant switches to the other of two keys, and a request signed with the key the mandate no longer names is never approved (`NotAuthorized` once the mandate checks that rank above it pass), and `dry_run` agrees | | yes | | yes | |
 | EVM nonce: the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
 | Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |
 | G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `OtherSigner` | all | |
