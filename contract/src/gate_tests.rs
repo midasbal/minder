@@ -44,6 +44,7 @@ fn armed_evm() -> Minder {
     minder.set_evm_config(
         account("signer.near"),
         "minder-evm-1".to_string(),
+        test_sender_hex(),
         CHAIN_ID,
         U128(MAX_FEE),
         U128(MAX_PRIORITY_FEE),
@@ -80,8 +81,15 @@ fn signature(affine_point: &str, scalar: &str, recovery_id: u8) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The fixture signature over the signing hash of `expected_tx(nonce, value)`.
+fn fixture_for(nonce: u64, value: u128, signer: Signer) -> FixtureSignature {
+    fixture_signature(&evm::signing_hash(&expected_tx(nonce, value)), signer)
+}
+
+/// A real signature by the configured sender over the first payment (nonce 0,
+/// value 1000), as the signer contract would return it.
 fn valid_signature() -> Vec<u8> {
-    signature(&format!("02{R}"), S, 1)
+    signer_response(&fixture_for(0, 1000, Signer::Sender))
 }
 
 /// Runs the settlement callback as the contract with the signer's result,
@@ -352,6 +360,7 @@ fn configure(
     minder.set_evm_config(
         account(signer),
         path.to_string(),
+        test_sender_hex(),
         CHAIN_ID,
         U128(fee),
         U128(tip),
@@ -413,6 +422,56 @@ fn fees_and_chain_can_change_but_the_signing_identity_cannot() {
         configure(&mut minder, "signer.near", "another-path", 5, 1, None);
     }));
     assert!(panic_message(new_path).contains("cannot change once set"));
+    let new_sender = catch_unwind(AssertUnwindSafe(|| {
+        minder.set_evm_config(
+            account("signer.near"),
+            "minder-evm-1".to_string(),
+            "0x70997970c51812dc3a010c7d01b50e0d17dc79c8".to_string(),
+            CHAIN_ID,
+            U128(5),
+            U128(1),
+            None,
+        );
+    }));
+    assert!(panic_message(new_sender).contains("cannot change once set"));
+    assert_eq!(
+        minder.get_evm_config().unwrap().sender,
+        test_sender_hex(),
+        "the sender survived the attempt"
+    );
+}
+
+#[test]
+fn the_config_view_shows_the_sender_as_an_address() {
+    let minder = armed_evm();
+    let view = near_sdk::serde_json::to_value(minder.get_evm_config().unwrap()).unwrap();
+    assert_eq!(view["sender"], test_sender_hex());
+}
+
+#[test]
+fn the_sender_must_be_a_usable_address() {
+    let mut minder = armed_as_agent();
+    as_owner();
+    for (label, sender) in [
+        ("zero address", "0x0000000000000000000000000000000000000000"),
+        ("too short", "0x9c9e702f"),
+        ("not hex", "0xzz9e702f019f8354ddc1ce9a5ad0d95ce00e04c2"),
+        ("empty", ""),
+    ] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            minder.set_evm_config(
+                account("s.near"),
+                "p".into(),
+                sender.to_string(),
+                CHAIN_ID,
+                U128(1),
+                U128(1),
+                None,
+            )
+        }));
+        assert!(result.is_err(), "{label} must be rejected");
+    }
+    assert!(minder.get_evm_config().is_none(), "nothing was stored");
 }
 
 #[test]
@@ -438,6 +497,7 @@ fn the_config_rejects_unusable_values() {
         rejected(&mut minder, &|m| m.set_evm_config(
             account("s.near"),
             "p".into(),
+            test_sender_hex(),
             0,
             U128(1),
             U128(1),
@@ -501,19 +561,143 @@ fn a_returned_signature_settles_once_and_emits_the_signed_transaction() {
     let events = event_lines(&logs);
     assert_eq!(events.len(), 1);
     let data = &events[0]["data"][0];
-    let expected_raw = evm::encode_signed(
-        &expected_tx(0, 1000),
-        evm::hex_decode(R).unwrap().try_into().unwrap(),
-        evm::hex_decode(S).unwrap().try_into().unwrap(),
-        1,
-    );
-    assert_eq!(
-        data["raw_tx"],
-        format!("0x{}", evm::hex_encode(&expected_raw))
-    );
+    // The reference serialization from the independent signer, not our encoder.
+    let reference = fixture_for(0, 1000, Signer::Sender).raw_tx;
+    assert_eq!(data["raw_tx"], format!("0x{}", evm::hex_encode(&reference)));
     assert_eq!(data["nonce"], 0);
     assert_eq!(data["to"], RECIPIENT);
     assert_eq!(data["value"], "1000");
+}
+
+// ---- Authenticity: the signature must recover to the configured sender ----
+
+/// What settlement must do when the signature is well formed but does not
+/// recover to the sender: book the outlay as for any successful receipt, emit
+/// no transaction, and say why.
+fn assert_booked_but_not_emitted(minder: &Minder, logs: &[String], outlay: u128) {
+    assert_eq!(reserved(minder, evm_asset()), 0);
+    assert_eq!(committed(minder, evm_asset()), outlay, "booked per G1");
+    assert!(event_lines(logs).is_empty(), "nothing emitted");
+    let line = logs
+        .iter()
+        .find(|line| line.contains("authenticity failure"))
+        .expect("an authenticity-failure line is logged");
+    assert!(line.contains("signer or configuration fault"));
+}
+
+#[test]
+fn a_signature_by_another_key_is_booked_but_not_emitted() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let outlay = 1000 + FEE_COST;
+    let other = signer_response(&fixture_for(0, 1000, Signer::Other));
+    let logs = settle(
+        &mut minder,
+        outlay,
+        0,
+        1000,
+        PromiseResult::Successful(other),
+    );
+    assert_booked_but_not_emitted(&minder, &logs, outlay);
+    let line = logs
+        .iter()
+        .find(|l| l.contains("authenticity failure"))
+        .unwrap();
+    assert!(
+        line.contains(&test_sender_hex()),
+        "names the configured sender"
+    );
+}
+
+#[test]
+fn a_signature_over_a_different_transaction_is_booked_but_not_emitted() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let outlay = 1000 + FEE_COST;
+    // The sender's own signature, but over the nonce-1 transaction.
+    let wrong_hash = signer_response(&fixture_for(1, 1000, Signer::Sender));
+    let logs = settle(
+        &mut minder,
+        outlay,
+        0,
+        1000,
+        PromiseResult::Successful(wrong_hash),
+    );
+    assert_booked_but_not_emitted(&minder, &logs, outlay);
+}
+
+#[test]
+fn a_signature_that_recovers_to_nothing_is_booked_but_not_emitted() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let outlay = 1000 + FEE_COST;
+    // x = 5 is not the x coordinate of any secp256k1 point, so no key recovers.
+    let real = fixture_for(0, 1000, Signer::Sender);
+    let off_curve = signature(
+        &format!("02{}", "00".repeat(31) + "05"),
+        &evm::hex_encode(&real.s),
+        0,
+    );
+    let logs = settle(
+        &mut minder,
+        outlay,
+        0,
+        1000,
+        PromiseResult::Successful(off_curve),
+    );
+    assert_booked_but_not_emitted(&minder, &logs, outlay);
+    assert!(logs.iter().any(|l| l.contains("recovers to no address")));
+}
+
+#[test]
+fn a_flipped_recovery_id_is_booked_but_not_emitted() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let outlay = 1000 + FEE_COST;
+    let real = fixture_for(0, 1000, Signer::Sender);
+    let flipped = signature(
+        &format!("02{}", evm::hex_encode(&real.r)),
+        &evm::hex_encode(&real.s),
+        real.y_parity ^ 1,
+    );
+    let logs = settle(
+        &mut minder,
+        outlay,
+        0,
+        1000,
+        PromiseResult::Successful(flipped),
+    );
+    assert_booked_but_not_emitted(&minder, &logs, outlay);
+}
+
+#[test]
+fn a_sender_that_differs_from_the_signing_key_blocks_emission() {
+    // The configuration fault: the sender set is not the address the signer's
+    // key derives to, so even the signer's genuine signatures are not emitted.
+    let mut minder = armed_as_agent();
+    testing_env!(context("owner.near").build());
+    minder.set_asset_policy(evm_asset(), U128(EVM_PER_TX_CAP), U128(EVM_WINDOW_LIMIT));
+    minder.set_evm_recipient(RECIPIENT.to_string(), true);
+    minder.set_evm_config(
+        account("signer.near"),
+        "minder-evm-1".to_string(),
+        RECIPIENT.to_string(),
+        CHAIN_ID,
+        U128(MAX_FEE),
+        U128(MAX_PRIORITY_FEE),
+        None,
+    );
+    testing_env!(context("agent.near").build());
+    request(&mut minder, 1000);
+    let outlay = 1000 + FEE_COST;
+    let logs = settle(
+        &mut minder,
+        outlay,
+        0,
+        1000,
+        PromiseResult::Successful(valid_signature()),
+    );
+    assert_booked_but_not_emitted(&minder, &logs, outlay);
 }
 
 #[test]
@@ -537,15 +721,10 @@ fn a_failed_signer_call_releases_and_commits_nothing() {
 /// A genuine, assemblable signature padded past the contract's read buffer: the
 /// bytes are unreadable to the contract but the signer did sign.
 fn oversized_valid_signature() -> Vec<u8> {
-    json!({
-        "scheme": "Secp256k1",
-        "big_r": { "affine_point": format!("02{R}") },
-        "s": { "scalar": S },
-        "recovery_id": 1,
-        "padding": "x".repeat(5000),
-    })
-    .to_string()
-    .into_bytes()
+    let signature = fixture_for(0, 1000, Signer::Sender);
+    let mut response: Value = serde_json::from_slice(&signer_response(&signature)).unwrap();
+    response["padding"] = json!("x".repeat(5000));
+    response.to_string().into_bytes()
 }
 
 #[test]
@@ -661,10 +840,11 @@ fn only_a_failed_receipt_books_nothing() {
 fn a_high_s_signature_is_normalized_before_the_transaction_is_emitted() {
     let mut minder = armed_evm();
     request(&mut minder, 1000);
-    // n - S with the opposite parity is the same signature in high-s form.
+    // n - s with the opposite parity is the same signature in high-s form.
+    let real = fixture_for(0, 1000, Signer::Sender);
     let n_minus_s = {
         let order = hex_array("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
-        let s = hex_array(S);
+        let s = real.s;
         let mut out = [0u8; 32];
         let mut borrow = 0i16;
         for i in (0..32).rev() {
@@ -682,12 +862,16 @@ fn a_high_s_signature_is_normalized_before_the_transaction_is_emitted() {
         1000 + FEE_COST,
         0,
         1000,
-        PromiseResult::Successful(signature(&format!("02{R}"), &n_minus_s, 0)),
+        PromiseResult::Successful(signature(
+            &format!("02{}", evm::hex_encode(&real.r)),
+            &n_minus_s,
+            real.y_parity ^ 1,
+        )),
     );
-    let low_form = evm::encode_signed(&expected_tx(0, 1000), hex_array(R), hex_array(S), 1);
+    // Emitted in the canonical low-s form, byte for byte as the reference signer made it.
     assert_eq!(
         event_lines(&logs)[0]["data"][0]["raw_tx"],
-        format!("0x{}", evm::hex_encode(&low_form))
+        format!("0x{}", evm::hex_encode(&real.raw_tx))
     );
 }
 

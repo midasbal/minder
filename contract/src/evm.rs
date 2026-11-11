@@ -103,23 +103,32 @@ pub enum EvmError {
     R,
 }
 
-/// The gate-facing assembler: takes the MPC's raw signature components and
-/// returns the raw signed transaction, or an error for any input that could not
-/// come from a valid signature. **Never panics.** Every precondition of
-/// [`normalize_s`] and [`encode_signed`] is checked here first, so their
-/// asserts are unreachable on this path.
+/// A signature as it goes into a transaction: `s` in the lower half of the
+/// curve order and `y_parity` 0 or 1. Producing one is
+/// [`normalized_signature`]'s job; everything downstream (the encoded
+/// transaction, the authenticity check) uses this exact triple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signature {
+    pub r: [u8; 32],
+    pub s: [u8; 32],
+    pub y_parity: u8,
+}
+
+/// Validates the MPC's raw signature components and normalizes them for a
+/// transaction, or returns an error for any input that could not come from a
+/// valid signature. **Never panics.** Every precondition of [`normalize_s`] is
+/// checked here first, so its asserts are unreachable on this path.
 ///
 /// - `affine_point`: the signer's `big_r.affine_point`, a 33-byte compressed
 ///   point. `r` is its x coordinate, `affine_point[1..]`. (The `02`/`03` byte
 ///   is not compared with `recovery_id`; the signer may have flipped `s`.)
 /// - `scalar`: the signer's `s.scalar`, 32 bytes big-endian.
 /// - `recovery_id`: 0 or 1, used as `y_parity` after low-s normalization.
-pub fn try_assemble_signed(
-    tx: &Eip1559Tx,
+pub fn normalized_signature(
     affine_point: &[u8],
     scalar: &[u8],
     recovery_id: u8,
-) -> Result<Vec<u8>, EvmError> {
+) -> Result<Signature, EvmError> {
     if recovery_id > 1 {
         return Err(EvmError::RecoveryId);
     }
@@ -137,7 +146,36 @@ pub fn try_assemble_signed(
         return Err(EvmError::R);
     }
     let (s, y_parity) = normalize_s(s, recovery_id);
+    Ok(Signature { r, s, y_parity })
+}
+
+/// The gate-facing assembler: [`normalized_signature`] followed by
+/// [`encode_signed`], returning the raw signed transaction. **Never panics.**
+pub fn try_assemble_signed(
+    tx: &Eip1559Tx,
+    affine_point: &[u8],
+    scalar: &[u8],
+    recovery_id: u8,
+) -> Result<Vec<u8>, EvmError> {
+    let Signature { r, s, y_parity } = normalized_signature(affine_point, scalar, recovery_id)?;
     Ok(encode_signed(tx, r, s, y_parity))
+}
+
+/// The EVM address that signed `hash` to produce `signature`, by the runtime's
+/// `ecrecover`: the last 20 bytes of the keccak-256 of the recovered public
+/// key. `None` if no public key can be recovered.
+///
+/// The malleability flag is on, so the host refuses a high `s`, as Ethereum
+/// does; [`Signature`] is always low-s. Never panics.
+pub fn recover_address(hash: &[u8; 32], signature: &Signature) -> Option<[u8; 20]> {
+    let mut r_and_s = [0u8; 64];
+    r_and_s[..32].copy_from_slice(&signature.r);
+    r_and_s[32..].copy_from_slice(&signature.s);
+    let public_key = env::ecrecover(hash, &r_and_s, signature.y_parity, true)?;
+    let digest = env::keccak256_array(public_key);
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&digest[12..]);
+    Some(address)
 }
 
 /// `1 <= value < n`.
@@ -672,5 +710,116 @@ mod tests {
         assert_eq!(parse_address("0x1234"), None, "too short");
         assert_eq!(parse_address(&format!("{text}00")), None, "too long");
         assert_eq!(parse_address(&format!("0x{}", "g".repeat(40))), None);
+    }
+
+    // ---- Authenticity: recovering the signer ----
+
+    /// A real Chain Signatures MPC response on `v1.signer-prod.testnet` (the
+    /// yield-resume spike): the signature over this hash, for the account
+    /// `yield-spike-530f5512.testnet` and path `yield-spike-1`, whose derived
+    /// Ethereum address is 0xec381cf191A500D99E128F4D9BfEf9d5FDc6a58c. Produced
+    /// by a signer entirely independent of this repository.
+    const MPC_HASH: &str = "c88d01879201e9035c92e56ef2bb8ce3e0e22adaf7c527fb78dfaefa73c09536";
+    const MPC_AFFINE_POINT: &str =
+        "02c0e71f01267af09d34b9abac10ffe888055a8b9d34d863f084ff17b9f708f3dd";
+    const MPC_SCALAR: &str = "72001377c31d0dc2048f8d456d55177f4365744bbd445ed817b877f0cf40f9d7";
+    const MPC_RECOVERY_ID: u8 = 1;
+    const MPC_ADDRESS: &str = "0xec381cf191a500d99e128f4d9bfef9d5fdc6a58c";
+
+    fn mpc_signature() -> Signature {
+        normalized_signature(&hex(MPC_AFFINE_POINT), &hex(MPC_SCALAR), MPC_RECOVERY_ID).unwrap()
+    }
+
+    fn mpc_hash() -> [u8; 32] {
+        hex(MPC_HASH).try_into().unwrap()
+    }
+
+    #[test]
+    fn a_real_mpc_signature_recovers_to_the_derived_address() {
+        assert_eq!(
+            recover_address(&mpc_hash(), &mpc_signature()),
+            Some(hex20(&MPC_ADDRESS[2..]))
+        );
+    }
+
+    #[test]
+    fn the_real_signature_does_not_recover_to_that_address_for_anything_else() {
+        let address = Some(hex20(&MPC_ADDRESS[2..]));
+        // A different hash.
+        let mut other_hash = mpc_hash();
+        other_hash[31] ^= 1;
+        assert_ne!(recover_address(&other_hash, &mpc_signature()), address);
+        // The other parity.
+        let flipped = Signature {
+            y_parity: MPC_RECOVERY_ID ^ 1,
+            ..mpc_signature()
+        };
+        assert_ne!(recover_address(&mpc_hash(), &flipped), address);
+        // A different s.
+        let mut other_s = mpc_signature();
+        other_s.s[31] ^= 1;
+        assert_ne!(recover_address(&mpc_hash(), &other_s), address);
+    }
+
+    #[test]
+    fn recovery_refuses_a_high_s_signature() {
+        // (r, n - s, parity ^ 1) is the same signature in high-s form; the
+        // host's malleability flag refuses it, so only canonical triples pass.
+        let low = mpc_signature();
+        let mut high_s = [0u8; 32];
+        let mut borrow = 0i16;
+        for i in (0..32).rev() {
+            let mut digit = i16::from(SECP256K1_ORDER[i]) - i16::from(low.s[i]) - borrow;
+            borrow = i16::from(digit < 0);
+            if digit < 0 {
+                digit += 256;
+            }
+            high_s[i] = digit as u8;
+        }
+        let high = Signature {
+            r: low.r,
+            s: high_s,
+            y_parity: low.y_parity ^ 1,
+        };
+        assert_eq!(recover_address(&mpc_hash(), &high), None);
+    }
+
+    #[test]
+    fn a_point_off_the_curve_recovers_to_nothing() {
+        // x = 5 is not the x coordinate of any secp256k1 point.
+        let mut r = [0u8; 32];
+        r[31] = 5;
+        let signature = Signature {
+            r,
+            ..mpc_signature()
+        };
+        assert_eq!(recover_address(&mpc_hash(), &signature), None);
+    }
+
+    #[test]
+    fn independent_fixture_signatures_recover_to_their_keys() {
+        use crate::test_support::{fixture_signature, test_sender, Signer};
+        let tx = Eip1559Tx {
+            chain_id: 11_155_111,
+            nonce: 0,
+            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas: 2_000_000_000,
+            gas_limit: 21_000,
+            to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            value: 1000,
+        };
+        let hash = signing_hash(&tx);
+        let recovered = |signer| {
+            let fixture = fixture_signature(&hash, signer);
+            let signature = Signature {
+                r: fixture.r,
+                s: fixture.s,
+                y_parity: fixture.y_parity,
+            };
+            recover_address(&hash, &signature)
+        };
+        assert_eq!(recovered(Signer::Sender), Some(test_sender()));
+        assert_ne!(recovered(Signer::Other), Some(test_sender()));
+        assert!(recovered(Signer::Other).is_some());
     }
 }

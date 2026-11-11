@@ -178,7 +178,7 @@ fn exhaustive_policy_changes_and_caps() {
             variant: PolicyVariant::Default,
         },
         deliver(Pick::Oldest, Outcome::Ok),
-        deliver(Pick::Newest, Outcome::Garbage),
+        deliver(Pick::Newest, Outcome::OtherSigner),
         Action::Advance(Tick::Slot),
     ];
     let stats = run_exhaustive("policy", &alphabet, DEPTH);
@@ -187,7 +187,7 @@ fn exhaustive_policy_changes_and_caps() {
         &[
             "Denied(Near, PerTxCapExceeded)",
             "Denied(Evm, RecipientNotAllowed)",
-            "Delivered(Evm, Garbage)",
+            "Delivered(Evm, OtherSigner)",
         ],
     );
 }
@@ -233,6 +233,7 @@ fn random_long_sequences() {
             "Delivered(Evm, WrongShape)",
             "Delivered(Evm, Garbage)",
             "Delivered(Evm, Oversized)",
+            "Delivered(Evm, OtherSigner)",
         ],
     );
     println!(

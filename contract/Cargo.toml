@@ -15,7 +15,11 @@ crate-type = ["cdylib", "rlib"]
 test-helpers = []
 
 [dependencies]
-near-sdk = "=5.29.1"
+# `unstable` is what exposes `env::ecrecover`, used to check that a signature
+# really recovers to this contract's own EVM address. The version is pinned
+# exactly, so an "unstable" API cannot change under us. The other things the
+# feature adds (`store::TreeMap`, `near_sys` as `sys`) are unused.
+near-sdk = { version = "=5.29.1", features = ["unstable"] }
 
 [dev-dependencies]
 near-sdk = { version = "=5.29.1", features = ["unit-testing"] }

@@ -13,8 +13,8 @@ use near_sdk::serde::Deserialize;
 use near_sdk::serde_json::{self, json};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError};
 
-use crate::evm::{self, Eip1559Tx, EvmError};
-use crate::types::{AssetId, Decision, EvmConfig};
+use crate::evm::{self, Eip1559Tx, EvmError, Signature};
+use crate::types::{AssetId, Decision, EvmConfig, EvmConfigView};
 use crate::{page, Minder, MinderExt};
 
 /// The signer requires at least 15 Tgas on `sign` and 1 yoctoNEAR.
@@ -45,14 +45,21 @@ impl Minder {
         }
     }
 
-    /// Sets how EVM payments are built. `signer_id` and `derivation_path`
-    /// identify the signing key, so they are fixed once set: the nonce counter
-    /// is only meaningful for one sending address. Chain id and fees may be
+    /// Sets how EVM payments are built. `signer_id`, `derivation_path` and
+    /// `sender` identify the signing key, so they are fixed once set: the nonce
+    /// counter is only meaningful for one sending address, and `sender` is what
+    /// every signature is checked against. `sender` is this contract's own EVM
+    /// address, the one the signer derives for this contract account and
+    /// `derivation_path` (`0x` and 40 hex digits). Chain id and fees may be
     /// changed. `gas_limit` defaults to 21000, a plain ETH transfer.
+    // The flat argument list is the call's JSON interface; grouping the fields
+    // into one object would change it for every caller.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_evm_config(
         &mut self,
         signer_id: AccountId,
         derivation_path: String,
+        sender: String,
         chain_id: u64,
         max_fee_per_gas: U128,
         max_priority_fee_per_gas: U128,
@@ -62,6 +69,7 @@ impl Minder {
         let config = EvmConfig {
             signer_id,
             derivation_path,
+            sender: parse_address(&sender),
             chain_id,
             max_fee_per_gas,
             max_priority_fee_per_gas,
@@ -69,6 +77,10 @@ impl Minder {
         };
         require!(config.chain_id > 0, "chain_id must be positive");
         require!(config.gas_limit > 0, "gas_limit must be positive");
+        require!(
+            config.sender != [0u8; 20],
+            "sender must not be the zero address"
+        );
         require!(
             !config.derivation_path.is_empty(),
             "derivation_path must not be empty"
@@ -88,8 +100,9 @@ impl Minder {
         if let Some(existing) = &self.evm_config {
             require!(
                 existing.signer_id == config.signer_id
-                    && existing.derivation_path == config.derivation_path,
-                "signer_id and derivation_path cannot change once set"
+                    && existing.derivation_path == config.derivation_path
+                    && existing.sender == config.sender,
+                "signer_id, derivation_path and sender cannot change once set"
             );
         }
         self.evm_config = Some(config);
@@ -180,16 +193,22 @@ impl Minder {
     ///
     /// It releases the reservation first and unconditionally. Whether to book
     /// the spend then depends only on whether the signer's receipt *succeeded*,
-    /// never on whether this contract could read, size-fit, parse or assemble
-    /// what it returned:
+    /// never on whether this contract could read, size-fit, parse, assemble or
+    /// authenticate what it returned:
     /// - **Receipt failed** (`PromiseError::Failed`, which includes the signer's
     ///   own timeout): nothing was signed. Nothing is booked.
     /// - **Receipt did not fail**: the signer produced output that sits in a
     ///   public receipt and may be broadcastable by anyone, whether or not we can
-    ///   use it. The outlay is booked unconditionally. Only if the output then
-    ///   assembles into a valid transaction is the raw signed transaction
-    ///   emitted for an off-chain relayer; otherwise the spend stays booked, the
-    ///   rejection is logged, and nothing is emitted.
+    ///   use it. The outlay is booked unconditionally.
+    ///
+    /// Emission is a separate, stricter matter. The raw signed transaction is
+    /// emitted for an off-chain relayer only if the output assembles into a
+    /// valid transaction **and** `ecrecover` over the hash this contract
+    /// computed, with the signature exactly as it goes into the transaction,
+    /// yields the configured `sender`. Format validation shows a signature is
+    /// well formed; this shows it is authentically ours. Otherwise the spend
+    /// stays booked, the reason is logged (an authenticity failure is named as a
+    /// signer or configuration fault) and nothing is emitted.
     ///
     /// The arguments are borsh, not JSON: they are produced only by this
     /// contract, and the transaction carries `u128` fields.
@@ -220,17 +239,34 @@ impl Minder {
         };
 
         // Fail-safe: a receipt that did not fail may hold a usable signature.
+        // Nothing below changes this: ecrecover decides emission, not booking.
         self.record_spend(&asset, outlay);
 
         let Some(response) = response else {
             env::log_str("evm payment booked, no transaction emitted: unreadable signer result");
             return;
         };
-        match assemble_from_response(&tx, &response) {
-            Ok(raw_tx) => env::log_str(&signed_payment_event(&tx, &raw_tx)),
-            Err(rejection) => env::log_str(&format!(
-                "evm payment booked, no transaction emitted: signature rejected ({rejection:?})"
-            )),
+        let signature = match parse_signature(&response) {
+            Ok(signature) => signature,
+            Err(rejection) => {
+                env::log_str(&format!(
+                    "evm payment booked, no transaction emitted: signature rejected ({rejection:?})"
+                ));
+                return;
+            }
+        };
+
+        // Authenticity: recover the signer of the hash this contract computed
+        // (never a hash from the response) and compare it to the configured
+        // sender. No configured sender cannot happen once a request was
+        // accepted, but it fails closed all the same.
+        let recovered = evm::recover_address(&evm::signing_hash(&tx), &signature);
+        let sender = self.evm_config.as_ref().map(|config| config.sender);
+        if recovered.is_some() && recovered == sender {
+            let raw_tx = evm::encode_signed(&tx, signature.r, signature.s, signature.y_parity);
+            env::log_str(&signed_payment_event(&tx, &raw_tx));
+        } else {
+            env::log_str(&authenticity_failure(recovered, sender));
         }
     }
 
@@ -249,8 +285,8 @@ impl Minder {
         )
     }
 
-    pub fn get_evm_config(&self) -> Option<EvmConfig> {
-        self.evm_config.clone()
+    pub fn get_evm_config(&self) -> Option<EvmConfigView> {
+        self.evm_config.as_ref().map(EvmConfigView::from)
     }
 
     /// The nonce the next payment on `chain_id` will use.
@@ -333,9 +369,9 @@ enum Rejection {
     Invalid(EvmError),
 }
 
-/// Pure: from the signer's raw result bytes to a signed transaction. Never
-/// panics on any input.
-fn assemble_from_response(tx: &Eip1559Tx, response: &[u8]) -> Result<Vec<u8>, Rejection> {
+/// Pure: from the signer's raw result bytes to the signature that goes into a
+/// transaction (validated and normalized to low-s). Never panics on any input.
+fn parse_signature(response: &[u8]) -> Result<Signature, Rejection> {
     let response: SignerResponse =
         serde_json::from_slice(response).map_err(|_| Rejection::Malformed)?;
     if response
@@ -347,8 +383,24 @@ fn assemble_from_response(tx: &Eip1559Tx, response: &[u8]) -> Result<Vec<u8>, Re
     }
     let affine_point = evm::hex_decode(&response.big_r.affine_point).ok_or(Rejection::Malformed)?;
     let scalar = evm::hex_decode(&response.s.scalar).ok_or(Rejection::Malformed)?;
-    evm::try_assemble_signed(tx, &affine_point, &scalar, response.recovery_id)
+    evm::normalized_signature(&affine_point, &scalar, response.recovery_id)
         .map_err(Rejection::Invalid)
+}
+
+/// The log line for a signature that is well formed but does not recover to
+/// the configured sender. The recovered address is shown because it is what
+/// the owner needs to find the fault: a wrong `sender` in the configuration, a
+/// wrong derivation path, or a signer signing with another key.
+fn authenticity_failure(recovered: Option<[u8; 20]>, sender: Option<[u8; 20]>) -> String {
+    let show = |address: Option<[u8; 20]>, absent: &str| {
+        address.map_or(absent.to_string(), |address| evm::format_address(&address))
+    };
+    format!(
+        "evm payment booked, no transaction emitted: authenticity failure, the signature \
+         recovers to {} but the configured sender is {}; this is a signer or configuration fault",
+        show(recovered, "no address"),
+        show(sender, "unset"),
+    )
 }
 
 /// NEP-297 event line carrying the raw signed transaction.
@@ -386,6 +438,13 @@ mod tests {
 
     const R: &str = "5b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9";
     const S: &str = "2a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+
+    /// The assembly half of the callback, without the authenticity check:
+    /// parse and normalize the signer's response, then encode the transaction.
+    fn assemble_from_response(tx: &Eip1559Tx, response: &[u8]) -> Result<Vec<u8>, Rejection> {
+        parse_signature(response)
+            .map(|signature| evm::encode_signed(tx, signature.r, signature.s, signature.y_parity))
+    }
 
     fn response(
         affine_point: &str,

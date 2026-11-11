@@ -1,7 +1,10 @@
 //! Test double for the Chain Signatures contract (`v1.signer`). It enforces the
 //! real signer's preconditions on `sign` (1 yoctoNEAR, at least 15 Tgas,
-//! domain 0), records each request, and answers with a fixed signature in the
-//! shape the real signer returns. It signs nothing.
+//! domain 0), records each request, and answers in the shape the real signer
+//! returns. It signs nothing: it replays signatures registered per hash by the
+//! test (made by an independent signer), so the contract under test receives
+//! signatures that genuinely recover, or deliberately do not, for the hash it
+//! sent.
 
 use near_sdk::serde_json::{json, Value};
 use near_sdk::{
@@ -11,15 +14,19 @@ use near_sdk::{
 /// Padding that pushes an otherwise valid response past 4096 bytes.
 const OVERSIZED_PADDING: usize = 5000;
 
-/// The `r` and `s` of the fixed signature (low `s`), as 32-byte hex.
+/// Well-formed numbers for the wrong-shape response, which is never checked
+/// against a hash.
 const R: &str = "5b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9";
 const S: &str = "2a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Answer with the fixed valid signature.
+    /// Answer with the registered signature of the configured sender key.
     Sign,
+    /// Answer with the registered signature of a different key: well formed
+    /// and genuine for the hash, but not by the configured sender.
+    OtherSigner,
     /// Answer with a signature whose recovery id is 2, which cannot sign an
     /// Ethereum transaction.
     BadSignature,
@@ -44,6 +51,19 @@ pub struct Request {
     pub domain_id: u64,
 }
 
+/// A signature the test registered for a payload, by one of two keys.
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct Registered {
+    /// The 32-byte payload, hex without a prefix.
+    pub hash: String,
+    /// `sender` or `other`.
+    pub key: String,
+    pub r: String,
+    pub s: String,
+    pub recovery_id: u8,
+}
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct MockSigner {
@@ -52,6 +72,7 @@ pub struct MockSigner {
     /// flight for several blocks.
     slow_hops: u32,
     requests: Vec<Request>,
+    signatures: Vec<Registered>,
 }
 
 #[near]
@@ -62,11 +83,23 @@ impl MockSigner {
             mode: Mode::Sign,
             slow_hops: 0,
             requests: Vec::new(),
+            signatures: Vec::new(),
         }
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    /// Registers signatures made over payloads by the `sender` or `other` key.
+    pub fn register_signatures(&mut self, signatures: Vec<Registered>) {
+        for signature in &signatures {
+            require!(
+                signature.key == "sender" || signature.key == "other",
+                "mock signer: key must be sender or other"
+            );
+        }
+        self.signatures.extend(signatures);
     }
 
     pub fn set_slow_hops(&mut self, hops: u32) {
@@ -92,15 +125,15 @@ impl MockSigner {
         self.requests.push(Request {
             predecessor: env::predecessor_account_id(),
             path: request["path"].as_str().unwrap_or_default().to_string(),
-            hash,
+            hash: hash.clone(),
             domain_id,
         });
-        self.answer(self.slow_hops)
+        self.answer(self.slow_hops, &hash)
     }
 
     #[private]
-    pub fn hop(&mut self, remaining: u32) -> PromiseOrValue<Value> {
-        self.answer(remaining)
+    pub fn hop(&mut self, remaining: u32, hash: String) -> PromiseOrValue<Value> {
+        self.answer(remaining, &hash)
     }
 
     /// A successful result that is not JSON: borsh-encoded bytes.
@@ -116,15 +149,23 @@ impl MockSigner {
 }
 
 impl MockSigner {
-    fn answer(&self, remaining: u32) -> PromiseOrValue<Value> {
+    fn registered(&self, hash: &str, key: &str) -> &Registered {
+        self.signatures
+            .iter()
+            .find(|signature| signature.hash == hash && signature.key == key)
+            .unwrap_or_else(|| env::panic_str("mock signer: no signature registered for the hash"))
+    }
+
+    fn answer(&self, remaining: u32, hash: &str) -> PromiseOrValue<Value> {
         if remaining > 0 {
             return PromiseOrValue::Promise(
-                Self::ext(env::current_account_id()).hop(remaining - 1),
+                Self::ext(env::current_account_id()).hop(remaining - 1, hash.to_string()),
             );
         }
-        let recovery_id = match self.mode {
-            Mode::Sign | Mode::Oversized => 1,
-            Mode::BadSignature => 2,
+        let (key, recovery_override) = match self.mode {
+            Mode::Sign | Mode::Oversized => ("sender", None),
+            Mode::OtherSigner => ("other", None),
+            Mode::BadSignature => ("sender", Some(2)),
             Mode::Fail => env::panic_str("mock signer: set to fail"),
             Mode::WrongShape => {
                 return PromiseOrValue::Value(json!({
@@ -137,11 +178,12 @@ impl MockSigner {
                 return PromiseOrValue::Promise(Self::ext(env::current_account_id()).garbage());
             }
         };
+        let signature = self.registered(hash, key);
         let mut response = json!({
             "scheme": "Secp256k1",
-            "big_r": { "affine_point": format!("02{R}") },
-            "s": { "scalar": S },
-            "recovery_id": recovery_id,
+            "big_r": { "affine_point": format!("02{}", signature.r) },
+            "s": { "scalar": signature.s },
+            "recovery_id": recovery_override.unwrap_or(signature.recovery_id),
         });
         if self.mode == Mode::Oversized {
             response["padding"] = json!("x".repeat(OVERSIZED_PADDING));

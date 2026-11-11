@@ -83,6 +83,9 @@ pub enum Pick {
 /// - `WrongShape`, `Garbage`, `Oversized`: the receipt *succeeded* but its
 ///   output is not a usable signature. For a local transfer these are a
 ///   success carrying an unexpected payload.
+/// - `OtherSigner`: the receipt succeeded with a well-formed signature over
+///   the right hash by a key that is not the configured sender; booked, but
+///   never emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Ok,
@@ -90,6 +93,7 @@ pub enum Outcome {
     WrongShape,
     Garbage,
     Oversized,
+    OtherSigner,
 }
 
 impl Outcome {
@@ -170,12 +174,13 @@ pub const fn deliver(pick: Pick, outcome: Outcome) -> Action {
     Action::Deliver { pick, outcome }
 }
 
-const OUTCOMES: [Outcome; 5] = [
+const OUTCOMES: [Outcome; 6] = [
     Outcome::Ok,
     Outcome::Fail,
     Outcome::WrongShape,
     Outcome::Garbage,
     Outcome::Oversized,
+    Outcome::OtherSigner,
 ];
 
 /// Every action: the alphabet of the random driver.

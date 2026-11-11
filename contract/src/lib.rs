@@ -17,7 +17,9 @@ use near_sdk::{
     PromiseError,
 };
 
-pub use types::{AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, Mandate, Status};
+pub use types::{
+    AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, EvmConfigView, Mandate, Status,
+};
 
 use policy::EvalInput;
 use window::SpendRing;

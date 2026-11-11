@@ -34,7 +34,7 @@ and ERC-20 payments are not built yet.
 | `recipients` | `IterableSet<AccountId>` | Allowed recipients |
 | `spend` | `LookupMap<AssetId, SpendRing>` | Per-asset committed window accounting |
 | `reserved` | `LookupMap<AssetId, u128>` | Per-asset amount reserved for transfers still in flight. Absent means zero |
-| `evm_config` | `Option<EvmConfig { signer_id, derivation_path, chain_id, max_fee_per_gas, max_priority_fee_per_gas, gas_limit }>` | Owner-set; `signer_id` and `derivation_path` fixed once set |
+| `evm_config` | `Option<EvmConfig { signer_id, derivation_path, sender, chain_id, max_fee_per_gas, max_priority_fee_per_gas, gas_limit }>` | Owner-set; `signer_id`, `derivation_path` and `sender` fixed once set |
 | `evm_recipients` | `IterableSet<[u8; 20]>` | Allowed EVM recipients, separate from `recipients` |
 | `evm_nonces` | `LookupMap<u64, u64>` | Next nonce per chain id; only ever increases |
 
@@ -246,12 +246,39 @@ transfer, with a `sign` call to the Chain Signatures contract in place of the tr
    non-exhaustive, so a variant added later is treated as "not proven failed".
 3. **`Err(Failed)`: nothing was signed.** Log it and stop. Nothing is booked.
 4. **Anything else: the receipt did not fail, so book the outlay (`record_spend`) unconditionally.**
-5. Only then try to use the output. If it was readable and `try_assemble_signed` returns a raw
-   transaction, log the NEP-297 event
+5. Only then try to use the output. If it was readable, the signature normalizes (`normalized_signature`:
+   recovery id 0 or 1, `0 < r, s < n`, low `s`), and **it recovers to the configured `sender`**,
+   log the NEP-297 event
    `EVENT_JSON:{"standard":"minder","version":"1.0.0","event":"evm_payment_signed","data":[{chain_id,
    nonce, to, value, raw_tx}]}` for an off-chain relayer to broadcast. Otherwise (unreadable,
    unparseable, or refused by the assembler) log `evm payment booked, no transaction emitted: <why>`
-   and emit nothing.
+   and emit nothing. If the signature assembles but does not recover to `sender`, or recovers to
+   nothing, log `evm payment booked, no transaction emitted: authenticity failure, ... this is a
+   signer or configuration fault` and emit nothing. Booking (step 4) has already happened and does
+   not depend on this check.
+
+### Authenticity check (`ecrecover`)
+
+After normalization the callback calls `env::ecrecover` on the **same hash the contract computed and
+sent to the signer** (`evm::signing_hash(&tx)`, rebuilt from the `Eip1559Tx` the callback carries, never
+a caller-supplied value) with the normalized `(r, s, y_parity)` and the malleability flag set (high
+`s` is refused, as Ethereum does). It keccaks the recovered public key and compares its last 20 bytes
+to `EvmConfig.sender`. `(r, s)` with parity `y` and `(r, n-s)` with parity `y^1` recover the same key,
+so checking the normalized triple is the check an Ethereum node would make on the emitted bytes.
+
+- **`sender`** is write-once, like `signer_id` and `derivation_path`. The owner sets it to the
+  contract's own derived EVM address (the address the signer derives for this contract account and
+  `derivation_path`); the contract cannot compute that derivation itself, so it is configuration.
+  A zero address is rejected. `get_evm_config` shows it as a `0x` hex address.
+- **Property established:** every transaction the contract emits provably recovers to the
+  contract's key for the hash the contract computed. A signature by another key, over another
+  hash, with the wrong parity, or off the curve is never emitted.
+- **Failure is closed, not silent.** A misconfigured `sender` or a faulty signer cannot cause an
+  invalid transaction to be emitted; the cost is that the budget is consumed (G1 is unchanged, the
+  receipt succeeded) with nothing emitted and a logged authenticity failure naming a signer or
+  configuration fault. The check gates emission only; it never changes accounting.
+- **`env::ecrecover` needs near-sdk's `unstable` feature,** enabled in `Cargo.toml` with the exact
+  `=5.29.1` pin. Its host cost is about 0.28 Tgas.
 
 **Principle (G1 fix): a successful signer receipt books spend regardless of whether the contract could
 parse, size-fit or emit the signature, because that signature is public and broadcastable.** The
@@ -271,9 +298,9 @@ transaction) still uses budget for one window.
 - **`evm_recipients`** is a set of 20-byte addresses, distinct from the NEAR recipient set, managed
   by `set_evm_recipient(address, allowed)`. Addresses are `0x` + 40 hex digits; an EIP-55 checksum
   is not verified.
-- **`set_evm_config(signer_id, derivation_path, chain_id, max_fee_per_gas, max_priority_fee_per_gas,
+- **`set_evm_config(signer_id, derivation_path, sender, chain_id, max_fee_per_gas, max_priority_fee_per_gas,
   gas_limit)`** (`gas_limit` defaults to 21000). It rejects a zero chain id or gas limit, an empty
-  path, a tip above the fee, and a fee times gas that overflows.
+  path, a zero or malformed `sender`, a tip above the fee, and a fee times gas that overflows.
 - **Views:** `dry_run_evm(caller, recipient, amount)` goes through the same evaluation as the real
   path; `get_evm_config`, `get_evm_nonce(chain_id)`, `is_evm_recipient_allowed`, `get_evm_recipients`.
 
@@ -295,9 +322,9 @@ with viem's keccak of viem's serialization.
   time, so two requests can never share a nonce. It cannot be lowered. `raise_evm_nonce(chain_id,
   nonce)` lets the owner raise it for an address that already has history on that chain (the
   capstone address had nonce 1); raising can open a gap but can never reissue a nonce.
-- **`signer_id` and `derivation_path` are write-once.** Together they fix the sending address, and
-  the nonce counter is only valid for one address per chain. Changing either would leave the counter
-  describing a different account. Chain id and fees may change.
+- **`signer_id`, `derivation_path` and `sender` are write-once.** Together they fix the sending
+  address, and the nonce counter is only valid for one address per chain. Changing any would leave the
+  counter describing a different account (or the authenticity check pointing at a different key). Chain id and fees may change.
 
 ### Outlay: fees count against policy
 
@@ -325,10 +352,11 @@ value.
 - **The signed transaction is public** (it is in the event log, and the signer's own response is in
   its receipt). Anyone can broadcast it; broadcasting is not a policy decision. It can be broadcast
   only once, by nonce.
-- **The contract does not verify the signature** against the derived public key. It trusts the
-  configured signer. An `ecrecover` check would be a hardening step.
+- **The signature is verified against the configured sender** (see Authenticity check). What is
+  not verified is that `sender` is really the signer's derivation for this contract and path: the
+  owner supplies it, and a wrong value fails closed (nothing is ever emitted).
 - **Gas.** On testnet the whole request burnt about 14 Tgas, of which `on_sign_complete` used 2.1 of
-  its 25 reserved. The request needs about 55 Tgas prepaid plus its own work (`sign` 30 + callback 25);
+  its 25 reserved; with the `ecrecover` check the sandbox measures 2.4 Tgas, so the reserve is unchanged. The request needs about 55 Tgas prepaid plus its own work (`sign` 30 + callback 25);
   with less, promise creation fails and the whole request reverts with nothing reserved.
 
 ### Testnet capstone
@@ -367,9 +395,12 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
 - **`num_buckets` is capped at 64** to bound per-asset storage and per-evaluation work.
 - **`revoke_mandate` reverts with no mandate; `remove_asset_policy` reverts with no policy;** other
   owner methods are idempotent.
-- **Dependency pins:** `near-sdk =5.29.1` and `near-workspaces =0.23.0`, with `near-sdk-env 0.1.6`
+- **Dependency pins:** `near-sdk =5.29.1` (with its `unstable` feature, for `env::ecrecover`) and `near-workspaces =0.23.0`, with `near-sdk-env 0.1.6`
   and `near-sys 0.2.14` in `Cargo.lock`. Newer releases require rustc 1.95; this environment has
   1.94.1.
+- **Stored `EvmConfig` layout changed** (the `sender` field, borsh). No migration is written, so state
+  written by an earlier build does not deserialize: a testnet deployment from before this change
+  needs a fresh account or wiped state, and `set_evm_config` callers must now pass `sender`.
 - **`test-helpers` feature** adds the owner-only `test_record_spend`, which seeds committed spend
   without moving value. The integration suite builds its own wasm with it. `cargo near build`
   without the feature omits it from the wasm exports and the ABI (its own gated impl block; checked).
@@ -461,13 +492,16 @@ Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
 | Settlement: a returned signature commits the spend once and emits the signed transaction | unit `gate_tests::a_returned_signature_settles_once_and_emits_the_signed_transaction`, `a_high_s_signature_is_normalized_before_the_transaction_is_emitted`; sandbox `evm_gate::a_returned_signature_settles_once_and_emits_the_signed_transaction` (event `raw_tx` equals viem's) |
 | Clean reversion: a failed signer receipt (timeout or error) releases and books nothing; the nonce stays consumed | unit `gate_tests::a_failed_signer_call_releases_and_commits_nothing`; sandbox `evm_gate::a_failing_signer_releases_the_reservation_and_settles_nothing` |
 | G1: a successful signer receipt books the outlay even if the output cannot be read, parsed or assembled; nothing is emitted | unit `gate_tests::a_successful_receipt_we_cannot_use_is_booked_but_emits_nothing` (eleven cases: recovery id 2, zero s, s at the order, bad prefix, short point, not hex, wrong shape, not JSON, empty, oversized garbage, oversized *valid* signature), `an_unreadable_but_successful_result_is_logged_as_unreadable`, `booked_unusable_output_counts_against_the_window`; sandbox `evm_gate::a_signature_that_cannot_sign_a_transaction_is_booked_but_not_emitted`, `valid_json_of_the_wrong_shape_is_booked_but_not_emitted`, `a_non_json_result_is_booked_but_not_emitted`, `a_genuine_signature_beyond_the_read_buffer_is_booked_but_not_emitted` |
+| Authenticity: a real MPC signature recovers to the signer's derived address (ground truth from `v1.signer-prod.testnet`: hash `c88d...9536`, address `0xec38...a58c`) and does not for another hash, parity or `s`; high `s` and an off-curve `r` are refused | unit `evm::a_real_mpc_signature_recovers_to_the_derived_address`, `the_real_signature_does_not_recover_to_that_address_for_anything_else`, `recovery_refuses_a_high_s_signature`, `a_point_off_the_curve_recovers_to_nothing`, `independent_fixture_signatures_recover_to_their_keys` (viem signatures, `vectors/evm-signatures.json`) |
+| Authenticity failure: a well-formed signature that does not recover to `sender` is booked, emits nothing and is logged as a signer or configuration fault | unit `gate_tests::a_signature_by_another_key_is_booked_but_not_emitted`, `a_signature_over_a_different_transaction_is_booked_but_not_emitted`, `a_signature_that_recovers_to_nothing_is_booked_but_not_emitted`, `a_flipped_recovery_id_is_booked_but_not_emitted`, `a_sender_that_differs_from_the_signing_key_blocks_emission`; sandbox `evm_gate::a_genuine_signature_by_another_key_is_booked_but_not_emitted` |
+| The callback has gas to spare for the check | sandbox `evm_gate::the_callback_has_gas_to_spare_for_the_authenticity_check` (about 2.4 of 25 Tgas) |
 | Only a failed receipt books nothing | unit `gate_tests::only_a_failed_receipt_books_nothing`, `a_failed_signer_call_releases_and_commits_nothing`; sandbox `evm_gate::a_failing_signer_releases_the_reservation_and_settles_nothing` |
 | Callback never panics, even over-releasing | unit `gate_tests::settlement_never_panics_even_if_it_releases_more_than_is_reserved`, `settlement_is_independent_of_changes_made_in_flight`; `gate::tests::malformed_responses_are_rejected_without_panicking` |
 | TOCTOU: a second request sees the first's reservation before its callback | unit `gate_tests::a_second_request_sees_the_first_ones_reservation`; sandbox `evm_gate::a_second_request_sees_the_first_ones_reservation_before_it_settles` (observes the reservation mid-flight, the denial, then both nonces settle) |
 | Fees count against caps and the window; tiny payments cannot drain through fees | unit `gate_tests::fees_count_toward_the_per_transaction_cap`, `many_tiny_payments_cannot_drain_through_fees`; sandbox `evm_gate::denied_requests_change_nothing_and_never_reach_the_signer` |
 | EVM allowlist is separate from the NEAR one; denials take no nonce and reach no signer | unit `gate_tests::the_evm_allowlist_is_separate_from_the_near_allowlist`, `a_denied_request_changes_nothing`; sandbox `evm_gate::denied_requests_change_nothing_and_never_reach_the_signer` |
 | No stranded reservation or nonce on a reverted request | sandbox `evm_gate::a_request_without_gas_for_the_callback_reverts_and_reserves_nothing`, `evm_payments_need_configuration_and_a_valid_address` |
-| EVM config is owner-only; identity is write-once; nonce only rises | unit `gate_tests::only_the_owner_sets_the_evm_config`, `only_the_owner_sets_evm_recipients`, `only_the_owner_raises_the_nonce`, `fees_and_chain_can_change_but_the_signing_identity_cannot`, `the_config_rejects_unusable_values`, `the_nonce_can_only_be_raised`; sandbox `evm_gate::evm_configuration_is_owner_only`, `the_signing_identity_is_fixed_but_fees_can_change`, `the_nonce_can_be_raised_but_never_lowered` |
+| EVM config is owner-only; identity (signer, path and sender) is write-once; nonce only rises | unit `gate_tests::only_the_owner_sets_the_evm_config`, `only_the_owner_sets_evm_recipients`, `only_the_owner_raises_the_nonce`, `fees_and_chain_can_change_but_the_signing_identity_cannot`, `the_config_rejects_unusable_values`, `the_nonce_can_only_be_raised`; sandbox `evm_gate::evm_configuration_is_owner_only`, `the_signing_identity_is_fixed_but_fees_can_change`, `the_nonce_can_be_raised_but_never_lowered` |
 | NEAR entry points refuse EVM assets | unit `gate_tests::the_local_entry_points_refuse_evm_assets`; sandbox `evm_gate::the_near_entry_points_refuse_evm_assets` |
 | Signing callback is private | sandbox `evm_gate::only_the_contract_itself_can_call_the_signing_callback` |
 | `try_assemble_signed` matches viem, normalizes high `s`, rejects every invalid input and never panics | unit `evm::assembling_a_valid_signature_matches_viem`, `assembling_a_high_s_signature_normalizes_it_to_the_viem_encoding`, `assembling_rejects_each_invalid_input`, `assembling_never_panics_on_any_combination_of_edge_inputs` |
@@ -554,8 +588,8 @@ every step. Every step of every harness driver runs every check.
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
 | EVM nonce: the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
 | Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |
-| G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `Garbage` | all | |
-| The signed-transaction event is emitted if and only if the signature is valid, and an unusable result is logged as booked with nothing emitted | yes | yes | yes | yes | |
+| G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `OtherSigner` | all | |
+| The signed-transaction event is emitted if and only if the signature assembles and recovers to the configured sender (`OtherSigner` is genuine but by another key), and an unusable or inauthentic result is logged as booked with nothing emitted | yes | yes | yes | yes | |
 | Callbacks never panic (a panic would strand a reservation) | yes | yes | yes | yes | |
 | No unexpected panic anywhere; every denial carries its exact `Denied: <Reason>` message | yes | yes | yes | yes | |
 | `assemble_from_response` and `try_assemble_signed` never panic on arbitrary, mutated or structured bytes, and always return a `Result` | | | | | yes |

@@ -21,7 +21,9 @@ use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
 use near_sdk::{env, Gas, MockedBlockchain, PromiseResult, RuntimeFeesConfig, VMContext};
 
 use crate::evm::{self, Eip1559Tx};
-use crate::test_support::{account, function_call};
+use crate::test_support::{
+    account, fixture_signature, function_call, signer_response, test_sender_hex, Signer,
+};
 use crate::types::{Decision, Status};
 use crate::{AssetId, Minder};
 
@@ -37,7 +39,8 @@ const OWNER: &str = "owner.near";
 const CONTRACT: &str = "minder.near";
 const SIGNER: &str = "signer.near";
 
-/// A valid signature (low `s`) as the signer returns it.
+/// Well-formed numbers for the response-shape cases, which never reach a
+/// signature check. Real signatures come from the fixture.
 const R: &str = "5b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9";
 const S: &str = "2a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
 
@@ -96,6 +99,7 @@ impl World {
         minder.set_evm_config(
             account(SIGNER),
             DERIVATION_PATH.to_string(),
+            test_sender_hex(),
             CHAIN_ID,
             U128(MAX_FEE),
             U128(MAX_PRIORITY_FEE),
@@ -422,7 +426,8 @@ fn deliver(
     match pending.asset {
         Asset::Near => ensure!(events.is_empty(), "a local settlement emitted an event"),
         Asset::Evm => {
-            // The signed transaction is emitted for a valid signature only.
+            // The signed transaction is emitted iff the signature assembles and
+            // recovers to the configured sender: only `Ok` delivers such a signature.
             ensure!(
                 events.len() == usize::from(outcome == Outcome::Ok),
                 "{outcome:?} produced {} events",
@@ -434,11 +439,18 @@ fn deliver(
                     events[0].strip_prefix("EVENT_JSON:").unwrap_or_default(),
                 )
                 .map_err(|_| Violation("unparseable event".to_string()))?;
-                let raw = evm::encode_signed(tx, hex32(R), hex32(S), 1);
+                // The reference serialization by the independent signer.
+                let reference = fixture_signature(&evm::signing_hash(tx), Signer::Sender).raw_tx;
                 ensure!(
                     event["data"][0]["nonce"] == tx.nonce
-                        && event["data"][0]["raw_tx"] == format!("0x{}", evm::hex_encode(&raw)),
+                        && event["data"][0]["raw_tx"]
+                            == format!("0x{}", evm::hex_encode(&reference)),
                     "the event does not carry the built transaction"
+                );
+            } else if outcome == Outcome::OtherSigner {
+                ensure!(
+                    logs.iter().any(|l| l.contains("authenticity failure")),
+                    "a signature by another key was not logged as an authenticity failure"
                 );
             } else if outcome.books_spend() {
                 ensure!(
@@ -573,12 +585,6 @@ fn live_spend(minder: &Minder, asset: Asset) -> u128 {
     minder.get_live_spend(asset_id(asset)).0
 }
 
-fn hex32(text: &str) -> [u8; 32] {
-    evm::hex_decode(text)
-        .and_then(|bytes| bytes.try_into().ok())
-        .expect("fixture hex")
-}
-
 fn context(predecessor: &str, now: u64) -> VMContext {
     let mut builder = VMContextBuilder::new();
     builder
@@ -629,7 +635,11 @@ fn promise_result(pending: &Pending, outcome: Outcome) -> PromiseResult {
         (Asset::Near, Outcome::Ok) => PromiseResult::Successful(Vec::new()),
         // A local transfer that succeeded but returned data.
         (Asset::Near, _) => PromiseResult::Successful(vec![1, 2, 3]),
-        (Asset::Evm, Outcome::Ok) => PromiseResult::Successful(signature(1)),
+        (Asset::Evm, Outcome::Ok) => PromiseResult::Successful(signature(pending, Signer::Sender)),
+        // Well formed and genuine, over the right hash, but by a key that is not the sender.
+        (Asset::Evm, Outcome::OtherSigner) => {
+            PromiseResult::Successful(signature(pending, Signer::Other))
+        }
         (Asset::Evm, Outcome::WrongShape) => PromiseResult::Successful(
             json!({ "big_r": format!("02{R}"), "s": S, "recovery_id": 1 })
                 .to_string()
@@ -641,22 +651,21 @@ fn promise_result(pending: &Pending, outcome: Outcome) -> PromiseResult {
         // A genuine signature padded past the 4096-byte read buffer.
         (Asset::Evm, Outcome::Oversized) => {
             let mut value: Value =
-                near_sdk::serde_json::from_slice(&signature(1)).expect("fixture signature is JSON");
+                near_sdk::serde_json::from_slice(&signature(pending, Signer::Sender))
+                    .expect("fixture signature is JSON");
             value["padding"] = json!("x".repeat(5000));
             PromiseResult::Successful(value.to_string().into_bytes())
         }
     }
 }
 
-fn signature(recovery_id: u8) -> Vec<u8> {
-    json!({
-        "scheme": "Secp256k1",
-        "big_r": { "affine_point": format!("02{R}") },
-        "s": { "scalar": S },
-        "recovery_id": recovery_id,
-    })
-    .to_string()
-    .into_bytes()
+/// A real signature by `signer` over the hash of the pending request's transaction.
+fn signature(pending: &Pending, signer: Signer) -> Vec<u8> {
+    let tx = pending
+        .tx
+        .as_ref()
+        .expect("an EVM request carries its transaction");
+    signer_response(&fixture_signature(&evm::signing_hash(tx), signer))
 }
 
 thread_local! {

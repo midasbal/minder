@@ -25,12 +25,18 @@ const OUTLAY: u128 = VALUE + FEE_COST;
 const EVM_PER_TX_CAP: u128 = 100_000_000_000_000;
 const EVM_WINDOW_LIMIT: u128 = 120_000_000_000_000;
 
-// viem's signing hash and signed transaction for the configuration above, the
-// mock signer's fixed signature, and nonces 0 and 1.
+// viem's signing hash for the configuration above, at nonces 0 and 1. The
+// signatures over them, and the signed transactions, are from the committed
+// fixture (`vectors/evm-signatures.json`): an independent signer's, so the
+// mock signer returns signatures that genuinely recover for these hashes.
 const HASH_NONCE_0: &str = "1a75e78121e9d9ed1cf712c1ddf771430881926816812e670a29c94e84d8d138";
 const HASH_NONCE_1: &str = "4af5cb1e337b3b9b7242504bc4122134331a7bddade33cf6c67adf609b3497cc";
-const RAW_NONCE_0: &str = "0x02f86f83aa36a780843b9aca0084773594008252089470997970c51812dc3a010c7d01b50e0d17dc79c88203e880c001a05b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9a02a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
-const RAW_NONCE_1: &str = "0x02f86f83aa36a701843b9aca0084773594008252089470997970c51812dc3a010c7d01b50e0d17dc79c88203e880c001a05b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9a02a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+const HASH_NONCE_5: &str = "6bbc3bfb4a0955cccc4e0009eb44aa1dfc02975e9ba2127d70829651c2e32dc4";
+
+/// viem's serialization of the sender-signed transaction for a signing hash.
+fn raw_tx(hash: &str) -> String {
+    fixture_signature(hash, "sender").raw_tx
+}
 
 fn evm() -> Value {
     json!({ "Evm": CHAIN_ID })
@@ -41,6 +47,8 @@ fn evm() -> Value {
 async fn armed_evm() -> (Fixture, Contract) {
     let f = Fixture::armed().await;
     let signer = f.deploy_signer().await;
+    f.register_signatures(&signer, &[HASH_NONCE_0, HASH_NONCE_1, HASH_NONCE_5])
+        .await;
     f.set_policy(evm(), EVM_PER_TX_CAP, EVM_WINDOW_LIMIT).await;
     f.owner_ok(
         "set_evm_recipient",
@@ -52,6 +60,7 @@ async fn armed_evm() -> (Fixture, Contract) {
         json!({
             "signer_id": signer.id(),
             "derivation_path": PATH,
+            "sender": fixture_sender(),
             "chain_id": CHAIN_ID,
             "max_fee_per_gas": "2000000000",
             "max_priority_fee_per_gas": "1000000000",
@@ -131,7 +140,7 @@ async fn a_returned_signature_settles_once_and_emits_the_signed_transaction() {
     let events = events(&result);
     assert_eq!(events.len(), 1, "exactly one signed-payment event");
     let data = &events[0]["data"][0];
-    assert_eq!(data["raw_tx"], RAW_NONCE_0);
+    assert_eq!(data["raw_tx"], raw_tx(HASH_NONCE_0));
     assert_eq!(data["nonce"], 0);
     assert_eq!(data["to"], RECIPIENT);
     assert_eq!(data["value"], VALUE.to_string());
@@ -198,7 +207,7 @@ async fn a_failing_signer_releases_the_reservation_and_settles_nothing() {
     assert_eq!(nonce(&f).await, "1");
     set_mode(&signer, "Sign").await;
     let next = pay(&f, &f.agent, RECIPIENT, VALUE).await;
-    assert_eq!(events(&next)[0]["data"][0]["raw_tx"], RAW_NONCE_1);
+    assert_eq!(events(&next)[0]["data"][0]["raw_tx"], raw_tx(HASH_NONCE_1));
 }
 
 /// G1: the signer's receipt succeeded, so whatever it returned is public and
@@ -248,6 +257,39 @@ async fn a_genuine_signature_beyond_the_read_buffer_is_booked_but_not_emitted() 
     // The clearest G1 case: a real, assemblable signature the contract cannot
     // read because it exceeds the 4096-byte buffer.
     assert_booked_but_not_emitted("Oversized", "unreadable signer result").await;
+}
+
+#[tokio::test]
+async fn a_genuine_signature_by_another_key_is_booked_but_not_emitted() {
+    // The signature assembles and is genuine for the hash the contract sent,
+    // but it recovers to a different address than the configured sender.
+    assert_booked_but_not_emitted("OtherSigner", "authenticity failure").await;
+}
+
+#[tokio::test]
+async fn the_callback_has_gas_to_spare_for_the_authenticity_check() {
+    let (f, _signer) = armed_evm().await;
+    let result = pay(&f, &f.agent, RECIPIENT, VALUE).await;
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(events(&result).len(), 1);
+    // The callback is the receipt for on_sign_complete; it includes ecrecover
+    // and keccak. The reserve is 25 Tgas.
+    let burnt = result
+        .receipt_outcomes()
+        .iter()
+        .find(|outcome| {
+            outcome
+                .logs
+                .iter()
+                .any(|line| line.starts_with("EVENT_JSON:"))
+        })
+        .map(|outcome| outcome.gas_burnt.as_gas())
+        .expect("the callback receipt emitted the event");
+    println!("on_sign_complete gas burnt: {burnt}");
+    assert!(
+        burnt < 12_500_000_000_000,
+        "under half the 25 Tgas reserve: {burnt}"
+    );
 }
 
 // ---- TOCTOU ----
@@ -307,8 +349,11 @@ async fn a_second_request_sees_the_first_ones_reservation_before_it_settles() {
     let first = first.await.unwrap();
     assert!(first.is_success(), "{first:?}");
 
-    assert_eq!(events(&first)[0]["data"][0]["raw_tx"], RAW_NONCE_0);
-    assert_eq!(events(&second)[0]["data"][0]["raw_tx"], RAW_NONCE_1);
+    assert_eq!(events(&first)[0]["data"][0]["raw_tx"], raw_tx(HASH_NONCE_0));
+    assert_eq!(
+        events(&second)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_NONCE_1)
+    );
     assert_eq!(f.reserved(evm()).await, 0);
     assert_eq!(f.live_spend(evm()).await, 2 * OUTLAY);
     // Settlement moved the budget from reserved to committed, so the big
@@ -393,8 +438,8 @@ async fn evm_configuration_is_owner_only() {
         (
             "set_evm_config",
             json!({
-                "signer_id": signer.id(), "derivation_path": PATH, "chain_id": CHAIN_ID,
-                "max_fee_per_gas": "1", "max_priority_fee_per_gas": "1", "gas_limit": null,
+                "signer_id": signer.id(), "derivation_path": PATH, "sender": fixture_sender(),
+                "chain_id": CHAIN_ID, "max_fee_per_gas": "1", "max_priority_fee_per_gas": "1", "gas_limit": null,
             }),
         ),
         (
@@ -422,8 +467,8 @@ async fn the_signing_identity_is_fixed_but_fees_can_change() {
     let (f, signer) = armed_evm().await;
     let config = |signer_id: &AccountId, path: &str, fee: &str| {
         json!({
-            "signer_id": signer_id, "derivation_path": path, "chain_id": CHAIN_ID,
-            "max_fee_per_gas": fee, "max_priority_fee_per_gas": "1", "gas_limit": 50000,
+            "signer_id": signer_id, "derivation_path": path, "sender": fixture_sender(),
+            "chain_id": CHAIN_ID, "max_fee_per_gas": fee, "max_priority_fee_per_gas": "1", "gas_limit": 50000,
         })
     };
     f.owner_ok("set_evm_config", config(signer.id(), PATH, "3000000000"))
@@ -446,6 +491,13 @@ async fn the_signing_identity_is_fixed_but_fees_can_change() {
         .await,
         "cannot change once set",
     );
+    let mut other_sender = config(signer.id(), PATH, "1");
+    other_sender["sender"] = json!(RECIPIENT);
+    assert_reverts(
+        f.call(&f.owner, "set_evm_config", other_sender).await,
+        "cannot change once set",
+    );
+    assert_eq!(stored["sender"], fixture_sender());
 }
 
 #[tokio::test]
@@ -468,6 +520,10 @@ async fn the_nonce_can_be_raised_but_never_lowered() {
     );
     let result = pay(&f, &f.agent, RECIPIENT, VALUE).await;
     assert_eq!(events(&result)[0]["data"][0]["nonce"], 5);
+    assert_eq!(
+        events(&result)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_NONCE_5)
+    );
     assert_eq!(nonce(&f).await, "6");
 }
 

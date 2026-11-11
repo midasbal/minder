@@ -79,18 +79,50 @@ pub enum Decision {
 /// Owner-set parameters for EVM payments. The agent supplies none of these:
 /// the owner fixes the signer, key path and fees, and the contract assigns the
 /// nonce.
-#[near(serializers = [borsh, json])]
+#[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvmConfig {
     /// The Chain Signatures contract to ask for signatures. Fixed once set.
     pub signer_id: AccountId,
     /// Derivation path of the signing key. Fixed once set.
     pub derivation_path: String,
+    /// This contract's own EVM address: the address the signer derives for this
+    /// contract account and `derivation_path`. A signature is only accepted
+    /// (its transaction emitted) if it recovers to this address. Fixed once set.
+    pub sender: [u8; 20],
     pub chain_id: u64,
     /// Wei per gas, upper bound. Also what fees are accounted at.
     pub max_fee_per_gas: U128,
     pub max_priority_fee_per_gas: U128,
     pub gas_limit: u64,
+}
+
+/// The JSON form of [`EvmConfig`], with the sender as a `0x` address rather
+/// than a list of twenty numbers.
+#[near(serializers = [json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvmConfigView {
+    pub signer_id: AccountId,
+    pub derivation_path: String,
+    pub sender: String,
+    pub chain_id: u64,
+    pub max_fee_per_gas: U128,
+    pub max_priority_fee_per_gas: U128,
+    pub gas_limit: u64,
+}
+
+impl From<&EvmConfig> for EvmConfigView {
+    fn from(config: &EvmConfig) -> Self {
+        Self {
+            signer_id: config.signer_id.clone(),
+            derivation_path: config.derivation_path.clone(),
+            sender: crate::evm::format_address(&config.sender),
+            chain_id: config.chain_id,
+            max_fee_per_gas: config.max_fee_per_gas,
+            max_priority_fee_per_gas: config.max_priority_fee_per_gas,
+            gas_limit: config.gas_limit,
+        }
+    }
 }
 
 impl EvmConfig {

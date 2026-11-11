@@ -86,6 +86,55 @@ async fn mock_signer_wasm() -> &'static Vec<u8> {
         .await
 }
 
+/// A signature from the committed fixture (`vectors/evm-signatures.json`),
+/// made by an independent signer (viem): hex without prefixes.
+pub struct FixtureSignature {
+    pub r: String,
+    pub s: String,
+    pub recovery_id: u8,
+    /// The signed transaction as serialized by viem, 0x-prefixed.
+    pub raw_tx: String,
+}
+
+fn fixture() -> &'static Value {
+    static FIXTURE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        near_sdk::serde_json::from_str(include_str!("../../vectors/evm-signatures.json"))
+            .expect("the signature fixture is valid JSON")
+    })
+}
+
+/// The address of fixture key A, the configured sender in the signing tests.
+pub fn fixture_sender() -> String {
+    fixture()["header"]["sender_a"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The fixture signature over `hash` (hex, no prefix) by key `sender` (A) or `other` (B).
+pub fn fixture_signature(hash: &str, key: &str) -> FixtureSignature {
+    let name = if key == "sender" { "A" } else { "B" };
+    let entry = &fixture()["signatures"][format!("0x{hash}")][name];
+    assert!(
+        !entry.is_null(),
+        "no fixture signature for {hash}; regenerate with vectors/gen-evm-signatures.mjs"
+    );
+    let bare = |field: &str| {
+        entry[field]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x")
+            .to_string()
+    };
+    FixtureSignature {
+        r: bare("r"),
+        s: bare("s"),
+        recovery_id: entry["y_parity"].as_u64().unwrap() as u8,
+        raw_tx: entry["raw_tx"].as_str().unwrap().to_string(),
+    }
+}
+
 pub fn near() -> Value {
     json!("Near")
 }
@@ -197,6 +246,31 @@ impl Fixture {
             .into_result()
             .unwrap();
         signer
+    }
+
+    /// Gives the mock signer both fixture keys' signatures over each hash, so
+    /// it can answer as the configured sender or as another signer.
+    pub async fn register_signatures(&self, signer: &Contract, hashes: &[&str]) {
+        let signatures: Vec<Value> = hashes
+            .iter()
+            .flat_map(|hash| {
+                ["sender", "other"].map(|key| {
+                    let signature = fixture_signature(hash, key);
+                    json!({
+                        "hash": hash, "key": key, "r": signature.r, "s": signature.s,
+                        "recovery_id": signature.recovery_id,
+                    })
+                })
+            })
+            .collect();
+        signer
+            .call("register_signatures")
+            .args_json(json!({ "signatures": signatures }))
+            .transact()
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap();
     }
 
     pub async fn set_policy(&self, asset: Value, per_tx_cap: u128, window_limit: u128) {
