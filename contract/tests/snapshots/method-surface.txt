@@ -1,0 +1,41 @@
+# Minder public method surface: one line per exported contract method, as
+# `kind name [modifiers]`, sorted by name.
+# Source: the cargo-near ABI of the production build (no test features),
+# cross-checked against the wasm export section.
+# Generated; do not edit by hand. After reviewing a change to the surface,
+# regenerate it deliberately:
+#   MINDER_UPDATE_SURFACE_SNAPSHOT=1 cargo test --test method_surface
+view contract_source_metadata
+call deposit [payable]
+view dry_run
+view dry_run_evm
+call freeze
+view ft_on_transfer
+view get_asset_policies
+view get_asset_policy
+view get_config
+view get_evm_config
+view get_evm_nonce
+view get_evm_recipients
+view get_live_spend
+view get_mandate
+view get_recipients
+view get_reserved
+view get_status
+call grant_mandate
+call init [init]
+view is_evm_recipient_allowed
+view is_recipient_allowed
+call on_sign_complete [private]
+call on_transfer_complete [private]
+call owner_withdraw
+call raise_evm_nonce
+call remove_asset_policy
+call request_evm_payment
+call request_local_transfer
+call revoke_mandate
+call set_asset_policy
+call set_evm_config
+call set_evm_recipient
+call set_recipient
+call unfreeze
