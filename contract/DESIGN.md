@@ -372,7 +372,7 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
   1.94.1.
 - **`test-helpers` feature** adds the owner-only `test_record_spend`, which seeds committed spend
   without moving value. The integration suite builds its own wasm with it. `cargo near build`
-  without the feature does not export it (checked).
+  without the feature omits it from the wasm exports and the ABI (its own gated impl block; checked).
 - **Commit unless the transfer definitely failed.** The callback skips the commit only for
   `PromiseError::Failed`. A success with an unexpected payload (`TooLong`) still commits. Over-counting
   merely tightens the budget for one window; forgetting a transfer that happened would let the limit

@@ -336,12 +336,18 @@ impl Minder {
     pub fn get_reserved(&self, asset: AssetId) -> U128 {
         U128(self.reserved_of(&asset))
     }
+}
 
-    // ---- Test support ----
-
-    /// Seeds committed spend without moving value. Compiled only with the
-    /// `test-helpers` feature.
-    #[cfg(feature = "test-helpers")]
+/// Test support, compiled only with the `test-helpers` feature.
+///
+/// This is an impl block of its own, gated as a whole, so that in a production
+/// build `#[near]` never sees it. Gating only the method inside the main block
+/// would drop it from the wasm but not from the ABI: the macro emits an ABI
+/// entry for a method whatever `#[cfg]` is on it.
+#[cfg(feature = "test-helpers")]
+#[near]
+impl Minder {
+    /// Seeds committed spend without moving value.
     pub fn test_record_spend(&mut self, asset: AssetId, amount: U128) {
         self.assert_owner();
         self.record_spend(&asset, amount.0);

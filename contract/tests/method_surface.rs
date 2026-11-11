@@ -9,11 +9,13 @@
 //! committed `tests/snapshots/method-surface.txt`. Any new, removed or renamed
 //! method, or a change of kind or payability, fails it.
 //!
-//! The export section is the authority for *which* methods exist, so a symbol
-//! exported by hand (outside `#[near]`, hence missing from the ABI) is caught,
-//! and the ABI is not trusted to list only real methods: near-sdk emits ABI
-//! entries for `#[cfg(feature = ...)]` methods that are compiled out, see
-//! `ABI_ONLY`.
+//! The export section is the authority for *which* methods exist, and the ABI
+//! is held to it with no exceptions: the two must list exactly the same
+//! methods. So a symbol exported by hand (outside `#[near]`, hence missing from
+//! the ABI) is caught, and so is an ABI entry with no export. The latter is
+//! what a feature-gated method inside a shared `#[near]` block produces, since
+//! the macro emits its ABI entry whatever `#[cfg]` is on the method; such a
+//! method belongs in an impl block gated as a whole, like `test_record_spend`.
 //!
 //! Update the snapshot only deliberately, after reviewing the change:
 //!
@@ -36,13 +38,6 @@ const UPDATE_VARIABLE: &str = "MINDER_UPDATE_SURFACE_SNAPSHOT";
 /// Exports every near-sdk wasm has that are not contract methods. (The
 /// NEP-330 view `contract_source_metadata` is a method, and in the ABI.)
 const RUNTIME_EXPORTS: [&str; 4] = ["memory", "__data_end", "__heap_base", "__contract_abi"];
-
-/// Methods the ABI lists although the production wasm does not export them:
-/// near-sdk's `#[near]` macro emits an ABI entry for a method even when a
-/// `#[cfg(feature = "test-helpers")]` compiles it out. It is a documentation
-/// artifact, not a reachable method, so it is not part of the surface, but it
-/// is named here so any *other* ABI/export disagreement still fails.
-const ABI_ONLY: [&str; 1] = ["test_record_spend"];
 
 const SNAPSHOT_HEADER: &str = "\
 # Minder public method surface: one line per exported contract method, as
@@ -286,35 +281,27 @@ fn public_method_surface_matches_the_committed_snapshot() {
 }
 
 #[test]
-fn exports_and_abi_agree_apart_from_the_named_exception() {
+fn exports_and_abi_list_exactly_the_same_methods() {
     // An export missing from the ABI would be callable but invisible to the
     // snapshot (for instance a hand-written `#[no_mangle] extern "C"`
-    // function), and an ABI entry with no export would make the snapshot lie.
+    // function), and an ABI entry with no export would make the published
+    // metadata describe a method that does not exist. No exceptions.
     let build = build();
     let abi: BTreeSet<String> = abi_methods(&build.abi).into_keys().collect();
     let exports = wasm_exports(&build.wasm);
     let runtime: BTreeSet<String> = RUNTIME_EXPORTS.iter().map(|s| s.to_string()).collect();
     let exported_methods: BTreeSet<String> = exports.difference(&runtime).cloned().collect();
-    let abi_only: BTreeSet<String> = ABI_ONLY.iter().map(|s| s.to_string()).collect();
 
     let unlisted: Vec<&String> = exported_methods.difference(&abi).collect();
-    let phantom: Vec<&String> = abi
-        .difference(&exported_methods)
-        .filter(|name| !abi_only.contains(*name))
-        .collect();
+    let phantom: Vec<&String> = abi.difference(&exported_methods).collect();
     assert!(
         unlisted.is_empty() && phantom.is_empty(),
-        "the wasm exports and the ABI disagree. Exported but not in the ABI: {unlisted:?}. \
-         In the ABI but not exported (and not the known exception): {phantom:?}."
+        "the wasm exports and the ABI disagree.\n  Exported but not in the ABI: {unlisted:?}\n  \
+         In the ABI but not exported: {phantom:?}\n\
+         A method that is feature-gated inside a shared `#[near] impl` block is removed from \
+         the wasm but not from the ABI. Move it to an impl block gated as a whole: \
+         `#[cfg(feature = \"...\")] #[near] impl Minder {{ ... }}`."
     );
-    // The exception must still be real, or it would silently excuse a future
-    // phantom method of that name.
-    for name in &ABI_ONLY {
-        assert!(
-            abi.contains(*name) && !exports.contains(*name),
-            "{name} is listed in ABI_ONLY but is no longer an ABI-only method"
-        );
-    }
 }
 
 #[test]
