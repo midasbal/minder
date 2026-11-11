@@ -479,6 +479,106 @@ Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
 boundary.
 
+## Model-based invariant harness (`src/model_tests/`)
+
+A stateful, test-only harness that drives the real contract through long sequences of agent, owner,
+callback and time actions and checks the contract against a shadow model after every step. The
+example tests above pin individual scenarios; this harness checks the accounting and authority rules
+across interleavings nobody wrote by hand. It is unit level (the mocked NEAR environment, no network),
+deterministic, and compiled only for tests: `proptest` is a dev-dependency, and the production wasm
+is unchanged.
+
+**The shadow oracle is written independently of `policy.rs` and `window.rs`.** `model.rs` restates the
+rules from the documentation: spend is a plain list of `(time, amount)` and the window is arithmetic on
+slot numbers, so a bug in the contract's ring (aliasing, early forgetting) or in `policy::evaluate`
+cannot be mirrored in the oracle. It also encodes the correct accounting: a reservation is released
+exactly once, local spend is booked unless the transfer failed, and EVM spend is booked on any
+successful signer receipt, valid or merely unusable (G1), with only a failed receipt booking nothing.
+
+### How it works
+
+- A `World` is the contract's persisted state (the mocked storage, including the borsh contract state)
+  paired with the model. `World::apply(action)` restores that storage, runs one action against the real
+  contract with the right caller, time and promise result, checks every invariant, and returns the next
+  world.
+- Allowed requests go on an **in-flight queue**. A `Deliver` action resolves the oldest or newest one
+  later, with any result the token or signer can produce: for EVM a valid signature, a failed receipt
+  (timeout), or a successful-but-unusable one (wrong-shape JSON, non-JSON garbage, a genuine signature
+  padded past the read buffer); for local transfers success, failure, or success with an unexpected
+  payload. This is what exercises reservations, TOCTOU and exactly-once settlement across orderings.
+- Two assets (NEAR and EVM), an allowlisted and a non-allowlisted recipient, amounts at, below and
+  over the per-transaction cap, owner tightening and loosening of a policy, grant, revoke, freeze,
+  unfreeze, and time advances inside a slot, across a slot boundary and past a whole window.
+- The exhaustive driver is a depth-first search that shares prefixes and **deduplicates states** by a
+  fingerprint of the full stored state, the model, the clock and the queue. A repeated state is not
+  expanded again, which is sound because the future is a function of that state. Actions that cannot
+  change anything are skipped. So every state reachable within depth 8 is visited and every enabled
+  action from it is executed and checked.
+- The contract has no set of issued `(chain, nonce)` pairs, only the counter, so the harness records
+  each pair from the transactions the contract builds and checks it is never issued twice.
+- Every driver asserts **coverage**: it must actually have produced the kinds of step it claims to
+  (allowed and denied requests by reason, every delivery outcome, and so on), so a driver cannot pass
+  by silently doing nothing.
+
+### State space explored (depth 8)
+
+| Suite (test) | Actions | States | Transitions | Deduplicated | No-ops skipped | Focus |
+| --- | --- | --- | --- | --- | --- | --- |
+| accounting (`exhaustive_accounting_across_interleavings`) | 9 | 20,289 | 87,451 | 63,830 | 2,324 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
+| authority (`exhaustive_authority_and_time`) | 10 | 30,715 | 127,486 | 87,389 | 29,194 | freeze, unfreeze, revoke, short and long grants, slot advances, interleaved with in-flight requests |
+| policy (`exhaustive_policy_changes_and_caps`) | 11 | 13,486 | 73,721 | 54,642 | 11,749 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
+| **Total** | | **64,490** | **288,658** | | | |
+
+The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
+**full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
+minimal sequence. `MINDER_MODEL_CASES` raises the count for a longer run. The byte-level fuzz runs
+10,000 cases per property from the same seed.
+
+### Invariant to test map
+
+"Yes" means that driver's alphabet actually reaches the invariant, not merely that the check runs on
+every step. Every step of every harness driver runs every check.
+
+| Invariant | Accounting | Authority | Policy | Random | Fuzz |
+| --- | --- | --- | --- | --- | --- |
+| Window spend equals the oracle after every step, including aging past slot and window boundaries (the ring never under-counts) | yes | yes | yes | yes | |
+| Reserved equals the oracle and the sum of in-flight outlays; each reservation is released exactly once | yes | yes | yes | yes | |
+| Reserved is zero once every callback has been delivered | yes | yes | yes | yes | |
+| `live + reserved <= limit` for every asset, except while an owner-lowered limit is still above what was already counted | yes | yes | yes (lowers limits) | yes (lowers limits) | |
+| Spend changes only on a delivery, and by exactly the delivered outlay (zero for a failed receipt) | yes | yes | yes | yes | |
+| Allow or deny, and the exact deny reason, equal the oracle | window | frozen, revoked, expired | cap, recipient, window | all | |
+| `dry_run` and `dry_run_evm` agree with the real path | yes | yes | yes | yes | |
+| TOCTOU: in-flight reservations count against later requests | yes | yes | yes | yes | |
+| Monotonic revocation: once frozen, revoked or expired, nothing is approved until `unfreeze` or a new grant (stated by separate ghost bookkeeping, not by the oracle's `decide`) | | yes | | yes | |
+| Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
+| Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
+| EVM nonce: the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
+| Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |
+| G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `Garbage` | all | |
+| The signed-transaction event is emitted if and only if the signature is valid, and an unusable result is logged as booked with nothing emitted | yes | yes | yes | yes | |
+| Callbacks never panic (a panic would strand a reservation) | yes | yes | yes | yes | |
+| No unexpected panic anywhere; every denial carries its exact `Denied: <Reason>` message | yes | yes | yes | yes | |
+| `assemble_from_response` and `try_assemble_signed` never panic on arbitrary, mutated or structured bytes, and always return a `Result` | | | | | yes |
+| They accept exactly the acceptable signatures (recovery id 0 or 1, `0 < s < n`, a 33-byte point starting `02` or `03`, `0 < r < n`), judged by a rule restated independently in the test | | | | | yes |
+
+The fuzz tests are in `gate::tests`: `assemble_from_response_never_panics_on_arbitrary_bytes`,
+`assemble_from_response_never_panics_on_mutated_real_signatures`,
+`assemble_from_response_accepts_exactly_the_acceptable_signatures` and
+`try_assemble_signed_never_panics_and_accepts_exactly_the_acceptable_signatures`. The two "accepts
+exactly" tests assert they reached both accepted and rejected inputs in volume, so they are not vacuous.
+
+### What it caught when the fix was reverted
+
+**The G1 under-count regression is caught by the accounting and policy suites** (they fail with the
+contract's window spend below the model's after a `WrongShape`, `Oversized` or `Garbage` delivery). The
+random driver also catches it and shrinks it to two actions, a mid-sized EVM request followed by a
+`WrongShape` delivery. The authority suite still passes, as expected: its alphabet has no
+successful-but-unusable outcome. This was checked by temporarily reverting the fix in
+`on_sign_complete`, running the harness, and restoring the file byte for byte.
+
+Run it with `cargo test --lib model_tests` (about a minute and a half) and the fuzz with
+`cargo test --lib gate::tests`.
+
 ## Running
 
 ```

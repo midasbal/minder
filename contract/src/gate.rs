@@ -484,4 +484,182 @@ mod tests {
         assert_eq!(data["value"], "1000");
         assert_eq!(data["raw_tx"], "0x02abcd");
     }
+
+    // ---- Fuzz: arbitrary bytes never panic and always yield a Result ----
+
+    use proptest::prelude::*;
+
+    use crate::evm::try_assemble_signed;
+
+    const FUZZ_CASES: u32 = 10_000;
+    /// The secp256k1 group order, big-endian.
+    const ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
+        0x41, 0x41,
+    ];
+
+    /// The documented acceptance rule for a raw signature, restated
+    /// independently of `try_assemble_signed`.
+    fn is_acceptable(point: &[u8], scalar: &[u8], recovery_id: u8) -> bool {
+        let in_range =
+            |value: &[u8]| value.len() == 32 && value.iter().any(|b| *b != 0) && value < &ORDER[..];
+        recovery_id <= 1
+            && in_range(scalar)
+            && point.len() == 33
+            && (point[0] == 0x02 || point[0] == 0x03)
+            && in_range(&point[1..])
+    }
+
+    /// 32-byte values biased to the edges of a scalar: valid ones (random,
+    /// the fixture, half the order, one, order minus one) and the invalid ones
+    /// around them (zero, the order and its neighbour, all ones), plus values
+    /// of the wrong length. Weighted so both outcomes occur in volume.
+    fn edge_scalar() -> impl Strategy<Value = Vec<u8>> {
+        let hex = |text: &str| evm::hex_decode(text).unwrap();
+        prop_oneof![
+            3 => proptest::collection::vec(any::<u8>(), 32),
+            2 => Just(hex(S)),
+            1 => Just(hex("7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0")),
+            1 => Just(hex(&format!("{}1", "0".repeat(63)))),
+            1 => Just(hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140")),
+            1 => Just(vec![0u8; 32]),
+            1 => Just(ORDER.to_vec()),
+            1 => Just(hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142")),
+            1 => Just(vec![0xff; 32]),
+            1 => proptest::collection::vec(any::<u8>(), 0..40),
+        ]
+    }
+
+    #[test]
+    fn assemble_from_response_never_panics_on_arbitrary_bytes() {
+        let tx = tx();
+        let mut runner = crate::model_tests::seeded_runner(FUZZ_CASES);
+        runner
+            .run(&proptest::collection::vec(any::<u8>(), 0..6000), |bytes| {
+                if let Ok(raw) = assemble_from_response(&tx, &bytes) {
+                    prop_assert_eq!(raw[0], 0x02);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn assemble_from_response_never_panics_on_mutated_real_signatures() {
+        // Random bytes almost never reach past the JSON parser. Mutating a
+        // real response (flips, truncation, trailing bytes) does.
+        let tx = tx();
+        let real = response(&format!("02{R}"), S, 1, Some("Secp256k1"));
+        let length = real.len();
+        let mutations = (
+            0..=length,
+            proptest::collection::vec((0..length, any::<u8>()), 0..8),
+            proptest::collection::vec(any::<u8>(), 0..20),
+        );
+        let mut runner = crate::model_tests::seeded_runner(FUZZ_CASES);
+        runner
+            .run(&mutations, |(cut, flips, tail)| {
+                let mut bytes = real.clone();
+                for (index, value) in flips {
+                    bytes[index] = value;
+                }
+                bytes.truncate(cut);
+                bytes.extend(tail);
+                if let Ok(raw) = assemble_from_response(&tx, &bytes) {
+                    prop_assert_eq!(raw[0], 0x02);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn assemble_from_response_accepts_exactly_the_acceptable_signatures() {
+        // Well-formed JSON around random fields: the result must be Ok exactly
+        // when the independent rule says the signature is acceptable.
+        let tx = tx();
+        let recovery_ids = prop_oneof![4 => 0u32..2, 1 => 2u32..400];
+        let fields = (edge_scalar(), edge_scalar(), recovery_ids, any::<bool>());
+        let (accepted, rejected) = (std::cell::Cell::new(0u32), std::cell::Cell::new(0u32));
+        let mut runner = crate::model_tests::seeded_runner(FUZZ_CASES);
+        runner
+            .run(
+                &fields,
+                |(point_tail, scalar, recovery_id, prefix_three)| {
+                    let mut point = vec![if prefix_three { 0x03 } else { 0x02 }];
+                    point.extend(&point_tail);
+                    let body = response(
+                        &evm::hex_encode(&point),
+                        &evm::hex_encode(&scalar),
+                        0, // replaced below: recovery_id may exceed a u8
+                        None,
+                    );
+                    let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    value["recovery_id"] = json!(recovery_id);
+                    let bytes = value.to_string().into_bytes();
+
+                    let expected =
+                        recovery_id <= 255 && is_acceptable(&point, &scalar, recovery_id as u8);
+                    let result = assemble_from_response(&tx, &bytes).is_ok();
+                    prop_assert_eq!(result, expected);
+                    let counter = if result { &accepted } else { &rejected };
+                    counter.set(counter.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        // Non-vacuous: the generator reaches both outcomes in volume.
+        assert!(
+            accepted.get() > 500 && rejected.get() > 500,
+            "accepted {}, rejected {}",
+            accepted.get(),
+            rejected.get()
+        );
+    }
+
+    #[test]
+    fn try_assemble_signed_never_panics_and_accepts_exactly_the_acceptable_signatures() {
+        let tx = tx();
+        let raw_inputs = (
+            proptest::collection::vec(any::<u8>(), 0..70),
+            edge_scalar(),
+            any::<u8>(),
+        );
+        let structured = (
+            edge_scalar(),
+            edge_scalar(),
+            prop_oneof![3 => Just(0u8), 3 => Just(1u8), 1 => Just(2u8), 1 => any::<u8>()],
+            prop_oneof![4 => Just(0x02u8), 4 => Just(0x03u8), 1 => any::<u8>()],
+        )
+            .prop_map(|(point_tail, scalar, recovery_id, prefix)| {
+                let mut point = vec![prefix];
+                point.extend(point_tail);
+                (point, scalar, recovery_id)
+            });
+        let (accepted, rejected) = (std::cell::Cell::new(0u32), std::cell::Cell::new(0u32));
+        let mut runner = crate::model_tests::seeded_runner(FUZZ_CASES);
+        runner
+            .run(
+                &prop_oneof![raw_inputs, structured],
+                |(point, scalar, recovery_id)| {
+                    let result = try_assemble_signed(&tx, &point, &scalar, recovery_id);
+                    prop_assert_eq!(result.is_ok(), is_acceptable(&point, &scalar, recovery_id));
+                    let counter = if result.is_ok() { &accepted } else { &rejected };
+                    counter.set(counter.get() + 1);
+                    if let Ok(raw) = result {
+                        prop_assert_eq!(raw[0], 0x02);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        // Non-vacuous: the generator reaches both outcomes in volume.
+        assert!(
+            accepted.get() > 500 && rejected.get() > 500,
+            "accepted {}, rejected {}",
+            accepted.get(),
+            rejected.get()
+        );
+    }
 }

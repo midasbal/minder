@@ -21,6 +21,8 @@ near-sdk = "=5.29.1"
 near-sdk = { version = "=5.29.1", features = ["unit-testing"] }
 near-workspaces = "=0.23.0"
 tokio = { version = "1", features = ["full"] }
+# Model-based invariant harness (src/model_tests). Dev-only.
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 
 [profile.release]
 codegen-units = 1

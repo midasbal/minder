@@ -472,4 +472,6 @@ mod gate_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod model_tests;
+#[cfg(test)]
 mod test_support;
