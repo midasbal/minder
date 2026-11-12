@@ -1,0 +1,17 @@
+# Cargo settings for every build and test in this repository (cargo reads this
+# file from any directory below it).
+
+[env]
+# The sandbox integration tests start one near-sandbox node per test, several at
+# once. Under CPU load a node can take longer than near-workspaces' default
+# 10 s to answer its first RPC call, and the test then fails to start
+# (`SandboxStartupRetriesExhausted`), through no fault of the contract. This is
+# the readiness window both near-sandbox and near-workspaces read; waiting
+# longer costs nothing when a node is quick, since the wait ends at the first
+# answer. Not forced: an explicit environment variable still wins.
+NEAR_RPC_TIMEOUT_SECS = "90"
+
+[alias]
+# The whole suite, every test binary even if one fails: `cargo test-all`, or
+# `contract/test.sh` for the same with a per-binary summary.
+test-all = "test --no-fail-fast"

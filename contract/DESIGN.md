@@ -772,6 +772,31 @@ value.
   its 25 reserved; with the `ecrecover` check the sandbox measures 2.4 Tgas, so the reserve is unchanged. The request needs about 55 Tgas prepaid plus its own work (`sign` 30 + callback 25);
   with less, promise creation fails and the whole request reverts with nothing reserved.
 
+### G2: freeze and revoke do not recall a transaction already signed
+
+A bounded, mitigated boundary, deliberately accepted. `freeze` and `revoke_mandate` stop the agent from
+getting anything *new* signed (the next request is denied), but they cannot take back an EVM transaction
+the signer has already returned: an EIP-1559 transaction carries no expiry, so a signed one stays valid
+until its nonce is mined or replaced, and anyone who holds it can broadcast it.
+
+- **The loss is bounded.** That transaction passed `evaluate` and was reserved and booked when it was
+  signed (the G1 rule), so it is capped by exactly what applied at signing: the per-transaction cap, the
+  window limit, and the grant's lifetime budget. Revoking does not add to it, and a later request cannot
+  exceed what was already counted. A token transfer is bounded the same way, on both of its legs.
+- **There is a manual recall.** The owner calls `owner_evm_withdraw` (or `owner_evm_token_withdraw`) with
+  the *explicit nonce of the signed transaction*, which signs a replacement at that nonce (typically a
+  zero-value transfer to the derived address itself, which the timelock lets through at once). If the
+  replacement is mined first, the original can never be: a nonce is used once. Raise the fees first with
+  `set_evm_config` (a replacement must outbid what it replaces, which is a loosening change and so waits
+  out the timelock if one is set; raise them in advance, or do it before enabling the timelock). The
+  window is a race against the broadcaster, so it is a mitigation, not a guarantee.
+- **An automatic ledger was considered and rejected.** The contract would record each outstanding signed
+  transaction and cancel or release it on a freeze. But the contract is outbound-only: it never sees the
+  destination chain, so it cannot know when a transaction was mined, and freeing a ledger slot would need
+  a trusted off-chain party to acknowledge it. That would add exactly the trusted authority the design
+  avoids, to track a risk the three limits above already bound. So there is no outstanding-transaction
+  ledger.
+
 ### Testnet capstone
 
 Production wasm deployed to `minder-spike-d5614e6c.testnet` (the account whose derived address for
@@ -1221,5 +1246,26 @@ stable 1.94.1; the pinned toolchain is not changed.
 
 ```
 cargo near build non-reproducible-wasm --locked   # production wasm, no test helper
-cargo test                                        # unit + sandbox tests; builds the test wasms itself
+contract/test.sh                                  # the whole test suite: the canonical command
 ```
+
+**The canonical test command** is `contract/test.sh` (equivalently `cargo test-all` in `contract/`, an
+alias for `cargo test --no-fail-fast`). It runs every test binary even if one fails, so one failure never
+hides the rest; prints one line per binary and its result; and exits non-zero on any failure. Extra
+arguments go to `cargo test` (`contract/test.sh --test evm_gate`). It needs Rust 1.93 or newer and
+`cargo-near` (`cargo install --locked cargo-near`), which the sandbox tests use to build the contract and
+the test doubles; the first run downloads the near-sandbox binary. A full run takes about ten minutes.
+
+**Why the settings in `.cargo/config.toml` matter.** The sandbox integration tests start one near-sandbox
+node per test, several at once. Under CPU load a node could take longer than the default 10 seconds to
+answer its first RPC call, and the test then failed to start with `SandboxStartupRetriesExhausted`, with
+nothing wrong in the contract. Both near-sandbox and near-workspaces read `NEAR_RPC_TIMEOUT_SECS` for that
+readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds for every cargo
+invocation under the repository (an environment variable you set yourself still wins). Waiting longer
+costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
+consecutive full runs of `contract/test.sh`, each exit 0 with no start-up failure and the default thread
+count (so no cap on test threads was needed): 243 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38
+`evm_gate`, 15 `invariants`, 4 `method_surface`, 9 `signing_confinement`, 6 `timelock` and 8 `transfers`
+tests passed in every run. Before the setting, runs under load intermittently failed whole binaries
+(`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
+part of the suite.
