@@ -16,6 +16,7 @@ contract's own account (see Agent authority).
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
+| `src/timelock.rs` | The asymmetric owner timelock: classification, `propose_change`, `execute_change`, `cancel_change`, `set_timelock_delay`, `set_treasury` |
 | `src/decision.rs` | The decision log: the `decision` NEP-297 event every agent request emits, allowed or denied |
 | `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `owner_evm_token_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
@@ -29,7 +30,8 @@ contract's own account (see Agent authority).
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `config` | `Config { owner, status, window_len, num_buckets }` | Set once in `init`; only `status` changes later |
+| `config` | `Config { owner, status, window_len, num_buckets, timelock_delay, near_treasury, evm_treasury }` | Set in `init`; `status`, the delay and the treasuries change later, the last two only under the timelock rule |
+| `pending_changes`, `next_change_id` | `IterableMap<u64, PendingChange>`, `u64` | Loosening owner changes waiting out the delay; ids start at 1 and are never reused |
 | `mandate` | `Option<Mandate { agent_key: PublicKey, expiry, epoch, revoked, scope: MandateScope }>` | One mandate at a time; `agent_key` is the function-call key provisioned on the contract account |
 | `last_mandate_epoch` | `u64` | Incremented on every grant, never reset, so epochs are never reused |
 | `policies` | `IterableMap<AssetId, AssetPolicy { per_tx_cap, window_limit, epoch_budget }>` | Having an entry allowlists the asset; `epoch_budget` is optional |
@@ -293,6 +295,82 @@ changed the same way, and so did `AssetId` (the appended `Evm20`), `EvmConfig` (
 works. The JSON of an existing `grant_mandate` call with a key still works unchanged (no `scope`
 means unscoped).
 
+## Owner timelock (asymmetric)
+
+How an owner change took effect before: at once, whatever it did. Now the contract classifies each
+change by what it does to authority: **tightening and emergency actions are instant, loosening ones
+wait a configurable delay, and owner fund recovery is instant only to a pre-registered treasury.**
+Defending a single owner key is still primarily the job of an external multisig owner; this adds the
+in-contract reaction window and the safe-recovery constraint.
+
+**The delay and the treasuries** are set at `init` (`timelock_delay` in ns, `near_treasury`,
+`evm_treasury`, all optional) and change later only under the rules below. **A delay of zero (the
+default) disables the timelock**: every change is instant, as before. That is how a deployment is
+armed (adding assets and recipients is loosening), after which `set_timelock_delay` switches it on
+(raising the delay is instant). Deploy, arm, then enable; a deployment that never enables it has no
+timelock.
+
+**Classification** (applied by the contract to the same methods as before, not by separate methods;
+`timelock.rs::is_loosening`):
+
+| Change | Instant when | Timelocked when |
+| --- | --- | --- |
+| `freeze`, `revoke_mandate`, `remove_asset_policy` | always | never |
+| `set_asset_policy` | tighter or equal in every field (cap, window, budget; a budget where there was none counts as tighter) | adding the asset; a higher cap or window; dropping or raising the budget. A mix of raising one field and lowering another is loosening |
+| `set_recipient`, `set_evm_recipient` | removing, or already as asked | adding |
+| `grant_mandate` | no live mandate (none, revoked, expired), or the expiry does not extend the live one's | extending the expiry of a live mandate |
+| `unfreeze` | not frozen | frozen |
+| `set_evm_config` | tighter or equal: no higher fee or gas limit, same chain | the first configuration; a higher `max_fee_per_gas`, `max_priority_fee_per_gas`, `gas_limit` or `token_gas_limit`; another chain |
+| `set_timelock_delay` | raising or equal | lowering |
+| `set_treasury` | no change | any change |
+| `owner_withdraw` | `to` is the NEAR treasury | any other destination |
+| `owner_evm_withdraw`, `owner_evm_token_withdraw` | the recipient is the EVM treasury or the contract's own derived address | any other recipient |
+
+Instant grants rest on the policy: an agent holding a malicious grant is still bounded by the current,
+un-loosened caps, windows, allowlists and budgets, which the owner key cannot raise instantly. A
+transfer to the derived address itself moves nothing out; it is how a stuck or signed-but-unbroadcast
+transaction is cancelled, which must stay instant. `raise_evm_nonce` is not classified (it moves no
+authority).
+
+**Two-phase mechanism.** A method called directly with a loosening change reverts with `Timelocked`.
+The owner instead calls `propose_change(change)` with the change as an `OwnerChange` (one variant per
+loosening method), which validates it, records it with `ready_at = now + delay` under a fresh id and
+returns the id (it refuses a change that is not timelocked: call the method). `execute_change(id)`
+applies it once `now >= ready_at` and reverts with `Not ready` before; if applying it fails (a grant
+whose expiry has since passed) the call reverts and the proposal stays, to be cancelled.
+`cancel_change(id)` drops a proposal and is always available. All three are owner-only. Up to 32
+proposals may be pending, and each proposal, execution and cancellation is logged as a NEP-297 event
+(`owner_change_proposed`, `owner_change_executed`, `owner_change_cancelled`) for the control panel.
+`get_pending_change(s)` list what is waiting.
+
+**Tightening is never blocked.** A freeze, revocation or cap-lowering works at once even while a
+loosening of the same thing is pending. The pending loosening is not touched by it: it stays until it is
+executed or cancelled, so the owner who tightens in an emergency should also cancel what is pending.
+
+**Treasury-constrained recovery.** Recovery to the registered treasury of its surface is instant; to
+any other destination it is a timelocked proposal, executed (and, for EVM, signed) only after the
+delay. With no treasury registered, all recovery is timelocked. Changing the treasury is itself
+timelocked. A signing recovery executed through `execute_change` still passes the `ecrecover`
+authenticity gate; the signing dispatch is in `apply_owner_evm_withdraw` and
+`apply_owner_evm_token_withdraw`, which `execute_change` reaches only after an owner check, and which
+are the entries on the signing-confinement list.
+
+**What a compromised owner key can still do.** Queue changes (visible, and cancellable by whoever
+else holds the key); freeze or revoke (denial of service); remove assets and recipients; lower caps;
+instantly grant a mandate to its own key (bounded by the existing policy and allowlists: it cannot add
+a recipient or raise a cap); send funds to the registered treasury, which it cannot change instantly.
+Known limits: (a) revoke is instant and a grant after a revoke is instant, so the extension rule
+(a timelock on lengthening a live mandate) can be walked around by revoking first, at the cost of
+dropping the agent's authority visibly; (b) a grant starts a new epoch, which resets each asset's
+lifetime budget, so instant re-grants refresh the budget (the windows still bound the rate); (c) the
+delay is only a reaction window if someone is watching and holds the means to cancel: with one key,
+the attacker holds it too, which is why the external multisig is the primary mitigation.
+
+**State schema.** `Config` gained the delay and the treasuries and the contract gained the pending
+map and the id counter, so a deployment from before this change needs a fresh account or wiped state.
+`init` takes three more optional arguments (a call without them still works); the existing owner
+methods keep their names, kinds and arguments; five calls and two views are new.
+
 ## Fund custody
 
 This contract holds the funds the agent can spend: NEAR in its own balance, and NEP-141 tokens in
@@ -301,9 +379,13 @@ its account at each token contract. It keeps no ledger of them; the balances are
 ### Threat-model boundary
 
 **Minder contains the untrusted agent, not the owner.** The owner owns the treasury, so
-`owner_withdraw` (and its cross-chain counterparts `owner_evm_withdraw` and `owner_evm_token_withdraw`) is intentionally
-unrestricted. Defending against a compromised owner key is out of MVP scope; the Tier 2
-policy-change timelock is the eventual mitigation.
+`owner_withdraw` (and its cross-chain counterparts `owner_evm_withdraw` and `owner_evm_token_withdraw`)
+is outside policy. A **single compromised owner key** is a separate threat. The primary mitigation is
+external and not built here: **the owner should be a NEAR multisig account**, so no one key can act.
+Inside the contract, the asymmetric timelock (next section) adds a reaction window and a
+safe-recovery constraint on top: a compromised key cannot instantly widen the agent's authority or
+send funds anywhere but the pre-registered treasury. It does not make a single-key owner safe: see
+the limits listed there.
 
 ### `owner_withdraw(asset, amount, to) -> Promise`
 
@@ -937,6 +1019,11 @@ with its real function-call key.
 | The token callback has gas to spare | sandbox `evm_gate::the_token_callback_has_gas_to_spare` (about 3.2 of 25 Tgas) |
 | One decision event per agent request, allow and deny, with the inputs and the verdict, on all three methods (a token request's two legs included); a request rejected before policy logs none | unit `decision::tests::an_allow_carries_the_inputs_and_every_leg`, `a_deny_names_the_first_denying_leg_and_its_reason`; `lifecycle_tests::an_allowed_local_request_logs_an_allow_with_its_inputs`, `a_denied_local_request_logs_the_deny_before_it_reverts`, `every_deny_reason_of_the_local_path_is_logged_as_the_reason_it_reverts_with`, `a_call_from_another_account_is_logged_with_no_agent_key`, `a_request_rejected_before_policy_logs_no_decision`; `gate_tests::an_allowed_native_payment_logs_an_allow_with_the_value_and_the_outlay`, `a_denied_native_payment_logs_the_deny_before_it_reverts`, `an_allowed_token_payment_logs_both_legs`, `a_token_payment_denied_on_the_transfer_leg_logs_only_that_leg`, `a_token_payment_denied_on_the_gas_leg_logs_both_legs`, `a_token_payment_with_no_native_policy_logs_the_gas_leg_denial` |
 | A deny's decision event persists in the FAILED receipt's logs; allows are in the successful receipt; execution events and owner methods are unchanged | sandbox `evm_gate::a_denied_request_persists_its_decision_event_in_the_failed_receipt`, `an_allowed_request_logs_an_allow_in_the_successful_receipt`; unit `gate_tests::the_execution_events_and_the_owner_methods_are_unchanged_by_the_decision_log` |
+| Instant: freeze, revoke, a tightening or equal policy change, removing an asset or recipient, a grant that does not extend a live mandate, recovery to the treasury and to the derived address, raising the delay | unit `timelock_tests::freeze_and_revoke_take_effect_at_once`, `a_policy_change_that_is_tighter_or_equal_in_every_field_is_instant`, `removing_an_asset_or_a_recipient_is_instant`, `a_grant_that_does_not_extend_a_live_mandate_is_instant`, `recovery_to_the_treasury_and_to_the_derived_address_is_instant`, `raising_the_delay_is_instant_and_the_timelock_can_be_enabled_later`; sandbox `timelock::a_compromised_owner_cannot_loosen_or_redirect_at_once_but_can_still_freeze` |
+| Loosening is delayed: a raised cap, window or budget, a new asset, a new recipient (NEAR and EVM), an extended live mandate, unfreeze, a higher EVM fee or gas limit, a lowered delay, a changed treasury, and recovery to any other destination each take effect only through propose, the delay and execute; early execution is refused; cancel removes the change | unit `timelock_tests::a_raised_cap_window_or_budget_is_delayed`, `adding_an_asset_is_delayed`, `adding_a_recipient_is_delayed_on_both_surfaces`, `extending_a_live_mandate_is_delayed`, `unfreezing_is_delayed_but_freezing_is_not`, `loosening_the_evm_configuration_is_delayed_and_tightening_it_is_not`, `lowering_the_delay_or_changing_the_treasury_is_delayed`, `changing_the_treasury_is_delayed`, `recovery_to_any_other_destination_is_delayed`, `cancel_removes_a_pending_change_and_it_can_no_longer_be_executed`; sandbox `timelock::a_loosening_change_takes_effect_only_after_propose_wait_and_execute`, `a_cancelled_change_never_takes_effect`, `owner_recovery_is_instant_to_the_treasury_and_delayed_anywhere_else`, `evm_gate::evm_recovery_is_instant_to_the_treasury_and_to_the_derived_address_and_delayed_elsewhere` |
+| A mixed tightening and loosening policy change is loosening | unit `timelock_tests::a_mixed_tightening_and_loosening_policy_change_is_loosening` |
+| The compromised-owner scenario: raising a cap, adding the attacker as a recipient, redirecting the treasury, dropping the delay and withdrawing to the attacker's address are each forced through the delay while a legitimate freeze and a cap-lowering stay instant; tightening works while a loosening is pending | unit `timelock_tests::a_compromised_owner_key_cannot_widen_authority_or_redirect_funds_at_once`, `tightening_works_while_a_loosening_of_the_same_thing_is_pending`; sandbox `timelock::a_compromised_owner_cannot_loosen_or_redirect_at_once_but_can_still_freeze` |
+| Mechanism: unique never-reused ids, id-ordered listing, only loosening and valid changes can be proposed, owner-only, a bounded queue, logged events, timelock off means everything instant | unit `timelock_tests::ids_are_unique_and_pending_changes_are_listed_in_id_order`, `only_a_loosening_change_can_be_proposed_and_only_a_valid_one`, `only_the_owner_can_propose_execute_or_cancel`, `the_number_of_pending_changes_is_bounded`, `proposals_executions_and_cancellations_are_logged`, `with_the_timelock_off_every_change_is_instant_and_nothing_can_be_proposed`, `a_grant_whose_time_has_passed_by_execution_reverts_and_stays_pending`; sandbox `timelock::the_timelock_can_be_enabled_after_arming_and_never_loosened_instantly`, `init_takes_the_delay_and_the_treasuries` |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
@@ -972,6 +1059,11 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 - The agent is identified by public key, as in production: its calls come from the contract account
   signed with the mandate's key, and every grant rotates between two keys (the contract refuses to
   re-grant the live one). A `StaleKeyRequest` action signs a request with the other, stale key.
+- Most suites boot with the timelock off, so their owner actions are as they always were. The
+  `timelock` suite and the random driver boot **timelocked** (armed first, then the delay is raised, as
+  a deployment is). There the model states, from the classification rule alone, which owner calls must
+  apply and which must be refused as timelocked, tracks the pending changes with their ids and
+  ready-at times, and the harness proposes, executes (early and due) and cancels them.
 - A third asset, a token, makes a request a payment with two legs: the harness reserves the token amount
   and the gas against the native asset, expects the contract's callback to carry both, rebuilds the
   transfer calldata byte by byte on its own, and checks that the view (`dry_run_evm_token`) and the
@@ -1008,7 +1100,8 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | scope (`exhaustive_mandate_scopes`) | 10 | 24,854 | 104,843 | 79,990 | 6,517 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
 | budget (`exhaustive_epoch_budgets`) | 10 | 60,702 | 237,500 | 163,103 | 30,220 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
 | token (`exhaustive_token_payments`) | 10 | 21,652 | 91,702 | 70,051 | 9,358 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
-| **Total** | | **188,556** | **783,897** | | | |
+| timelock (`exhaustive_timelock`) | 12 | 38,233 | 128,403 | 89,835 | 18,381 | policy changes that tighten (instant) and loosen (refused when called, held when proposed), unfreeze and grants under the timelock, execution only when due, cancellation, requests, freezes and the clock, in a world booted timelocked |
+| **Total** | | **226,789** | **912,300** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -1034,6 +1127,7 @@ every step. Every step of every harness driver runs every check.
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
 | The decision log: on every request, allowed or panicked, exactly one decision event is emitted and it equals the one restated from the model's decisions and the request's inputs (method, key, asset, recipient, amount, each evaluated leg with its amount and verdict, and the first denying leg) | yes | yes | yes | yes | |
+| The timelock: every owner policy change, unfreeze and grant is classified as the model's independent restatement says (a loosening one refused when called and held when proposed, a tightening one applied at once); the pending list, ids and ready-at times equal the model's; a change is executed only when due and cancelled at will; no loosening takes effect before its delay; and every asset's stored policy equals the model's (reached by the random driver, which runs timelocked, and the `timelock` suite) | | | | yes | |
 | Token payments: both legs are decided as the oracle says (the transfer by the token's policy, allowlist and scope; the gas by the native policy alone), both are reserved together and counted by the next request, the callback carries both reservations and the exact transfer transaction with its calldata, and a delivery releases and books both or neither (reached by the random driver and the `token` suite) | | | | yes | |
 | The lifetime budget: the contract's per-epoch committed spend (read through its lazy-reset accessor) equals the oracle's after every step; budget usage, committed plus in flight, never passes the budget unless the owner lowered it; a new grant resets it, a delivery after the re-grant is booked to the new grant, and the decision (allow or `MandateBudgetExceeded`, with the window deciding first when both deny) equals the oracle's (reached by the random driver and the `budget` suite) | | | | yes | |
 | The agent's authority is the intersection of the policy and the mandate's scope: the shadow model restricts every request to what both allow, with the scope checked after the global ones (out-of-scope asset or recipient, the tighter cap), so an allowlist or cap is never widened by a scope, and the stored scope equals the granted one (reached by the random driver and the `scope` suite) | | | | yes | |

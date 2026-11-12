@@ -41,6 +41,8 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         4 => class(|a| matches!(a, Action::Deliver { .. })),
         2 => class(|a| matches!(a, Action::SetPolicy { .. } | Action::GrantMandate(..)
             | Action::RevokeMandate | Action::Freeze | Action::Unfreeze)),
+        2 => class(|a| matches!(a, Action::ProposePolicy { .. } | Action::ProposeUnfreeze
+            | Action::ExecutePending(_) | Action::CancelPending(_))),
         1 => class(|a| matches!(a, Action::Advance(_))),
     ]
 }

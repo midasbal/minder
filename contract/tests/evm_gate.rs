@@ -1324,3 +1324,111 @@ async fn a_denied_request_persists_its_decision_event_in_the_failed_receipt() {
     assert_eq!(f.reserved(token_asset()).await, 0);
     assert_eq!(nonce(&f).await, "0");
 }
+
+// ---- Owner recovery under the timelock ----
+
+/// The delay of the timelocked EVM tests.
+const TIMELOCK_DELAY_NS: u64 = 20 * SECOND;
+
+/// `armed_evm` with `RECIPIENT` registered as the EVM treasury and the
+/// timelock switched on.
+async fn armed_timelocked() -> (Fixture, Contract) {
+    let (f, signer) = armed_evm().await;
+    f.owner_ok("set_treasury", json!({ "near": null, "evm": RECIPIENT }))
+        .await;
+    f.owner_ok(
+        "set_timelock_delay",
+        json!({ "delay": TIMELOCK_DELAY_NS.to_string() }),
+    )
+    .await;
+    (f, signer)
+}
+
+#[tokio::test]
+async fn evm_recovery_is_instant_to_the_treasury_and_to_the_derived_address_and_delayed_elsewhere()
+{
+    let (f, signer) = armed_timelocked().await;
+
+    // A token transfer to the treasury is signed at once (viem's bytes).
+    let to_treasury = owner_token_withdraw(&f, &f.owner, RECIPIENT, 1000, 0).await;
+    assert!(to_treasury.is_success(), "{to_treasury:?}");
+    assert_eq!(
+        owner_events(&to_treasury)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_TOKEN_NONCE_0)
+    );
+    // A zero-value self-transfer, which cancels a stuck transaction, is instant too.
+    let cancel = owner_withdraw(&f, &fixture_sender(), 0, 0).await;
+    assert!(cancel.is_success(), "{cancel:?}");
+    assert_eq!(owner_events(&cancel).len(), 1);
+    let signed_so_far = signer_requests(&signer).await.len();
+    assert_eq!(signed_so_far, 2);
+
+    // To any other address: refused, and the signer is not asked.
+    assert_reverts(
+        owner_token_withdraw(&f, &f.owner, NOT_ALLOWLISTED, HUGE_TOKENS, 3).await,
+        "Timelocked",
+    );
+    assert_reverts(
+        owner_withdraw(&f, NOT_ALLOWLISTED, 1000, 5).await,
+        "Timelocked",
+    );
+    assert_eq!(signer_requests(&signer).await.len(), signed_so_far);
+
+    // Through the delay it is signed, at execution, and the signature is then emitted.
+    let proposed = f
+        .call(
+            &f.owner,
+            "propose_change",
+            json!({ "change": { "OwnerEvmTokenWithdraw": {
+                "token": TOKEN, "recipient": NOT_ALLOWLISTED,
+                "amount": HUGE_TOKENS.to_string(), "nonce": "3",
+            } } }),
+        )
+        .await;
+    let id: String = proposed.into_result().unwrap().json().unwrap();
+    assert_eq!(
+        signer_requests(&signer).await.len(),
+        signed_so_far,
+        "a proposal signs nothing"
+    );
+    let early = f
+        .owner
+        .call(f.contract.id(), "execute_change")
+        .args_json(json!({ "id": id }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await
+        .unwrap();
+    assert_reverts(early, "Not ready");
+
+    let ready_at: u64 = f.view::<Vec<Value>>("get_pending_changes", json!({})).await[0]["ready_at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    f.advance_to(ready_at + SECOND).await;
+    let executed = f
+        .owner
+        .call(f.contract.id(), "execute_change")
+        .args_json(json!({ "id": id }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await
+        .unwrap();
+    assert!(executed.is_success(), "{executed:?}");
+    // The execution receipt logs the change as executed and, when the signature
+    // comes back, the signed transaction.
+    let signed: Vec<Value> = events(&executed)
+        .into_iter()
+        .filter(|event| event["event"] == "evm_owner_withdrawal_signed")
+        .collect();
+    assert_eq!(signed.len(), 1);
+    assert_eq!(
+        signed[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_OWNER_TOKEN_OVER_CAP)
+    );
+    assert!(events(&executed)
+        .iter()
+        .any(|event| event["event"] == "owner_change_executed"));
+    assert_eq!(nonce(&f).await, "4", "the explicit nonce moved the counter");
+}

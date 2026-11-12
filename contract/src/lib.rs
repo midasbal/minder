@@ -7,6 +7,7 @@ mod decision;
 pub mod evm;
 mod gate;
 pub mod policy;
+mod timelock;
 pub mod types;
 pub mod window;
 
@@ -20,7 +21,7 @@ use near_sdk::{
 
 pub use types::{
     AssetId, AssetPolicy, Config, Decision, DenyReason, EpochSpend, EvmConfig, EvmConfigView,
-    Mandate, MandateScope, Status, TokenPaymentDecision,
+    Mandate, MandateScope, OwnerChange, PendingChange, Status, TokenPaymentDecision,
 };
 
 use policy::{EvalInput, RecipientRef};
@@ -64,6 +65,7 @@ enum StorageKey {
     EvmRecipients,
     EvmNonces,
     EpochSpend,
+    PendingChanges,
 }
 
 #[near(contract_state)]
@@ -95,6 +97,11 @@ pub struct Minder {
     /// when a policy is removed, so removing and re-adding a policy cannot
     /// reset a budget.
     epoch_spend: LookupMap<AssetId, EpochSpend>,
+    /// Loosening changes waiting out the timelock, by id.
+    pending_changes: IterableMap<u64, PendingChange>,
+    /// The id the next proposal gets. Starts at 1 and never decreases, so an id
+    /// is never reused.
+    next_change_id: u64,
 }
 
 #[near]
@@ -103,8 +110,19 @@ impl Minder {
     /// be the designated owner or the contract account itself, so that nobody
     /// else can claim ownership by initializing first. Deploy and initialize
     /// in one batched transaction.
+    ///
+    /// `timelock_delay` (ns; omitted or zero disables the timelock) and the
+    /// treasuries (`near_treasury`, `evm_treasury`, the destinations of instant
+    /// owner recovery) are the asymmetric-timelock settings; see `timelock.rs`.
     #[init]
-    pub fn init(owner: AccountId, window_len: U64, num_buckets: u32) -> Self {
+    pub fn init(
+        owner: AccountId,
+        window_len: U64,
+        num_buckets: u32,
+        timelock_delay: Option<U64>,
+        near_treasury: Option<AccountId>,
+        evm_treasury: Option<String>,
+    ) -> Self {
         let caller = env::predecessor_account_id();
         require!(
             caller == owner || caller == env::current_account_id(),
@@ -131,6 +149,9 @@ impl Minder {
                 status: Status::Active,
                 window_len,
                 num_buckets,
+                timelock_delay: timelock_delay.unwrap_or(U64(0)),
+                near_treasury,
+                evm_treasury: evm_treasury.as_deref().map(timelock::normalized_treasury),
             },
             mandate: None,
             last_mandate_epoch: 0,
@@ -142,6 +163,8 @@ impl Minder {
             evm_recipients: IterableSet::new(StorageKey::EvmRecipients),
             evm_nonces: LookupMap::new(StorageKey::EvmNonces),
             epoch_spend: LookupMap::new(StorageKey::EpochSpend),
+            pending_changes: IterableMap::new(StorageKey::PendingChanges),
+            next_change_id: 1,
         }
     }
 
@@ -160,32 +183,23 @@ impl Minder {
         epoch_budget: Option<U128>,
     ) {
         self.assert_owner();
-        self.policies.insert(
+        self.owner_change(OwnerChange::SetAssetPolicy {
             asset,
-            AssetPolicy {
-                per_tx_cap,
-                window_limit,
-                epoch_budget,
-            },
-        );
+            per_tx_cap,
+            window_limit,
+            epoch_budget,
+        });
     }
 
     /// Removes the policy, which un-allowlists the asset. Reverts if absent.
     pub fn remove_asset_policy(&mut self, asset: AssetId) {
         self.assert_owner();
-        require!(
-            self.policies.remove(&asset).is_some(),
-            "No policy for this asset"
-        );
+        self.apply_remove_asset_policy(asset);
     }
 
     pub fn set_recipient(&mut self, recipient: AccountId, allowed: bool) {
         self.assert_owner();
-        if allowed {
-            self.recipients.insert(recipient);
-        } else {
-            self.recipients.remove(&recipient);
-        }
+        self.owner_change(OwnerChange::SetRecipient { recipient, allowed });
     }
 
     /// Replaces any existing mandate with a new one under a fresh epoch, and
@@ -211,40 +225,9 @@ impl Minder {
         scope: Option<MandateScope>,
     ) {
         self.assert_owner();
-        require!(
-            expiry.0 > env::block_timestamp(),
-            "Mandate expiry must be in the future"
-        );
-        // Unset means inherit: no scope is the unrestricted (global-policy-only)
-        // mandate, as before scopes existed. A re-grant replaces the scope.
-        let scope = scope
-            .unwrap_or_default()
-            .validated()
-            .unwrap_or_else(|reason| env::panic_str(reason));
-        if let Some(previous) = self.mandate.as_ref().filter(|mandate| !mandate.revoked) {
-            // The same key would race its own deletion against its re-addition.
-            // After a revocation the deletion has long landed, so reuse is fine.
-            require!(
-                previous.agent_key != agent_key,
-                "That key is the current agent key; revoke the mandate first or use a new key"
-            );
-            Self::delete_agent_key(previous.agent_key.clone());
-        }
-        Promise::new(env::current_account_id())
-            .add_access_key_allowance(
-                agent_key.clone(),
-                Allowance::limited(AGENT_KEY_ALLOWANCE)
-                    .unwrap_or_else(|| env::panic_str("the allowance is non-zero")),
-                env::current_account_id(),
-                AGENT_METHODS,
-            )
-            .detach();
-        self.last_mandate_epoch += 1;
-        self.mandate = Some(Mandate {
+        self.owner_change(OwnerChange::GrantMandate {
             agent_key,
             expiry,
-            epoch: self.last_mandate_epoch,
-            revoked: false,
             scope,
         });
     }
@@ -260,23 +243,17 @@ impl Minder {
     /// succeeded, so it cannot panic.
     pub fn revoke_mandate(&mut self) {
         self.assert_owner();
-        let mandate = self.mandate.as_mut().unwrap_or_else(|| {
-            env::panic_str("No mandate to revoke");
-        });
-        if !mandate.revoked {
-            mandate.revoked = true;
-            Self::delete_agent_key(mandate.agent_key.clone());
-        }
+        self.apply_revoke_mandate();
     }
 
     pub fn freeze(&mut self) {
         self.assert_owner();
-        self.config.status = Status::Frozen;
+        self.apply_freeze();
     }
 
     pub fn unfreeze(&mut self) {
         self.assert_owner();
-        self.config.status = Status::Active;
+        self.owner_change(OwnerChange::Unfreeze);
     }
 
     /// Sends `amount` of `asset` from this contract to `to`. Owner recovery:
@@ -287,8 +264,7 @@ impl Minder {
     /// the agent, not the owner.
     pub fn owner_withdraw(&mut self, asset: AssetId, amount: U128, to: AccountId) -> Promise {
         self.assert_owner();
-        Self::require_local(&asset);
-        Self::transfer_promise(&asset, amount, to)
+        self.owner_withdrawal(OwnerChange::OwnerWithdraw { asset, amount, to })
     }
 
     // ---- Funding ----
@@ -472,6 +448,110 @@ impl Minder {
 }
 
 impl Minder {
+    pub(crate) fn apply_set_asset_policy(
+        &mut self,
+        asset: AssetId,
+        per_tx_cap: U128,
+        window_limit: U128,
+        epoch_budget: Option<U128>,
+    ) {
+        self.policies.insert(
+            asset,
+            AssetPolicy {
+                per_tx_cap,
+                window_limit,
+                epoch_budget,
+            },
+        );
+    }
+
+    pub(crate) fn apply_remove_asset_policy(&mut self, asset: AssetId) {
+        require!(
+            self.policies.remove(&asset).is_some(),
+            "No policy for this asset"
+        );
+    }
+
+    pub(crate) fn apply_set_recipient(&mut self, recipient: AccountId, allowed: bool) {
+        if allowed {
+            self.recipients.insert(recipient);
+        } else {
+            self.recipients.remove(&recipient);
+        }
+    }
+
+    pub(crate) fn apply_grant_mandate(
+        &mut self,
+        agent_key: PublicKey,
+        expiry: U64,
+        scope: Option<MandateScope>,
+    ) {
+        require!(
+            expiry.0 > env::block_timestamp(),
+            "Mandate expiry must be in the future"
+        );
+        // Unset means inherit: no scope is the unrestricted (global-policy-only)
+        // mandate, as before scopes existed. A re-grant replaces the scope.
+        let scope = scope
+            .unwrap_or_default()
+            .validated()
+            .unwrap_or_else(|reason| env::panic_str(reason));
+        if let Some(previous) = self.mandate.as_ref().filter(|mandate| !mandate.revoked) {
+            // The same key would race its own deletion against its re-addition.
+            // After a revocation the deletion has long landed, so reuse is fine.
+            require!(
+                previous.agent_key != agent_key,
+                "That key is the current agent key; revoke the mandate first or use a new key"
+            );
+            Self::delete_agent_key(previous.agent_key.clone());
+        }
+        Promise::new(env::current_account_id())
+            .add_access_key_allowance(
+                agent_key.clone(),
+                Allowance::limited(AGENT_KEY_ALLOWANCE)
+                    .unwrap_or_else(|| env::panic_str("the allowance is non-zero")),
+                env::current_account_id(),
+                AGENT_METHODS,
+            )
+            .detach();
+        self.last_mandate_epoch += 1;
+        self.mandate = Some(Mandate {
+            agent_key,
+            expiry,
+            epoch: self.last_mandate_epoch,
+            revoked: false,
+            scope,
+        });
+    }
+
+    pub(crate) fn apply_revoke_mandate(&mut self) {
+        let mandate = self.mandate.as_mut().unwrap_or_else(|| {
+            env::panic_str("No mandate to revoke");
+        });
+        if !mandate.revoked {
+            mandate.revoked = true;
+            Self::delete_agent_key(mandate.agent_key.clone());
+        }
+    }
+
+    pub(crate) fn apply_freeze(&mut self) {
+        self.config.status = Status::Frozen;
+    }
+
+    pub(crate) fn apply_unfreeze(&mut self) {
+        self.config.status = Status::Active;
+    }
+
+    pub(crate) fn apply_owner_withdraw(
+        &mut self,
+        asset: AssetId,
+        amount: U128,
+        to: AccountId,
+    ) -> Promise {
+        Self::require_local(&asset);
+        Self::transfer_promise(&asset, amount, to)
+    }
+
     /// The transfer itself, shared by the agent path and owner withdrawal:
     /// a native transfer, or a plain `ft_transfer` with the 1 yoctoNEAR the
     /// standard requires. Never `ft_transfer_call`, which would hand control
@@ -691,3 +771,5 @@ mod mandate_tests;
 mod model_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod timelock_tests;

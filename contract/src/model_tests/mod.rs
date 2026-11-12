@@ -51,6 +51,8 @@ pub(crate) const FEE_COST: u128 = MAX_FEE * GAS_LIMIT as u128;
 pub(crate) const TOKEN_ADDRESS: &str = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
 pub(crate) const TOKEN_GAS_LIMIT: u64 = 4;
 pub(crate) const TOKEN_GAS: u128 = MAX_FEE * TOKEN_GAS_LIMIT as u128;
+/// The timelock delay of the timelocked worlds, in ns: two slots.
+pub(crate) const TIMELOCK_DELAY: u64 = 200;
 
 pub(crate) const NEAR_ALLOWED: &str = "bob.near";
 pub(crate) const NEAR_DISALLOWED: &str = "mallory.near";
@@ -64,8 +66,17 @@ pub(crate) const EVM_DISALLOWED: &str = "0x2222222222222222222222222222222222222
 const DEPTH: usize = 8;
 
 fn run_exhaustive(name: &str, alphabet: &[Action], depth: usize) -> explore::Stats {
+    run_exhaustive_from(&World::boot(), name, alphabet, depth)
+}
+
+fn run_exhaustive_from(
+    root: &World,
+    name: &str,
+    alphabet: &[Action],
+    depth: usize,
+) -> explore::Stats {
     let started = std::time::Instant::now();
-    let stats = match explore::explore(&World::boot(), alphabet, depth) {
+    let stats = match explore::explore(root, alphabet, depth) {
         Ok(stats) => stats,
         Err(failure) => panic!("[{name}] invariant violated: {failure}"),
     };
@@ -286,6 +297,40 @@ fn exhaustive_token_payments() {
 }
 
 #[test]
+fn exhaustive_timelock() {
+    // The timelock on: policy changes that tighten take effect at once and ones
+    // that loosen are refused when called and held when proposed, executed only
+    // once due, cancelled at will; unfreezing and extending a live mandate the
+    // same; with the clock moving, requests flowing and freezes in between. The
+    // model decides, from the rule alone, what each owner call must do.
+    let alphabet = [
+        request(Asset::Near, Amount::AtCap),
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Tight,
+        },
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Loose,
+        },
+        Action::ProposePolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Loose,
+        },
+        Action::Freeze,
+        Action::Unfreeze,
+        Action::ProposeUnfreeze,
+        Action::ExecutePending(Pick::Oldest),
+        Action::CancelPending(Pick::Newest),
+        Action::GrantMandate(Grant::Short, Scope::Unscoped),
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
+        Action::Advance(Tick::Slot),
+    ];
+    let stats = run_exhaustive_from(&World::boot_timelocked(), "timelock", &alphabet, DEPTH);
+    assert_covered(&stats.coverage, &["Allowed(Near)", "Denied(Near, Frozen)"]);
+}
+
+#[test]
 fn exhaustive_policy_changes_and_caps() {
     // The owner tightening and loosening limits under in-flight spend, caps,
     // and a recipient that is not allowlisted.
@@ -347,7 +392,7 @@ fn random_cases() -> u32 {
 fn random_long_sequences() {
     let started = std::time::Instant::now();
     let cases = random_cases();
-    let coverage = match random::run(&World::boot(), cases, RANDOM_MAX_LEN) {
+    let coverage = match random::run(&World::boot_timelocked(), cases, RANDOM_MAX_LEN) {
         Ok(coverage) => coverage,
         Err(failure) => panic!("invariant violated: {failure}"),
     };

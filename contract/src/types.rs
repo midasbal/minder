@@ -48,6 +48,16 @@ pub struct Config {
     pub window_len: U64,
     /// Number of sub-buckets the window is divided into. `1` is a fixed window.
     pub num_buckets: u32,
+    /// How long a change that loosens authority waits between being proposed
+    /// and being executable, in nanoseconds. Zero disables the timelock: every
+    /// owner change then takes effect at once, as before timelocks existed.
+    pub timelock_delay: U64,
+    /// The pre-registered NEAR destination of instant owner recovery
+    /// (`owner_withdraw`). Changing it is itself a timelocked change.
+    pub near_treasury: Option<AccountId>,
+    /// The same for the EVM surface: a lowercase `0x` address that
+    /// `owner_evm_withdraw` and `owner_evm_token_withdraw` may send to at once.
+    pub evm_treasury: Option<String>,
 }
 
 /// Limits for one asset. Having an entry is what allowlists the asset.
@@ -302,4 +312,81 @@ impl EvmConfig {
     pub fn outlay(&self, value: u128) -> u128 {
         value.saturating_add(self.max_fee_cost())
     }
+}
+
+/// An owner change that can be held back by the timelock. The owner's methods
+/// classify what they are asked to do: a change that only tightens (or leaves
+/// authority equal) takes effect at once, and one that loosens anything waits
+/// for [`Config::timelock_delay`] and goes through `propose_change` and
+/// `execute_change`. This enum is that second path's description of a change,
+/// one variant per owner method that can loosen.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnerChange {
+    SetAssetPolicy {
+        asset: AssetId,
+        per_tx_cap: U128,
+        window_limit: U128,
+        epoch_budget: Option<U128>,
+    },
+    SetRecipient {
+        recipient: AccountId,
+        allowed: bool,
+    },
+    SetEvmRecipient {
+        address: String,
+        allowed: bool,
+    },
+    GrantMandate {
+        agent_key: PublicKey,
+        expiry: U64,
+        scope: Option<MandateScope>,
+    },
+    Unfreeze,
+    SetEvmConfig {
+        signer_id: AccountId,
+        derivation_path: String,
+        sender: String,
+        chain_id: u64,
+        max_fee_per_gas: U128,
+        max_priority_fee_per_gas: U128,
+        gas_limit: Option<u64>,
+        token_gas_limit: Option<u64>,
+    },
+    SetTimelockDelay {
+        delay: U64,
+    },
+    SetTreasury {
+        near: Option<AccountId>,
+        evm: Option<String>,
+    },
+    OwnerWithdraw {
+        asset: AssetId,
+        amount: U128,
+        to: AccountId,
+    },
+    OwnerEvmWithdraw {
+        recipient: String,
+        value: U128,
+        nonce: U64,
+    },
+    OwnerEvmTokenWithdraw {
+        token: String,
+        recipient: String,
+        amount: U128,
+        nonce: U64,
+    },
+}
+
+/// A loosening change waiting out its delay.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingChange {
+    /// Names the change for `execute_change` and `cancel_change`. Never reused.
+    pub id: U64,
+    pub change: OwnerChange,
+    /// Block timestamp (ns) of the proposal.
+    pub proposed_at: U64,
+    /// Block timestamp (ns) from which `execute_change` is accepted.
+    pub ready_at: U64,
 }

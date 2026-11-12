@@ -67,7 +67,7 @@ fn as_owner() {
 
 fn fresh() -> Minder {
     testing_env!(context("owner.near").build());
-    let mut minder = Minder::init(account("owner.near"), U64(400), 4);
+    let mut minder = Minder::init(account("owner.near"), U64(400), 4, None, None, None);
     minder.set_asset_policy(AssetId::Near, U128(PER_TX_CAP), U128(WINDOW_LIMIT), None);
     minder.set_recipient(account("bob.near"), true);
     minder
@@ -374,7 +374,7 @@ fn an_expired_mandate_denies_even_for_its_own_key() {
 fn init_rejects_the_contract_account_as_owner() {
     testing_env!(context("minder.near").build());
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let _ = Minder::init(account("minder.near"), U64(400), 4);
+        let _ = Minder::init(account("minder.near"), U64(400), 4, None, None, None);
     }));
     assert!(panic_message(result).contains("separate account"));
 }
@@ -382,7 +382,7 @@ fn init_rejects_the_contract_account_as_owner() {
 #[test]
 fn init_by_the_contract_account_for_a_separate_owner_is_fine() {
     testing_env!(context("minder.near").build());
-    let minder = Minder::init(account("owner.near"), U64(400), 4);
+    let minder = Minder::init(account("owner.near"), U64(400), 4, None, None, None);
     assert_eq!(minder.get_config().owner, account("owner.near"));
 }
 

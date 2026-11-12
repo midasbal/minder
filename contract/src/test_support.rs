@@ -58,7 +58,7 @@ pub fn agent_context_for(key: PublicKey) -> VMContextBuilder {
 /// mandate for `agent_key()`. The environment is left as the agent.
 pub fn armed_as_agent() -> Minder {
     testing_env!(context("owner.near").build());
-    let mut minder = Minder::init(account("owner.near"), U64(400), 4);
+    let mut minder = Minder::init(account("owner.near"), U64(400), 4, None, None, None);
     for asset in [AssetId::Near, token()] {
         minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT), None);
     }

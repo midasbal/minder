@@ -37,11 +37,17 @@ use std::path::{Path, PathBuf};
 ///   counterpart of `owner_evm_withdraw`. It builds the same `transfer`
 ///   transaction as the agent's token path from the owner's token, recipient,
 ///   amount and nonce, outside policy.
+///
+/// The two owner recovery methods keep their signing in `apply_owner_evm_withdraw`
+/// and `apply_owner_evm_token_withdraw`, which both the public methods and
+/// `execute_change` (for a timelocked recovery that has come due) reach through
+/// the one classification in `timelock.rs`. Every other caller is the
+/// owner-checked entry; nothing the agent can call reaches them.
 const ALLOWED_SIGN_DISPATCH: &[(&str, &str)] = &[
     ("src/gate.rs", "request_evm_payment"),
     ("src/gate.rs", "request_evm_token_payment"),
-    ("src/gate.rs", "owner_evm_withdraw"),
-    ("src/gate.rs", "owner_evm_token_withdraw"),
+    ("src/gate.rs", "apply_owner_evm_withdraw"),
+    ("src/gate.rs", "apply_owner_evm_token_withdraw"),
 ];
 
 // ---- A small Rust tokenizer ----
@@ -660,9 +666,14 @@ fn last() { let _ = \"sign\"; }";
 fn only_the_listed_function_in_the_listed_file_is_allowed() {
     let name = |s: &str| Some(s.to_string());
     assert!(allowed("src/gate.rs", &name("request_evm_payment")));
-    assert!(allowed("src/gate.rs", &name("owner_evm_withdraw")));
+    assert!(allowed("src/gate.rs", &name("apply_owner_evm_withdraw")));
+    assert!(!allowed("src/gate.rs", &name("owner_evm_withdraw")));
+    assert!(!allowed("src/timelock.rs", &name("execute_change")));
     assert!(allowed("src/gate.rs", &name("request_evm_token_payment")));
-    assert!(allowed("src/gate.rs", &name("owner_evm_token_withdraw")));
+    assert!(allowed(
+        "src/gate.rs",
+        &name("apply_owner_evm_token_withdraw")
+    ));
     assert!(!allowed("src/gate.rs", &name("freeze")));
     // The callbacks and the argument builder are not dispatchers.
     assert!(!allowed("src/gate.rs", &name("on_owner_sign_complete")));

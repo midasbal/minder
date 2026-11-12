@@ -16,6 +16,7 @@ use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseEr
 use crate::decision;
 use crate::evm::{self, Eip1559Tx, EvmError, Signature};
 use crate::policy::RecipientRef;
+use crate::types::OwnerChange;
 use crate::types::{
     AssetId, Decision, DenyReason, EvmConfig, EvmConfigView, TokenPaymentDecision,
     DEFAULT_TOKEN_GAS_LIMIT,
@@ -38,7 +39,7 @@ const SECP256K1_DOMAIN_ID: u64 = 0;
 /// A signature response is a few hundred bytes of JSON; anything far larger
 /// is not one.
 const MAX_SIGNATURE_RESPONSE_BYTES: usize = 4096;
-const DEFAULT_GAS_LIMIT: u64 = 21_000;
+pub(crate) const DEFAULT_GAS_LIMIT: u64 = 21_000;
 
 #[near]
 impl Minder {
@@ -47,12 +48,7 @@ impl Minder {
     /// Allows or disallows an EVM recipient (`0x` + 40 hex digits).
     pub fn set_evm_recipient(&mut self, address: String, allowed: bool) {
         self.assert_owner();
-        let address = parse_address(&address);
-        if allowed {
-            self.evm_recipients.insert(address);
-        } else {
-            self.evm_recipients.remove(&address);
-        }
+        self.owner_change(OwnerChange::SetEvmRecipient { address, allowed });
     }
 
     /// Sets how EVM payments are built. `signer_id`, `derivation_path` and
@@ -79,59 +75,16 @@ impl Minder {
         token_gas_limit: Option<u64>,
     ) {
         self.assert_owner();
-        let config = EvmConfig {
+        self.owner_change(OwnerChange::SetEvmConfig {
             signer_id,
             derivation_path,
-            sender: parse_address(&sender),
+            sender,
             chain_id,
             max_fee_per_gas,
             max_priority_fee_per_gas,
-            gas_limit: gas_limit.unwrap_or(DEFAULT_GAS_LIMIT),
-            token_gas_limit: token_gas_limit.unwrap_or(DEFAULT_TOKEN_GAS_LIMIT),
-        };
-        require!(config.chain_id > 0, "chain_id must be positive");
-        require!(config.gas_limit > 0, "gas_limit must be positive");
-        require!(
-            config.token_gas_limit > 0,
-            "token_gas_limit must be positive"
-        );
-        require!(
-            config.sender != [0u8; 20],
-            "sender must not be the zero address"
-        );
-        require!(
-            !config.derivation_path.is_empty(),
-            "derivation_path must not be empty"
-        );
-        require!(
-            config.max_priority_fee_per_gas.0 <= config.max_fee_per_gas.0,
-            "max_priority_fee_per_gas cannot exceed max_fee_per_gas"
-        );
-        require!(
-            config
-                .max_fee_per_gas
-                .0
-                .checked_mul(u128::from(config.gas_limit))
-                .is_some(),
-            "max_fee_per_gas * gas_limit overflows"
-        );
-        require!(
-            config
-                .max_fee_per_gas
-                .0
-                .checked_mul(u128::from(config.token_gas_limit))
-                .is_some(),
-            "max_fee_per_gas * token_gas_limit overflows"
-        );
-        if let Some(existing) = &self.evm_config {
-            require!(
-                existing.signer_id == config.signer_id
-                    && existing.derivation_path == config.derivation_path
-                    && existing.sender == config.sender,
-                "signer_id, derivation_path and sender cannot change once set"
-            );
-        }
-        self.evm_config = Some(config);
+            gas_limit,
+            token_gas_limit,
+        });
     }
 
     /// Raises the next nonce for `chain_id` to at least `nonce`, for a sending
@@ -170,25 +123,11 @@ impl Minder {
     /// check as the agent path before anything is emitted.
     pub fn owner_evm_withdraw(&mut self, recipient: String, value: U128, nonce: U64) -> Promise {
         self.assert_owner();
-        let config = self.require_evm_config();
-        let to = parse_address(&recipient);
-        self.advance_nonce_past(config.chain_id, nonce.0);
-
-        let tx = config.build_tx(nonce.0, to, value.0);
-        let hash = evm::signing_hash(&tx);
-
-        Promise::new(config.signer_id.clone())
-            .function_call(
-                "sign".to_string(),
-                signing_request_args(&config, &hash),
-                SIGN_DEPOSIT,
-                SIGN_GAS,
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(SIGN_CALLBACK_GAS)
-                    .on_owner_sign_complete(tx),
-            )
+        self.owner_withdrawal(OwnerChange::OwnerEvmWithdraw {
+            recipient,
+            value,
+            nonce,
+        })
     }
 
     /// Owner recovery of an ERC-20 balance of the derived address: signs
@@ -215,26 +154,12 @@ impl Minder {
         nonce: U64,
     ) -> Promise {
         self.assert_owner();
-        let config = self.require_evm_config();
-        let token = parse_address(&token);
-        let to = parse_address(&recipient);
-        self.advance_nonce_past(config.chain_id, nonce.0);
-
-        let tx = config.build_token_tx(nonce.0, token, &to, amount.0);
-        let hash = evm::signing_hash(&tx);
-
-        Promise::new(config.signer_id.clone())
-            .function_call(
-                "sign".to_string(),
-                signing_request_args(&config, &hash),
-                SIGN_DEPOSIT,
-                SIGN_GAS,
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(SIGN_CALLBACK_GAS)
-                    .on_owner_sign_complete(tx),
-            )
+        self.owner_withdrawal(OwnerChange::OwnerEvmTokenWithdraw {
+            token,
+            recipient,
+            amount,
+            nonce,
+        })
     }
 
     /// Finishes `owner_evm_withdraw` and `owner_evm_token_withdraw`. There is nothing to release or book, so
@@ -592,6 +517,164 @@ impl Minder {
 }
 
 impl Minder {
+    pub(crate) fn apply_set_evm_recipient(&mut self, address: String, allowed: bool) {
+        let address = parse_address(&address);
+        if allowed {
+            self.evm_recipients.insert(address);
+        } else {
+            self.evm_recipients.remove(&address);
+        }
+    }
+
+    /// An EVM configuration from the owner's inputs, or a panic naming what is
+    /// wrong with them. Pure, so a change can be validated when it is proposed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_evm_config(
+        signer_id: AccountId,
+        derivation_path: String,
+        sender: &str,
+        chain_id: u64,
+        max_fee_per_gas: U128,
+        max_priority_fee_per_gas: U128,
+        gas_limit: Option<u64>,
+        token_gas_limit: Option<u64>,
+    ) -> EvmConfig {
+        let config = EvmConfig {
+            signer_id,
+            derivation_path,
+            sender: parse_address(sender),
+            chain_id,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            gas_limit: gas_limit.unwrap_or(DEFAULT_GAS_LIMIT),
+            token_gas_limit: token_gas_limit.unwrap_or(DEFAULT_TOKEN_GAS_LIMIT),
+        };
+        require!(config.chain_id > 0, "chain_id must be positive");
+        require!(config.gas_limit > 0, "gas_limit must be positive");
+        require!(
+            config.token_gas_limit > 0,
+            "token_gas_limit must be positive"
+        );
+        require!(
+            config.sender != [0u8; 20],
+            "sender must not be the zero address"
+        );
+        require!(
+            !config.derivation_path.is_empty(),
+            "derivation_path must not be empty"
+        );
+        require!(
+            config.max_priority_fee_per_gas.0 <= config.max_fee_per_gas.0,
+            "max_priority_fee_per_gas cannot exceed max_fee_per_gas"
+        );
+        require!(
+            config
+                .max_fee_per_gas
+                .0
+                .checked_mul(u128::from(config.gas_limit))
+                .is_some(),
+            "max_fee_per_gas * gas_limit overflows"
+        );
+        require!(
+            config
+                .max_fee_per_gas
+                .0
+                .checked_mul(u128::from(config.token_gas_limit))
+                .is_some(),
+            "max_fee_per_gas * token_gas_limit overflows"
+        );
+        config
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_set_evm_config(
+        &mut self,
+        signer_id: AccountId,
+        derivation_path: String,
+        sender: String,
+        chain_id: u64,
+        max_fee_per_gas: U128,
+        max_priority_fee_per_gas: U128,
+        gas_limit: Option<u64>,
+        token_gas_limit: Option<u64>,
+    ) {
+        let config = Self::build_evm_config(
+            signer_id,
+            derivation_path,
+            &sender,
+            chain_id,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            gas_limit,
+            token_gas_limit,
+        );
+        if let Some(existing) = &self.evm_config {
+            require!(
+                existing.signer_id == config.signer_id
+                    && existing.derivation_path == config.derivation_path
+                    && existing.sender == config.sender,
+                "signer_id, derivation_path and sender cannot change once set"
+            );
+        }
+        self.evm_config = Some(config);
+    }
+
+    pub(crate) fn apply_owner_evm_withdraw(
+        &mut self,
+        recipient: String,
+        value: U128,
+        nonce: U64,
+    ) -> Promise {
+        let config = self.require_evm_config();
+        let to = parse_address(&recipient);
+        self.advance_nonce_past(config.chain_id, nonce.0);
+
+        let tx = config.build_tx(nonce.0, to, value.0);
+        let hash = evm::signing_hash(&tx);
+
+        Promise::new(config.signer_id.clone())
+            .function_call(
+                "sign".to_string(),
+                signing_request_args(&config, &hash),
+                SIGN_DEPOSIT,
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(SIGN_CALLBACK_GAS)
+                    .on_owner_sign_complete(tx),
+            )
+    }
+
+    pub(crate) fn apply_owner_evm_token_withdraw(
+        &mut self,
+        token: String,
+        recipient: String,
+        amount: U128,
+        nonce: U64,
+    ) -> Promise {
+        let config = self.require_evm_config();
+        let token = parse_address(&token);
+        let to = parse_address(&recipient);
+        self.advance_nonce_past(config.chain_id, nonce.0);
+
+        let tx = config.build_token_tx(nonce.0, token, &to, amount.0);
+        let hash = evm::signing_hash(&tx);
+
+        Promise::new(config.signer_id.clone())
+            .function_call(
+                "sign".to_string(),
+                signing_request_args(&config, &hash),
+                SIGN_DEPOSIT,
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(SIGN_CALLBACK_GAS)
+                    .on_owner_sign_complete(tx),
+            )
+    }
+
     fn require_evm_config(&self) -> EvmConfig {
         self.evm_config
             .clone()
@@ -651,7 +734,7 @@ impl Minder {
     }
 }
 
-fn parse_address(text: &str) -> [u8; 20] {
+pub(crate) fn parse_address(text: &str) -> [u8; 20] {
     evm::parse_address(text)
         .unwrap_or_else(|| env::panic_str("Invalid EVM address: expected 0x and 40 hex digits"))
 }

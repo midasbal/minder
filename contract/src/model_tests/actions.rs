@@ -221,6 +221,18 @@ pub enum Action {
     Freeze,
     Unfreeze,
     Advance(Tick),
+    /// Propose a policy change through the timelock. Accepted only for a
+    /// change that loosens, while the timelock is on.
+    ProposePolicy {
+        asset: Asset,
+        variant: PolicyVariant,
+    },
+    /// Propose lifting a freeze through the timelock.
+    ProposeUnfreeze,
+    /// Execute the oldest or newest pending change, if it is due.
+    ExecutePending(Pick),
+    /// Cancel the oldest or newest pending change.
+    CancelPending(Pick),
 }
 
 pub const fn request(asset: Asset, amount: Amount) -> Action {
@@ -273,6 +285,22 @@ pub fn full_alphabet() -> Vec<Action> {
     }
     for asset in ASSETS {
         actions.push(Action::StaleKeyRequest(asset));
+    }
+    for asset in ASSETS {
+        for variant in [
+            PolicyVariant::Tight,
+            PolicyVariant::Default,
+            PolicyVariant::Loose,
+            PolicyVariant::Budget70,
+            PolicyVariant::Budget150,
+        ] {
+            actions.push(Action::ProposePolicy { asset, variant });
+        }
+    }
+    actions.push(Action::ProposeUnfreeze);
+    for pick in [Pick::Oldest, Pick::Newest] {
+        actions.push(Action::ExecutePending(pick));
+        actions.push(Action::CancelPending(pick));
     }
     for scope in SCOPES {
         for grant in [Grant::Short, Grant::Long] {

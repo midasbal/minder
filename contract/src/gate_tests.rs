@@ -986,7 +986,7 @@ fn only_the_owner_can_withdraw_cross_chain() {
 #[test]
 fn it_needs_the_evm_configuration() {
     testing_env!(context("owner.near").build());
-    let mut minder = Minder::init(account("owner.near"), U64(400), 4);
+    let mut minder = Minder::init(account("owner.near"), U64(400), 4, None, None, None);
     let result = catch_unwind(AssertUnwindSafe(|| {
         let _ = minder.owner_evm_withdraw(RECIPIENT.to_string(), U128(1), U64(0));
     }));
@@ -2012,7 +2012,7 @@ fn only_the_owner_can_recover_tokens() {
 #[test]
 fn it_needs_the_evm_configuration_and_valid_addresses_and_a_usable_nonce() {
     testing_env!(context("owner.near").build());
-    let mut unconfigured = Minder::init(account("owner.near"), U64(400), 4);
+    let mut unconfigured = Minder::init(account("owner.near"), U64(400), 4, None, None, None);
     let result = catch_unwind(AssertUnwindSafe(|| {
         let _ = unconfigured.owner_evm_token_withdraw(
             TOKEN.to_string(),

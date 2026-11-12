@@ -28,14 +28,14 @@ use crate::test_support::{
     Signer,
 };
 use crate::types::{Decision, Status};
-use crate::{AssetId, MandateScope, Minder};
+use crate::{AssetId, MandateScope, Minder, OwnerChange};
 
 use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, Scope, ASSETS, ASSET_COUNT};
-use super::model::{Model, Pending};
+use super::model::{Held, Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
-    MAX_PRIORITY_FEE, NEAR_ALLOWED, NEAR_DISALLOWED, NUM_BUCKETS, T0, TOKEN_ADDRESS, TOKEN_GAS,
-    TOKEN_GAS_LIMIT, WINDOW_LEN,
+    MAX_PRIORITY_FEE, NEAR_ALLOWED, NEAR_DISALLOWED, NUM_BUCKETS, T0, TIMELOCK_DELAY,
+    TOKEN_ADDRESS, TOKEN_GAS, TOKEN_GAS_LIMIT, WINDOW_LEN,
 };
 
 const OWNER: &str = "owner.near";
@@ -93,10 +93,29 @@ pub struct World {
 }
 
 impl World {
-    /// Initialized, armed for both assets, with a long mandate.
+    /// Initialized, armed for every asset, with a long mandate, and with the
+    /// timelock off: every owner change is instant.
     pub fn boot() -> World {
+        Self::boot_with_delay(0)
+    }
+
+    /// As `boot`, with the timelock switched on after the contract is armed
+    /// (arming adds assets and recipients, which a timelock would hold back;
+    /// raising the delay is itself instant).
+    pub fn boot_timelocked() -> World {
+        Self::boot_with_delay(TIMELOCK_DELAY)
+    }
+
+    fn boot_with_delay(delay: u64) -> World {
         set_env(context(OWNER, T0, None), Vec::new(), HashMap::new());
-        let mut minder = Minder::init(account(OWNER), U64(WINDOW_LEN), NUM_BUCKETS);
+        let mut minder = Minder::init(
+            account(OWNER),
+            U64(WINDOW_LEN),
+            NUM_BUCKETS,
+            None,
+            None,
+            None,
+        );
         for asset in ASSETS {
             let policy = super::model::Policy::of(super::actions::PolicyVariant::Default);
             minder.set_asset_policy(
@@ -119,9 +138,14 @@ impl World {
             Some(TOKEN_GAS_LIMIT),
         );
         minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None);
+        let mut model = Model::new(T0, T0 + LONG_MANDATE);
+        if delay > 0 {
+            minder.set_timelock_delay(U64(delay));
+            model.delay = delay;
+        }
         World {
             storage: persist(minder),
-            model: Model::new(T0, T0 + LONG_MANDATE),
+            model,
         }
     }
 
@@ -216,13 +240,21 @@ impl World {
                 Some((index, outcome)) => deliver(&mut minder, &mut model, index, outcome)?,
                 None => Observed::Other,
             },
+            // A policy change takes effect at once if it only tightens (or is
+            // equal), and is refused if it loosens while the timelock is on. The
+            // model decides which, from the rule alone.
             Action::SetPolicy { asset, variant } => {
                 let (cap, limit) = variant.limits();
                 let budget = variant.budget().map(U128);
-                owner_call(|| {
+                let attempt = guarded(|| {
                     minder.set_asset_policy(asset_id(asset), U128(cap), U128(limit), budget)
-                })?;
-                model.set_policy(asset, variant);
+                });
+                if model.policy_timelocked(asset, variant) {
+                    expect_timelocked(attempt, "set_asset_policy")?;
+                } else {
+                    expect_applied(attempt, "set_asset_policy")?;
+                    model.set_policy(asset, variant);
+                }
                 Observed::Other
             }
             Action::GrantMandate(grant, scope) => {
@@ -230,8 +262,75 @@ impl World {
                 // Every grant switches to the other key, as the contract requires
                 // a new key while a mandate is live.
                 let key = agent_key(model.stale_key());
-                owner_call(|| minder.grant_mandate(key, U64(expiry), grant_scope(scope)))?;
-                model.grant(expiry, scope);
+                let attempt =
+                    guarded(|| minder.grant_mandate(key, U64(expiry), grant_scope(scope)));
+                if model.grant_timelocked(expiry) {
+                    expect_timelocked(attempt, "grant_mandate")?;
+                } else {
+                    expect_applied(attempt, "grant_mandate")?;
+                    model.grant(expiry, scope);
+                }
+                Observed::Other
+            }
+            Action::ProposePolicy { asset, variant } => {
+                let (cap, limit) = variant.limits();
+                let change = OwnerChange::SetAssetPolicy {
+                    asset: asset_id(asset),
+                    per_tx_cap: U128(cap),
+                    window_limit: U128(limit),
+                    epoch_budget: variant.budget().map(U128),
+                };
+                let attempt = guarded(|| minder.propose_change(change));
+                if model.policy_timelocked(asset, variant) {
+                    propose_accepted(attempt, &mut model, Held::Policy(asset, variant))?;
+                } else {
+                    expect_not_timelocked(attempt, "a policy proposal")?;
+                }
+                Observed::Other
+            }
+            Action::ProposeUnfreeze => {
+                let attempt = guarded(|| minder.propose_change(OwnerChange::Unfreeze));
+                if model.unfreeze_timelocked() {
+                    propose_accepted(attempt, &mut model, Held::Unfreeze)?;
+                } else {
+                    expect_not_timelocked(attempt, "an unfreeze proposal")?;
+                }
+                Observed::Other
+            }
+            Action::ExecutePending(pick) => {
+                if let Some(index) = model.pending_index(pick) {
+                    let entry = model.pending[index];
+                    let attempt = guarded(|| {
+                        let _ = minder.execute_change(U64(entry.id));
+                    });
+                    if model.now >= entry.ready_at {
+                        // Due: it takes effect now, and not before.
+                        expect_applied(attempt, "execute_change")?;
+                        model.pending.remove(index);
+                        match entry.change {
+                            Held::Policy(asset, variant) => model.set_policy(asset, variant),
+                            Held::Unfreeze => model.set_frozen(false),
+                        }
+                    } else {
+                        let message = attempt.err().ok_or_else(|| {
+                            Violation(
+                                "a change was executed before its delay had passed".to_string(),
+                            )
+                        })?;
+                        ensure!(
+                            message.contains("Not ready"),
+                            "an early execution was refused for another reason: {message}"
+                        );
+                    }
+                }
+                Observed::Other
+            }
+            Action::CancelPending(pick) => {
+                if let Some(index) = model.pending_index(pick) {
+                    let id = model.pending[index].id;
+                    expect_applied(guarded(|| minder.cancel_change(U64(id))), "cancel_change")?;
+                    model.pending.remove(index);
+                }
                 Observed::Other
             }
             Action::RevokeMandate => {
@@ -245,8 +344,13 @@ impl World {
                 Observed::Other
             }
             Action::Unfreeze => {
-                owner_call(|| minder.unfreeze())?;
-                model.set_frozen(false);
+                let attempt = guarded(|| minder.unfreeze());
+                if model.unfreeze_timelocked() {
+                    expect_timelocked(attempt, "unfreeze")?;
+                } else {
+                    expect_applied(attempt, "unfreeze")?;
+                    model.set_frozen(false);
+                }
                 Observed::Other
             }
             Action::Advance(_) => Observed::Other,
@@ -266,6 +370,59 @@ impl World {
 }
 
 // ---- Steps ----
+
+/// The owner's call was accepted and applied.
+fn expect_applied(result: Result<(), String>, what: &str) -> Result<(), Violation> {
+    result.map_err(|message| Violation(format!("{what} was refused: {message}")))
+}
+
+/// The call loosened authority while the timelock was on, so it had to be
+/// refused as timelocked, and, being refused, changed nothing.
+fn expect_timelocked(result: Result<(), String>, what: &str) -> Result<(), Violation> {
+    match result {
+        Ok(()) => Err(Violation(format!(
+            "{what}: a loosening change took effect instantly"
+        ))),
+        Err(message) if message.contains("Timelocked") => Ok(()),
+        Err(message) => Err(Violation(format!(
+            "{what}: refused, but not as timelocked: {message}"
+        ))),
+    }
+}
+
+/// A proposal for something that does not loosen (or with no timelock) is
+/// refused: it is called directly instead.
+fn expect_not_timelocked(
+    result: Result<near_sdk::json_types::U64, String>,
+    what: &str,
+) -> Result<(), Violation> {
+    match result {
+        Ok(_) => Err(Violation(format!(
+            "{what} was accepted for a change that is not timelocked"
+        ))),
+        Err(message) if message.contains("Not timelocked") => Ok(()),
+        Err(message) => Err(Violation(format!(
+            "{what} was refused for another reason: {message}"
+        ))),
+    }
+}
+
+/// A proposal the model says is timelocked must be accepted, with the next id.
+fn propose_accepted(
+    result: Result<near_sdk::json_types::U64, String>,
+    model: &mut Model,
+    change: Held,
+) -> Result<(), Violation> {
+    let id = result.map_err(|message| Violation(format!("a proposal was refused: {message}")))?;
+    ensure!(
+        id.0 == model.next_change_id,
+        "the proposal got id {}, the model expects {}",
+        id.0,
+        model.next_change_id
+    );
+    model.propose(change);
+    Ok(())
+}
 
 /// An owner call that is valid by construction must not panic.
 fn owner_call(call: impl FnOnce()) -> Result<(), Violation> {
@@ -785,6 +942,55 @@ fn check_invariants(
         (minder.get_status() == Status::Frozen) == model.frozen,
         "frozen state differs from the model"
     );
+    // Every asset's policy is exactly what the model says. A loosening that took
+    // effect early, or a tightening that did not, shows here at once.
+    for asset in ASSETS {
+        let stored = minder
+            .get_asset_policy(asset_id(asset))
+            .expect("boot sets a policy for every asset");
+        let policy = model.policy[asset.index()];
+        ensure!(
+            (
+                stored.per_tx_cap.0,
+                stored.window_limit.0,
+                stored.epoch_budget.map(|b| b.0)
+            ) == (policy.cap, policy.limit, policy.budget),
+            "{asset:?}: the stored policy {stored:?} differs from the model's {policy:?}"
+        );
+    }
+    // The timelock: the pending changes, their ids and their ready-at times,
+    // are exactly the model's, and the delay is what was set.
+    ensure!(
+        minder.get_config().timelock_delay.0 == model.delay,
+        "the timelock delay differs from the model"
+    );
+    let pending = minder.get_pending_changes(None, None);
+    ensure!(
+        pending.len() == model.pending.len(),
+        "{} pending changes, the model has {}",
+        pending.len(),
+        model.pending.len()
+    );
+    for (stored, held) in pending.iter().zip(&model.pending) {
+        let expected = match held.change {
+            Held::Policy(asset, variant) => {
+                let (cap, limit) = variant.limits();
+                OwnerChange::SetAssetPolicy {
+                    asset: asset_id(asset),
+                    per_tx_cap: U128(cap),
+                    window_limit: U128(limit),
+                    epoch_budget: variant.budget().map(U128),
+                }
+            }
+            Held::Unfreeze => OwnerChange::Unfreeze,
+        };
+        ensure!(
+            stored.id.0 == held.id
+                && stored.ready_at.0 == held.ready_at
+                && stored.change == expected,
+            "pending change {stored:?} differs from the model's {held:?}"
+        );
+    }
     let mandate = minder.get_mandate().expect("boot grants a mandate");
     ensure!(
         mandate.epoch == model.mandate.epoch

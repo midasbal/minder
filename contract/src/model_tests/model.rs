@@ -53,6 +53,20 @@ pub struct ModelMandate {
     pub scope: Scope,
 }
 
+/// A change held by the timelock, as the model records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    Policy(Asset, PolicyVariant),
+    Unfreeze,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingEntry {
+    pub id: u64,
+    pub ready_at: u64,
+    pub change: Held,
+}
+
 /// A dispatched request whose callback has not been delivered.
 #[derive(Clone, Debug)]
 pub struct Pending {
@@ -87,6 +101,11 @@ pub struct Model {
     /// Committed spend per asset as `(booked at, amount)`.
     pub committed: [Vec<(u64, u128)>; ASSET_COUNT],
     pub reserved: [u128; ASSET_COUNT],
+    /// The timelock delay; zero is off, and every change is then instant.
+    pub delay: u64,
+    /// Loosening changes waiting out the delay, by id.
+    pub pending: Vec<PendingEntry>,
+    pub next_change_id: u64,
     /// The owner lowered this asset's limit below what was already counted;
     /// until it decays, `effective > limit` is expected for that asset.
     pub lowered: [bool; ASSET_COUNT],
@@ -124,6 +143,9 @@ impl Model {
             policy: [Policy::of(PolicyVariant::Default); ASSET_COUNT],
             committed: [Vec::new(), Vec::new(), Vec::new()],
             reserved: [0; ASSET_COUNT],
+            delay: 0,
+            pending: Vec::new(),
+            next_change_id: 1,
             lowered: [false; ASSET_COUNT],
             budget_lowered: [false; ASSET_COUNT],
             epoch_committed: [0; ASSET_COUNT],
@@ -304,6 +326,57 @@ impl Model {
         self.ghost_lapsed_epoch = Some(self.mandate.epoch);
     }
 
+    /// Whether replacing the asset's policy with the variant loosens anything,
+    /// restated from the rule: a higher cap or window, or a budget that is
+    /// dropped or raised. A budget where there was none, or a lower one,
+    /// tightens; one loosening field makes the whole change loosening.
+    pub fn policy_loosens(&self, asset: Asset, variant: PolicyVariant) -> bool {
+        let old = self.policy[asset.index()];
+        let new = Policy::of(variant);
+        let budget_loosens = match (old.budget, new.budget) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(old), Some(new)) => new > old,
+        };
+        new.cap > old.cap || new.limit > old.limit || budget_loosens
+    }
+
+    /// Whether a change must go through the delay: only a loosening one, and
+    /// only while the timelock is on.
+    pub fn policy_timelocked(&self, asset: Asset, variant: PolicyVariant) -> bool {
+        self.delay > 0 && self.policy_loosens(asset, variant)
+    }
+
+    pub fn unfreeze_timelocked(&self) -> bool {
+        self.delay > 0 && self.frozen
+    }
+
+    /// A grant loosens only by extending a mandate that is live.
+    pub fn grant_timelocked(&self, expiry: u64) -> bool {
+        self.delay > 0
+            && !self.mandate.revoked
+            && self.now < self.mandate.expiry
+            && expiry > self.mandate.expiry
+    }
+
+    pub fn propose(&mut self, change: Held) {
+        let entry = PendingEntry {
+            id: self.next_change_id,
+            ready_at: self.now + self.delay,
+            change,
+        };
+        self.next_change_id += 1;
+        self.pending.push(entry);
+    }
+
+    /// The index of the oldest or newest pending change.
+    pub fn pending_index(&self, pick: super::actions::Pick) -> Option<usize> {
+        match pick {
+            super::actions::Pick::Oldest => (!self.pending.is_empty()).then_some(0),
+            super::actions::Pick::Newest => self.pending.len().checked_sub(1),
+        }
+    }
+
     pub fn set_policy(&mut self, asset: Asset, variant: PolicyVariant) {
         let policy = Policy::of(variant);
         self.policy[asset.index()] = policy;
@@ -360,6 +433,7 @@ impl Model {
                 self.policy[asset.index()] == Policy::of(variant)
             }
             Action::RevokeMandate => self.mandate.revoked,
+            Action::ExecutePending(_) | Action::CancelPending(_) => self.pending.is_empty(),
             _ => false,
         }
     }
@@ -378,9 +452,9 @@ impl Model {
                 self.reserved,
                 (self.lowered, self.budget_lowered, self.epoch_committed),
                 self.next_nonce,
+                (self.delay, &self.pending, self.next_change_id),
                 &self.queue,
-                self.ghost_frozen,
-                self.ghost_lapsed_epoch,
+                (self.ghost_frozen, self.ghost_lapsed_epoch),
             )
         )
     }

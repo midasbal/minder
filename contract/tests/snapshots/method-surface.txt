@@ -5,11 +5,13 @@
 # Generated; do not edit by hand. After reviewing a change to the surface,
 # regenerate it deliberately:
 #   MINDER_UPDATE_SURFACE_SNAPSHOT=1 cargo test --test method_surface
+call cancel_change
 view contract_source_metadata
 call deposit [payable]
 view dry_run
 view dry_run_evm
 view dry_run_evm_token
+call execute_change
 call freeze
 view ft_on_transfer
 view get_asset_policies
@@ -20,6 +22,8 @@ view get_evm_nonce
 view get_evm_recipients
 view get_live_spend
 view get_mandate
+view get_pending_change
+view get_pending_changes
 view get_recipients
 view get_reserved
 view get_status
@@ -33,6 +37,7 @@ call on_transfer_complete [private]
 call owner_evm_token_withdraw
 call owner_evm_withdraw
 call owner_withdraw
+call propose_change
 call raise_evm_nonce
 call remove_asset_policy
 call request_evm_payment
@@ -43,4 +48,6 @@ call set_asset_policy
 call set_evm_config
 call set_evm_recipient
 call set_recipient
+call set_timelock_delay
+call set_treasury
 call unfreeze
