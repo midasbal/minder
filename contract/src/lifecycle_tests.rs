@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use near_sdk::json_types::U128;
 use near_sdk::mock::MockAction;
-use near_sdk::serde_json::json;
+use near_sdk::serde_json::{self, json};
 use near_sdk::test_utils::get_created_receipts;
 use near_sdk::{testing_env, Gas, NearToken, PromiseResult, RuntimeFeesConfig};
 
@@ -232,4 +232,106 @@ fn panic_message(result: std::thread::Result<()>) -> String {
         .cloned()
         .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
         .unwrap_or_default()
+}
+
+// ---- Decision log ----
+
+use near_sdk::test_utils::get_logs;
+
+fn denial_text(minder: &mut Minder, asset: AssetId, amount: u128, to: &str) -> String {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.request_local_transfer(asset, U128(amount), account(to));
+    }));
+    let payload = result.expect_err("expected a denial");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_allowed_local_request_logs_an_allow_with_its_inputs() {
+    let mut minder = armed_as_agent();
+    request(&mut minder, AssetId::Near, 40);
+    let events = decision_events(&get_logs());
+    assert_eq!(events.len(), 1, "exactly one decision event");
+    let event = &events[0];
+    assert_eq!(event["method"], "request_local_transfer");
+    assert_eq!(
+        event["agent_key"],
+        serde_json::to_value(agent_key()).unwrap()
+    );
+    assert_eq!(event["asset"], json!("Near"));
+    assert_eq!(event["recipient"], "bob.near");
+    assert_eq!(event["amount"], "40");
+    assert_eq!(event["decision"], "allow");
+    assert_eq!(event["reason"], serde_json::Value::Null);
+    assert_eq!(
+        event["legs"],
+        json!([{ "leg": "transfer", "asset": "Near", "amount": "40", "decision": "allow", "reason": null }])
+    );
+}
+
+#[test]
+fn a_denied_local_request_logs_the_deny_before_it_reverts() {
+    let mut minder = armed_as_agent();
+    let text = denial_text(&mut minder, AssetId::Near, PER_TX_CAP + 1, "bob.near");
+    assert!(
+        text.contains("Denied: PerTxCapExceeded"),
+        "the revert is unchanged: {text}"
+    );
+    let events = decision_events(&get_logs());
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["decision"], "deny");
+    assert_eq!(events[0]["reason"], "PerTxCapExceeded");
+    assert_eq!(events[0]["leg"], "transfer");
+    assert_eq!(events[0]["amount"], (PER_TX_CAP + 1).to_string());
+    assert_eq!(reserved(&minder, AssetId::Near), 0, "nothing changed");
+}
+
+#[test]
+fn every_deny_reason_of_the_local_path_is_logged_as_the_reason_it_reverts_with() {
+    let mut minder = armed_as_agent();
+    let mut seen = Vec::new();
+    // Over the cap, off the allowlist, and an asset with no policy.
+    for (asset, amount, to) in [
+        (AssetId::Near, PER_TX_CAP + 1, "bob.near"),
+        (AssetId::Near, 1, "mallory.near"),
+        (AssetId::Nep141(account("dai.near")), 1, "bob.near"),
+    ] {
+        let text = denial_text(&mut minder, asset, amount, to);
+        let events = decision_events(&get_logs());
+        let reason = events.last().unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains(&format!("Denied: {reason}")),
+            "{text} vs {reason}"
+        );
+        seen.push(reason);
+    }
+    assert_eq!(
+        seen,
+        ["PerTxCapExceeded", "RecipientNotAllowed", "AssetNotAllowed"]
+    );
+}
+
+#[test]
+fn a_call_from_another_account_is_logged_with_no_agent_key() {
+    let mut minder = armed_as_agent();
+    testing_env!(context("mallory.near").build());
+    let text = denial_text(&mut minder, AssetId::Near, 1, "bob.near");
+    assert!(text.contains("Denied: NotAuthorized"));
+    let events = decision_events(&get_logs());
+    assert_eq!(events[0]["agent_key"], serde_json::Value::Null);
+    assert_eq!(events[0]["reason"], "NotAuthorized");
+}
+
+#[test]
+fn a_request_rejected_before_policy_logs_no_decision() {
+    let mut minder = armed_as_agent();
+    let text = denial_text(&mut minder, AssetId::Evm(5), 1, "bob.near");
+    assert!(text.contains("request_evm_payment"));
+    assert!(decision_events(&get_logs()).is_empty());
 }

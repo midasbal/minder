@@ -24,7 +24,8 @@ use near_sdk::{
 
 use crate::evm::{self, Eip1559Tx};
 use crate::test_support::{
-    account, fixture_signature, function_call, signer_response, test_sender_hex, Signer,
+    account, decision_events, fixture_signature, function_call, signer_response, test_sender_hex,
+    Signer,
 };
 use crate::types::{Decision, Status};
 use crate::{AssetId, MandateScope, Minder};
@@ -310,6 +311,7 @@ fn request(
     } else {
         model.mandate.key
     });
+    let agent_json = near_sdk::serde_json::to_value(&agent).expect("a key is JSON");
     match asset {
         Asset::Near | Asset::Evm => {
             let viewed = if asset == Asset::Near {
@@ -366,6 +368,23 @@ fn request(
         }
     });
 
+    // The decision log: one event per request, allowed or denied, and a denied
+    // request panicked, yet its event is in the logs. It must carry the inputs
+    // and exactly the decision the model expects, leg by leg.
+    let expected_event =
+        expected_decision_event(asset, outlay, evm_value, to, &agent_json, transfer, gas);
+    let logged = decision_events(&get_logs());
+    ensure!(
+        logged.len() == 1,
+        "{} decision events for one request: {logged:?}",
+        logged.len()
+    );
+    ensure!(
+        logged[0] == expected_event,
+        "the decision event is {}, the model expects {expected_event}",
+        logged[0]
+    );
+
     match (predicted, called) {
         (Ok(()), Ok(())) => {
             dispatched(model, asset, outlay, evm_value, to)?;
@@ -405,6 +424,73 @@ fn request(
             }
         ))),
     }
+}
+
+/// The decision event a request must have logged, restated from the model's
+/// decisions and the request's inputs alone.
+fn expected_decision_event(
+    asset: Asset,
+    outlay: u128,
+    evm_value: u128,
+    to: Recipient,
+    agent: &Value,
+    transfer: Result<(), crate::DenyReason>,
+    gas: Option<Result<(), crate::DenyReason>>,
+) -> Value {
+    let verdict = |result: &Result<(), crate::DenyReason>| match result {
+        Ok(()) => ("allow", Value::Null),
+        Err(reason) => ("deny", json!(format!("{reason:?}"))),
+    };
+    let leg = |name: &str, asset: Asset, amount: u128, result: &Result<(), crate::DenyReason>| {
+        let (decision, reason) = verdict(result);
+        json!({
+            "leg": name, "asset": asset_id(asset), "amount": amount.to_string(),
+            "decision": decision, "reason": reason,
+        })
+    };
+    let (method, recipient, amount) = match asset {
+        Asset::Near => (
+            "request_local_transfer",
+            near_recipient(to).to_string(),
+            outlay,
+        ),
+        Asset::Evm => (
+            "request_evm_payment",
+            evm_recipient(to).to_string(),
+            evm_value,
+        ),
+        Asset::Token => (
+            "request_evm_token_payment",
+            evm_recipient(to).to_string(),
+            outlay,
+        ),
+    };
+    // The legs evaluated: the transfer, and for a token payment the gas too
+    // unless the transfer already denied.
+    let mut legs = vec![leg("transfer", asset, outlay, &transfer)];
+    if let Some(gas) = &gas {
+        if transfer.is_ok() {
+            legs.push(leg("gas", Asset::Evm, TOKEN_GAS, gas));
+        }
+    }
+    let denial = if let Err(reason) = transfer {
+        Some((reason, "transfer"))
+    } else if let Some(Err(reason)) = gas {
+        Some((reason, "gas"))
+    } else {
+        None
+    };
+    json!({
+        "method": method,
+        "agent_key": agent,
+        "asset": asset_id(asset),
+        "recipient": recipient,
+        "amount": amount.to_string(),
+        "decision": if denial.is_some() { "deny" } else { "allow" },
+        "reason": denial.map(|(reason, _)| format!("{reason:?}")),
+        "leg": denial.map(|(_, leg)| leg),
+        "legs": legs,
+    })
 }
 
 /// An allowed request must have reserved, built the right transaction, and

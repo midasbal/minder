@@ -192,3 +192,17 @@ pub fn signer_response(signature: &FixtureSignature) -> Vec<u8> {
     .to_string()
     .into_bytes()
 }
+
+/// The `data` of every `decision` event in `logs`, in order.
+pub fn decision_events(logs: &[String]) -> Vec<Value> {
+    logs.iter()
+        .filter_map(|line| line.strip_prefix("EVENT_JSON:"))
+        .map(|json| near_sdk::serde_json::from_str::<Value>(json).expect("an event is JSON"))
+        .filter(|event| event["event"] == "decision")
+        .map(|event| {
+            assert_eq!(event["standard"], "minder");
+            assert_eq!(event["version"], "1.0.0");
+            event["data"][0].clone()
+        })
+        .collect()
+}

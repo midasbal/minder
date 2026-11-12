@@ -13,10 +13,12 @@ use near_sdk::serde::Deserialize;
 use near_sdk::serde_json::{self, json};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError, PublicKey};
 
+use crate::decision;
 use crate::evm::{self, Eip1559Tx, EvmError, Signature};
 use crate::policy::RecipientRef;
 use crate::types::{
-    AssetId, Decision, EvmConfig, EvmConfigView, TokenPaymentDecision, DEFAULT_TOKEN_GAS_LIMIT,
+    AssetId, Decision, DenyReason, EvmConfig, EvmConfigView, TokenPaymentDecision,
+    DEFAULT_TOKEN_GAS_LIMIT,
 };
 use crate::{page, Minder, MinderExt};
 
@@ -285,13 +287,31 @@ impl Minder {
         let outlay = config.outlay(amount.0);
 
         let recipient_allowed = self.evm_recipients.contains(&to);
-        if let Decision::Deny(reason) = self.evaluate_with(
+        let decision = self.evaluate_with(
             caller_key.as_ref(),
             &asset,
             outlay,
             RecipientRef::Evm(&to),
             recipient_allowed,
-        ) {
+        );
+        // The decision event comes first, so a deny leaves it in the failed
+        // receipt's logs before the revert.
+        decision::log(
+            &decision::Request {
+                method: "request_evm_payment",
+                agent_key: caller_key.as_ref(),
+                asset: &asset,
+                recipient: evm::format_address(&to),
+                amount: amount.0,
+            },
+            &[decision::Leg {
+                leg: "transfer",
+                asset: &asset,
+                amount: outlay,
+                decision,
+            }],
+        );
+        if let Decision::Deny(reason) = decision {
             env::panic_str(&format!("Denied: {reason:?}"));
         }
 
@@ -351,22 +371,60 @@ impl Minder {
         };
         let gas_asset = AssetId::Evm(config.chain_id);
         let gas = config.token_fee_cost();
-        require!(
-            self.policies.contains_key(&gas_asset),
-            "A token transfer needs a native ETH policy for its gas: none is set"
-        );
+        let request = decision::Request {
+            method: "request_evm_token_payment",
+            agent_key: caller_key.as_ref(),
+            asset: &token_asset,
+            recipient: evm::format_address(&to),
+            amount: amount.0,
+        };
+        // Every exit below logs its decision first: an allow before anything is
+        // reserved, a deny before the revert.
+        if !self.policies.contains_key(&gas_asset) {
+            decision::log(
+                &request,
+                &[decision::Leg {
+                    leg: "gas",
+                    asset: &gas_asset,
+                    amount: gas,
+                    decision: Decision::Deny(DenyReason::AssetNotAllowed),
+                }],
+            );
+            env::panic_str("A token transfer needs a native ETH policy for its gas: none is set");
+        }
 
         let recipient_allowed = self.evm_recipients.contains(&to);
-        if let Decision::Deny(reason) = self.evaluate_with(
+        let transfer = self.evaluate_with(
             caller_key.as_ref(),
             &token_asset,
             amount.0,
             RecipientRef::Evm(&to),
             recipient_allowed,
-        ) {
+        );
+        let transfer_leg = decision::Leg {
+            leg: "transfer",
+            asset: &token_asset,
+            amount: amount.0,
+            decision: transfer,
+        };
+        if let Decision::Deny(reason) = transfer {
+            decision::log(&request, &[transfer_leg]);
             env::panic_str(&format!("Denied: {reason:?} (token transfer)"));
         }
-        if let Decision::Deny(reason) = self.evaluate_gas(caller_key.as_ref(), &gas_asset, gas) {
+        let gas_decision = self.evaluate_gas(caller_key.as_ref(), &gas_asset, gas);
+        decision::log(
+            &request,
+            &[
+                transfer_leg,
+                decision::Leg {
+                    leg: "gas",
+                    asset: &gas_asset,
+                    amount: gas,
+                    decision: gas_decision,
+                },
+            ],
+        );
+        if let Decision::Deny(reason) = gas_decision {
             env::panic_str(&format!("Denied: {reason:?} (gas, native ETH)"));
         }
 

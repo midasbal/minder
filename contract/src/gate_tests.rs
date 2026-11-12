@@ -2297,3 +2297,155 @@ fn a_native_recovery_and_a_token_recovery_are_distinct_transactions() {
     );
     assert_ne!(native.raw_args, token.raw_args);
 }
+
+// ---- Decision log on the EVM surfaces ----
+
+fn logged_decision() -> Value {
+    let events = decision_events(&get_logs());
+    assert_eq!(events.len(), 1, "exactly one decision event: {events:?}");
+    events[0].clone()
+}
+
+#[test]
+fn an_allowed_native_payment_logs_an_allow_with_the_value_and_the_outlay() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let event = logged_decision();
+    assert_eq!(event["method"], "request_evm_payment");
+    assert_eq!(
+        event["agent_key"],
+        near_sdk::serde_json::to_value(agent_key()).unwrap()
+    );
+    assert_eq!(event["asset"], json!({ "Evm": CHAIN_ID }));
+    assert_eq!(event["recipient"], RECIPIENT);
+    assert_eq!(event["amount"], "1000", "what the agent asked to send");
+    assert_eq!(event["decision"], "allow");
+    assert_eq!(
+        event["legs"],
+        json!([{
+            "leg": "transfer", "asset": { "Evm": CHAIN_ID },
+            "amount": (1000 + FEE_COST).to_string(), "decision": "allow", "reason": null,
+        }]),
+        "the leg is what policy counted: the value plus the worst-case fee"
+    );
+}
+
+#[test]
+fn a_denied_native_payment_logs_the_deny_before_it_reverts() {
+    let mut minder = armed_evm();
+    let denial = evm_request_denial(&mut minder, NOT_ALLOWLISTED, 1000).expect("denied");
+    assert!(denial.contains("Denied: RecipientNotAllowed"), "{denial}");
+    let event = logged_decision();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["reason"], "RecipientNotAllowed");
+    assert_eq!(event["recipient"], NOT_ALLOWLISTED);
+    assert_eq!(event["leg"], "transfer");
+    assert_eq!(
+        reserved(&minder, evm_asset()),
+        0,
+        "the denial changed nothing"
+    );
+}
+
+#[test]
+fn an_allowed_token_payment_logs_both_legs() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 1000);
+    let event = logged_decision();
+    assert_eq!(event["method"], "request_evm_token_payment");
+    let token = near_sdk::serde_json::to_value(token_asset()).unwrap();
+    assert_eq!(event["asset"], token);
+    assert_eq!(event["recipient"], RECIPIENT);
+    assert_eq!(event["amount"], "1000");
+    assert_eq!(event["decision"], "allow");
+    assert_eq!(
+        event["legs"],
+        json!([
+            { "leg": "transfer", "asset": token, "amount": "1000", "decision": "allow", "reason": null },
+            { "leg": "gas", "asset": { "Evm": CHAIN_ID }, "amount": TOKEN_GAS.to_string(),
+              "decision": "allow", "reason": null },
+        ])
+    );
+}
+
+#[test]
+fn a_token_payment_denied_on_the_transfer_leg_logs_only_that_leg() {
+    let mut minder = armed_token();
+    let denial = token_denial(&mut minder, RECIPIENT, TOKEN_CAP + 1).expect("denied");
+    assert!(
+        denial.contains("Denied: PerTxCapExceeded (token transfer)"),
+        "{denial}"
+    );
+    let event = logged_decision();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["reason"], "PerTxCapExceeded");
+    assert_eq!(event["leg"], "transfer");
+    assert_eq!(
+        event["legs"].as_array().unwrap().len(),
+        1,
+        "the request stopped at the first denial"
+    );
+}
+
+#[test]
+fn a_token_payment_denied_on_the_gas_leg_logs_both_legs() {
+    let mut minder = armed_token();
+    as_owner();
+    minder.set_asset_policy(evm_asset(), U128(TOKEN_GAS - 1), U128(10 * TOKEN_GAS), None);
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(
+        denial.contains("Denied: PerTxCapExceeded (gas, native ETH)"),
+        "{denial}"
+    );
+    let event = logged_decision();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["reason"], "PerTxCapExceeded");
+    assert_eq!(event["leg"], "gas");
+    assert_eq!(
+        event["legs"][0]["decision"], "allow",
+        "the token side was fine"
+    );
+    assert_eq!(event["legs"][1]["decision"], "deny");
+    assert_eq!(event["legs"][1]["amount"], TOKEN_GAS.to_string());
+}
+
+#[test]
+fn a_token_payment_with_no_native_policy_logs_the_gas_leg_denial() {
+    let mut minder = armed_token();
+    as_owner();
+    minder.remove_asset_policy(evm_asset());
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(
+        denial.contains("needs a native ETH policy for its gas"),
+        "{denial}"
+    );
+    let event = logged_decision();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["reason"], "AssetNotAllowed");
+    assert_eq!(event["leg"], "gas");
+}
+
+#[test]
+fn the_execution_events_and_the_owner_methods_are_unchanged_by_the_decision_log() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    let logs = settle(
+        &mut minder,
+        1000 + FEE_COST,
+        0,
+        1000,
+        PromiseResult::Successful(valid_signature()),
+    );
+    // The callback still emits exactly the one signed-payment event, and no decision.
+    assert_eq!(event_lines(&logs).len(), 1);
+    assert_eq!(event_lines(&logs)[0]["event"], "evm_payment_signed");
+    assert!(decision_events(&logs).is_empty());
+
+    // The owner's methods are outside policy and log no decision.
+    owner_withdraw(&mut minder, RECIPIENT, 1, 5);
+    assert!(decision_events(&get_logs()).is_empty());
+    owner_token_withdraw(&mut minder, RECIPIENT, 1, 6);
+    assert!(decision_events(&get_logs()).is_empty());
+}

@@ -16,6 +16,7 @@ contract's own account (see Agent authority).
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
+| `src/decision.rs` | The decision log: the `decision` NEP-297 event every agent request emits, allowed or denied |
 | `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `owner_evm_token_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
@@ -702,6 +703,56 @@ Sepolia tx `0x1427c99004f0f8632aedd670f9ad457633841c4a90464c017f4ed051572fda63`,
 status success. Afterwards `reserved` was 0, the committed spend 1.21e14 (value plus the 2.1e13
 worst-case fee), and the next nonce 2.
 
+## Decision log
+
+How a denied request signals its denial: it panics with `Denied: <Reason>` (plus the leg for a token
+payment), which reverts everything. The decision log adds one structured event on every agent request
+that reaches the policy decision, so a read-only control panel can stream every attempted action with
+Minder's verdict and reason, and an auditor can check each decision against the logged inputs.
+
+It is purely additive: it reads and writes no state, changes no decision, accounting, method
+signature or borsh layout, and adds no method. `request_local_transfer`, `request_evm_payment` and
+`request_evm_token_payment` compute their decision exactly as before and then log it (`src/decision.rs`).
+The owner methods are outside policy and log nothing.
+
+**Event** (standard `minder`, version `1.0.0`, event `decision`), one per request:
+
+```json
+{ "method": "request_evm_token_payment",
+  "agent_key": "ed25519:..." | null,
+  "asset": <AssetId>,
+  "recipient": "bob.near" | "0x...",
+  "amount": "1000",
+  "decision": "allow" | "deny",
+  "reason": null | "<DenyReason>",
+  "leg": null | "transfer" | "gas",
+  "legs": [ { "leg": "transfer", "asset": <AssetId>, "amount": "1000",
+              "decision": "allow" | "deny", "reason": null | "<DenyReason>" },
+            { "leg": "gas", "asset": <AssetId>, "amount": "...", "decision": ..., "reason": ... } ] }
+```
+
+- `asset`, `recipient` and `amount` are the request as the agent gave it: for a native EVM payment
+  `amount` is the value in wei, for a token payment the token amount. `agent_key` is the key that
+  signed the call, or null if it did not come from the contract's own account.
+- `legs` are the legs actually evaluated, with the amount policy counted for each: one `transfer` leg
+  for a local or native EVM request (for native EVM the outlay, value plus the worst-case fee), and
+  for a token payment a `transfer` leg (the token amount) and a `gas` leg (the worst-case gas against
+  the native asset). When the transfer leg already denies, the request stops there and the gas leg is
+  absent. A token payment with no native ETH policy logs a single `gas` leg denied `AssetNotAllowed`.
+- `decision`, `reason` and `leg` are the outcome: allow, or the first denying leg and its reason.
+
+**Emission points.** On an allow the event is logged at the decision point, before anything is
+reserved or dispatched, so it sits in the successful receipt. On a deny it is logged **before the
+panic**, and the panic and the revert are exactly as before. A revert discards state changes but not
+logs: the logs of a failed receipt stay in its execution outcome, so the event of a denied request is
+readable there. The sandbox proves this by reading the logs of the failed receipt itself
+(`evm_gate::a_denied_request_persists_its_decision_event_in_the_failed_receipt`).
+
+**Not logged.** A request rejected before any policy is consulted reverts without a decision event:
+a malformed address, an EVM payment with no EVM configuration, an EVM asset passed to the NEAR entry
+point. Those are input errors, not verdicts. Any call to a request method by another account or key
+does reach the decision and is logged (`NotAuthorized`, with `agent_key` null or the other key).
+
 ## Evaluation order
 
 The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevoked`,
@@ -884,6 +935,8 @@ with its real function-call key.
 | Explicit nonce used; counter `max(counter, nonce + 1)`; a replacement leaves it; the agent never takes a used nonce | unit `gate_tests::the_explicit_nonce_is_used_and_the_counter_moves_to_max_of_counter_and_nonce_plus_one_for_tokens`, `it_needs_the_evm_configuration_and_valid_addresses_and_a_usable_nonce`; sandbox `evm_gate::a_token_cancellation_leaves_the_counter_and_a_future_nonce_moves_it_past_itself` |
 | Authenticity: a signature by another key, or a mismatched `sender`, emits nothing | unit `gate_tests::a_signature_by_another_key_is_not_emitted_for_a_token_recovery`, `a_mismatched_sender_configuration_emits_nothing_for_a_token_recovery`; sandbox `evm_gate::a_token_recovery_signed_by_another_key_or_a_mismatched_sender_is_not_emitted` |
 | The token callback has gas to spare | sandbox `evm_gate::the_token_callback_has_gas_to_spare` (about 3.2 of 25 Tgas) |
+| One decision event per agent request, allow and deny, with the inputs and the verdict, on all three methods (a token request's two legs included); a request rejected before policy logs none | unit `decision::tests::an_allow_carries_the_inputs_and_every_leg`, `a_deny_names_the_first_denying_leg_and_its_reason`; `lifecycle_tests::an_allowed_local_request_logs_an_allow_with_its_inputs`, `a_denied_local_request_logs_the_deny_before_it_reverts`, `every_deny_reason_of_the_local_path_is_logged_as_the_reason_it_reverts_with`, `a_call_from_another_account_is_logged_with_no_agent_key`, `a_request_rejected_before_policy_logs_no_decision`; `gate_tests::an_allowed_native_payment_logs_an_allow_with_the_value_and_the_outlay`, `a_denied_native_payment_logs_the_deny_before_it_reverts`, `an_allowed_token_payment_logs_both_legs`, `a_token_payment_denied_on_the_transfer_leg_logs_only_that_leg`, `a_token_payment_denied_on_the_gas_leg_logs_both_legs`, `a_token_payment_with_no_native_policy_logs_the_gas_leg_denial` |
+| A deny's decision event persists in the FAILED receipt's logs; allows are in the successful receipt; execution events and owner methods are unchanged | sandbox `evm_gate::a_denied_request_persists_its_decision_event_in_the_failed_receipt`, `an_allowed_request_logs_an_allow_in_the_successful_receipt`; unit `gate_tests::the_execution_events_and_the_owner_methods_are_unchanged_by_the_decision_log` |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
@@ -980,6 +1033,7 @@ every step. Every step of every harness driver runs every check.
 | Monotonic revocation: once frozen, revoked or expired, nothing is approved until `unfreeze` or a new grant (stated by separate ghost bookkeeping, not by the oracle's `decide`) | | yes | | yes | |
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
+| The decision log: on every request, allowed or panicked, exactly one decision event is emitted and it equals the one restated from the model's decisions and the request's inputs (method, key, asset, recipient, amount, each evaluated leg with its amount and verdict, and the first denying leg) | yes | yes | yes | yes | |
 | Token payments: both legs are decided as the oracle says (the transfer by the token's policy, allowlist and scope; the gas by the native policy alone), both are reserved together and counted by the next request, the callback carries both reservations and the exact transfer transaction with its calldata, and a delivery releases and books both or neither (reached by the random driver and the `token` suite) | | | | yes | |
 | The lifetime budget: the contract's per-epoch committed spend (read through its lazy-reset accessor) equals the oracle's after every step; budget usage, committed plus in flight, never passes the budget unless the owner lowered it; a new grant resets it, a delivery after the re-grant is booked to the new grant, and the decision (allow or `MandateBudgetExceeded`, with the window deciding first when both deny) equals the oracle's (reached by the random driver and the `budget` suite) | | | | yes | |
 | The agent's authority is the intersection of the policy and the mandate's scope: the shadow model restricts every request to what both allow, with the scope checked after the global ones (out-of-scope asset or recipient, the tighter cap), so an allowlist or cap is never widened by a scope, and the stored scope equals the granted one (reached by the random driver and the `scope` suite) | | | | yes | |

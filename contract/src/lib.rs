@@ -3,6 +3,7 @@
 //! only through `request_local_transfer`, which reserves budget before the
 //! transfer and settles it in a callback. Nothing here signs for other chains.
 
+mod decision;
 pub mod evm;
 mod gate;
 pub mod policy;
@@ -336,9 +337,25 @@ impl Minder {
     ) -> Promise {
         Self::require_local(&asset);
         let caller_key = Self::authenticated_key();
-        if let Decision::Deny(reason) =
-            self.evaluate_request(caller_key.as_ref(), &asset, amount.0, &recipient)
-        {
+        let decision = self.evaluate_request(caller_key.as_ref(), &asset, amount.0, &recipient);
+        // The decision event comes first, so a deny leaves it in the failed
+        // receipt's logs before the revert.
+        decision::log(
+            &decision::Request {
+                method: "request_local_transfer",
+                agent_key: caller_key.as_ref(),
+                asset: &asset,
+                recipient: recipient.to_string(),
+                amount: amount.0,
+            },
+            &[decision::Leg {
+                leg: "transfer",
+                asset: &asset,
+                amount: amount.0,
+                decision,
+            }],
+        );
+        if let Decision::Deny(reason) = decision {
             env::panic_str(&format!("Denied: {reason:?}"));
         }
 

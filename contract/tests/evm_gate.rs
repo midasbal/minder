@@ -169,8 +169,25 @@ async fn nonce(f: &Fixture) -> String {
         .await
 }
 
-/// The signed-payment events in a result's logs.
+/// The execution events (signed payments and owner withdrawals) in a result's
+/// logs. The decision events are the request path's policy log, read apart.
 fn events(result: &ExecutionFinalResult) -> Vec<Value> {
+    all_events(result)
+        .into_iter()
+        .filter(|event| event["event"] != "decision")
+        .collect()
+}
+
+/// The `data` of the decision events in a result's logs.
+fn decisions(result: &ExecutionFinalResult) -> Vec<Value> {
+    all_events(result)
+        .into_iter()
+        .filter(|event| event["event"] == "decision")
+        .map(|event| event["data"][0].clone())
+        .collect()
+}
+
+fn all_events(result: &ExecutionFinalResult) -> Vec<Value> {
     result
         .logs()
         .iter()
@@ -334,10 +351,9 @@ async fn the_callback_has_gas_to_spare_for_the_authenticity_check() {
         .receipt_outcomes()
         .iter()
         .find(|outcome| {
-            outcome
-                .logs
-                .iter()
-                .any(|line| line.starts_with("EVENT_JSON:"))
+            outcome.logs.iter().any(|line| {
+                line.starts_with("EVENT_JSON:") && !line.contains("\"event\":\"decision\"")
+            })
         })
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
@@ -793,10 +809,9 @@ async fn the_owner_callback_has_gas_to_spare() {
         .receipt_outcomes()
         .iter()
         .find(|outcome| {
-            outcome
-                .logs
-                .iter()
-                .any(|line| line.starts_with("EVENT_JSON:"))
+            outcome.logs.iter().any(|line| {
+                line.starts_with("EVENT_JSON:") && !line.contains("\"event\":\"decision\"")
+            })
         })
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
@@ -1011,10 +1026,9 @@ async fn the_token_callback_has_gas_to_spare() {
         .receipt_outcomes()
         .iter()
         .find(|outcome| {
-            outcome
-                .logs
-                .iter()
-                .any(|line| line.starts_with("EVENT_JSON:"))
+            outcome.logs.iter().any(|line| {
+                line.starts_with("EVENT_JSON:") && !line.contains("\"event\":\"decision\"")
+            })
         })
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
@@ -1169,10 +1183,9 @@ async fn the_token_recovery_callback_has_gas_to_spare() {
         .receipt_outcomes()
         .iter()
         .find(|outcome| {
-            outcome
-                .logs
-                .iter()
-                .any(|line| line.starts_with("EVENT_JSON:"))
+            outcome.logs.iter().any(|line| {
+                line.starts_with("EVENT_JSON:") && !line.contains("\"event\":\"decision\"")
+            })
         })
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
@@ -1181,4 +1194,133 @@ async fn the_token_recovery_callback_has_gas_to_spare() {
         burnt < 12_500_000_000_000,
         "under half the 25 Tgas reserve: {burnt}"
     );
+}
+
+// ---- Decision log ----
+
+/// The logs of the receipts that failed, which is where a denied request's
+/// decision event has to be.
+fn failed_receipt_logs(result: &ExecutionFinalResult) -> Vec<String> {
+    result
+        .outcomes()
+        .into_iter()
+        .filter(|outcome| outcome.is_failure())
+        .flat_map(|outcome| outcome.logs.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_allowed_request_logs_an_allow_in_the_successful_receipt() {
+    let (f, _signer) = armed_token().await;
+    let native = pay(&f, &f.agent, RECIPIENT, VALUE).await;
+    assert!(native.is_success(), "{native:?}");
+    let decisions_logged = decisions(&native);
+    assert_eq!(decisions_logged.len(), 1);
+    assert_eq!(decisions_logged[0]["method"], "request_evm_payment");
+    assert_eq!(decisions_logged[0]["decision"], "allow");
+    assert_eq!(decisions_logged[0]["recipient"], RECIPIENT);
+    assert_eq!(decisions_logged[0]["amount"], VALUE.to_string());
+    assert_eq!(decisions_logged[0]["asset"], evm());
+    // The execution event is still the one signed payment.
+    assert_eq!(events(&native).len(), 1);
+
+    // (2000 at nonce 1 is the transfer the mock signer holds a signature for.)
+    let token = pay_token(&f, &f.agent, RECIPIENT, 2000).await;
+    assert!(token.is_success(), "{token:?}");
+    let decisions_logged = decisions(&token);
+    assert_eq!(decisions_logged.len(), 1);
+    assert_eq!(decisions_logged[0]["method"], "request_evm_token_payment");
+    assert_eq!(decisions_logged[0]["decision"], "allow");
+    assert_eq!(decisions_logged[0]["asset"], token_asset());
+    assert_eq!(decisions_logged[0]["legs"].as_array().unwrap().len(), 2);
+    assert_eq!(decisions_logged[0]["legs"][1]["asset"], evm());
+    assert_eq!(events(&token).len(), 1);
+
+    // And the local path.
+    let local = f.request_transfer(near(), 5, f.recipient.id()).await;
+    assert!(local.is_success(), "{local:?}");
+    let decisions_logged = decisions(&local);
+    assert_eq!(decisions_logged.len(), 1);
+    assert_eq!(decisions_logged[0]["method"], "request_local_transfer");
+    assert_eq!(decisions_logged[0]["decision"], "allow");
+    assert_eq!(
+        decisions_logged[0]["recipient"],
+        f.recipient.id().to_string()
+    );
+}
+
+#[tokio::test]
+async fn a_denied_request_persists_its_decision_event_in_the_failed_receipt() {
+    let (f, _signer) = armed_token().await;
+    let key = near_sdk::serde_json::to_value(&f.agent_key).unwrap();
+
+    // Local: over the per-transaction cap.
+    let local = f
+        .request_transfer(near(), PER_TX_CAP + 1, f.recipient.id())
+        .await;
+    // Native EVM: to a recipient on no allowlist.
+    let native = pay(&f, &f.agent, NOT_ALLOWLISTED, VALUE).await;
+    // Token: over the token cap, then gas over the native cap.
+    let token = pay_token(&f, &f.agent, RECIPIENT, 5001).await;
+    f.set_policy(evm(), TOKEN_GAS - 1, 10 * TOKEN_GAS).await;
+    let gas = pay_token(&f, &f.agent, RECIPIENT, 100).await;
+
+    for (result, method, reason, leg) in [
+        (
+            &local,
+            "request_local_transfer",
+            "PerTxCapExceeded",
+            "transfer",
+        ),
+        (
+            &native,
+            "request_evm_payment",
+            "RecipientNotAllowed",
+            "transfer",
+        ),
+        (
+            &token,
+            "request_evm_token_payment",
+            "PerTxCapExceeded",
+            "transfer",
+        ),
+        (&gas, "request_evm_token_payment", "PerTxCapExceeded", "gas"),
+    ] {
+        // The request reverted ...
+        assert!(result.is_failure(), "{method}: {result:?}");
+        // ... and the revert left the decision event in the failed receipt's own logs.
+        let failed = failed_receipt_logs(result);
+        let in_failed: Vec<Value> = failed
+            .iter()
+            .filter_map(|line| line.strip_prefix("EVENT_JSON:"))
+            .map(|json| near_sdk::serde_json::from_str::<Value>(json).unwrap())
+            .filter(|event| event["event"] == "decision")
+            .map(|event| event["data"][0].clone())
+            .collect();
+        assert_eq!(
+            in_failed.len(),
+            1,
+            "{method}: no decision event in the failed receipt"
+        );
+        let event = &in_failed[0];
+        assert_eq!(event["method"], method);
+        assert_eq!(event["decision"], "deny");
+        assert_eq!(event["reason"], reason);
+        assert_eq!(event["leg"], leg);
+        assert_eq!(
+            event["agent_key"], key,
+            "{method}: the signing key is logged"
+        );
+        // The log line itself carries the standard, as a stream reads it.
+        assert!(failed
+            .iter()
+            .any(|line| line.contains("\"standard\":\"minder\"")));
+        // The result-level view agrees: the same single event, and nothing executed.
+        assert_eq!(decisions(result).len(), 1, "{method}");
+        assert!(events(result).is_empty(), "{method}: no execution event");
+    }
+    // The denied requests changed nothing.
+    assert_eq!(f.reserved(near()).await, 0);
+    assert_eq!(f.reserved(token_asset()).await, 0);
+    assert_eq!(nonce(&f).await, "0");
 }
