@@ -22,7 +22,8 @@ mod world;
 pub(crate) use random::seeded_runner;
 
 use actions::{
-    deliver, request, Action, Amount, Asset, Grant, Outcome, Pick, PolicyVariant, Recipient, Tick,
+    deliver, request, Action, Amount, Asset, Grant, Outcome, Pick, PolicyVariant, Recipient, Scope,
+    Tick,
 };
 use world::World;
 
@@ -132,8 +133,8 @@ fn exhaustive_authority_and_time() {
         Action::Freeze,
         Action::Unfreeze,
         Action::RevokeMandate,
-        Action::GrantMandate(Grant::Short),
-        Action::GrantMandate(Grant::Long),
+        Action::GrantMandate(Grant::Short, Scope::Unscoped),
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
         Action::Advance(Tick::Slot),
     ];
     let stats = run_exhaustive("authority", &alphabet, DEPTH);
@@ -146,6 +147,45 @@ fn exhaustive_authority_and_time() {
             "Denied(Evm, MandateRevoked)",
             "Denied(Near, MandateExpired)",
             "Denied(Near, NotAuthorized)",
+        ],
+    );
+}
+
+#[test]
+fn exhaustive_mandate_scopes() {
+    // Grants of each kind of scope interleaved with requests on both surfaces,
+    // to an allowed and a disallowed recipient, under a loosened global limit
+    // and in-flight spend: the effective authority is the intersection of the
+    // policy and the scope at every step, and a re-grant replaces the scope.
+    let alphabet = [
+        request(Asset::Near, Amount::Mid),
+        request(Asset::Near, Amount::AtCap),
+        request(Asset::Evm, Amount::Mid),
+        Action::Request {
+            asset: Asset::Near,
+            amount: Amount::Mid,
+            to: Recipient::Disallowed,
+        },
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
+        Action::GrantMandate(Grant::Long, Scope::NearOnly),
+        Action::GrantMandate(Grant::Long, Scope::DisallowedRecipientsOnly),
+        Action::GrantMandate(Grant::Long, Scope::CapTight),
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Loose,
+        },
+        deliver(Pick::Oldest, Outcome::Ok),
+    ];
+    let stats = run_exhaustive("scope", &alphabet, DEPTH);
+    assert_covered(
+        &stats.coverage,
+        &[
+            "Allowed(Near)",
+            "Allowed(Evm)",
+            "Denied(Evm, AssetOutOfScope)",
+            "Denied(Near, RecipientOutOfScope)",
+            "Denied(Near, RecipientNotAllowed)",
+            "Denied(Near, PerTxCapExceeded)",
         ],
     );
 }
@@ -230,6 +270,8 @@ fn random_long_sequences() {
             "Denied(Evm, MandateExpired)",
             "Denied(Near, NotAuthorized)",
             "Denied(Evm, NotAuthorized)",
+            "Denied(Evm, AssetOutOfScope)",
+            "Denied(Near, RecipientOutOfScope)",
             "Delivered(Near, Ok)",
             "Delivered(Near, Fail)",
             "Delivered(Evm, Ok)",

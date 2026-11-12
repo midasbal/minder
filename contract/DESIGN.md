@@ -29,7 +29,7 @@ built yet.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `config` | `Config { owner, status, window_len, num_buckets }` | Set once in `init`; only `status` changes later |
-| `mandate` | `Option<Mandate { agent_key: PublicKey, expiry, epoch, revoked }>` | One mandate at a time; `agent_key` is the function-call key provisioned on the contract account |
+| `mandate` | `Option<Mandate { agent_key: PublicKey, expiry, epoch, revoked, scope: MandateScope }>` | One mandate at a time; `agent_key` is the function-call key provisioned on the contract account |
 | `last_mandate_epoch` | `u64` | Incremented on every grant, never reset, so epochs are never reused |
 | `policies` | `IterableMap<AssetId, AssetPolicy>` | Having an entry allowlists the asset |
 | `recipients` | `IterableSet<AccountId>` | Allowed recipients |
@@ -168,9 +168,49 @@ revoke and shows the contract still denies it.
 **Expiry** is enforced by `evaluate` (`MandateExpired`) and does not remove the key. An expired key
 stays on the account, harmless, until the next revoke or grant deletes it.
 
+**Mandate scope (least privilege).** A mandate can be granted strictly less than the global policy.
+`grant_mandate(agent_key, expiry, scope)` takes an optional `MandateScope`, stored in the `Mandate`:
+
+| Field | Meaning when `Some` |
+| --- | --- |
+| `allowed_assets: Option<Vec<AssetId>>` | the request's asset must be listed |
+| `allowed_near_recipients: Option<Vec<AccountId>>` | for NEAR and NEP-141 transfers, the recipient must be listed |
+| `allowed_evm_recipients: Option<Vec<String>>` | for EVM payments, the recipient must be listed (`0x` addresses, entered in any case, stored lowercase) |
+| `per_tx_cap: Option<U128>` | an extra per-transaction cap |
+
+- **The effective authority is the intersection of the global policy and the scope; a scope only
+  subtracts.** `evaluate` runs every global check first (status, mandate, key, the asset's policy,
+  recipient allowlist, per-transaction cap, window). Only a request that passed all of them meets the
+  scope, checked in this order: asset, recipient, then the cap. A scope can turn an allow into a
+  deny, never the reverse, so an asset or recipient named in a scope but not in the global policy is
+  still refused by the global check (`AssetNotAllowed`, `RecipientNotAllowed`).
+- **Unset means inherit.** A `None` field adds no restriction, and `scope: None` (or omitting it from
+  the JSON call) gives an all-`None` scope, which behaves exactly as a mandate did before scopes
+  existed. `Some` of an empty list permits nothing of that kind. The NEAR and EVM recipient lists are
+  separate, like the global allowlists, so scoping only one leaves the other surface at the global
+  allowlist; scoping `allowed_assets` is what closes a whole surface.
+- **The cap is the smaller of the two.** The effective cap is `min(global cap, mandate cap)`: the
+  global cap is checked with the global checks, the mandate's afterwards, both reporting
+  `PerTxCapExceeded`. A looser mandate cap never widens the global one. It is a single number in each
+  asset's own units (for EVM, the outlay in wei), so it is only meaningful alongside an
+  `allowed_assets` of assets that share a unit.
+- **New deny reasons, distinct for audit** (like `NoMandate` and `MandateRevoked`): `AssetOutOfScope`
+  and `RecipientOutOfScope`. They are appended to `DenyReason`, so the existing borsh tags are
+  unchanged.
+- **The window limit stays global** and per asset: a scoped mandate does not get a budget of its own,
+  and this piece adds no lifetime budget.
+- **`dry_run` and `dry_run_evm` evaluate the same scope**, because they run `evaluate` on the stored
+  mandate, so a caller sees a scoped denial before sending.
+- **A re-grant replaces the scope.** The new scope applies from the new grant; nothing carries over,
+  and an unscoped re-grant drops it. Each list holds at most 64 entries (the work of one evaluation
+  and the stored size), and an invalid EVM address in a scope reverts the grant.
+
 **Gas allowance and worst-case loss.** The key's gas allowance is a fixed 0.25 NEAR (`AGENT_KEY_ALLOWANCE`,
 a constant). It is spendable from the contract's own balance, so **the most the agent can lose the
-owner is the policy limits plus this allowance per granted key**: the allowance bounds the transaction
+owner is the policy limits plus this allowance per granted key**, and for a scoped mandate the policy
+part is bounded by the tighter of the two: only the scope's assets, only to the scope's recipients,
+at most `min(global cap, mandate cap)` per transaction, and still no more than the global window
+limit per asset: the allowance bounds the transaction
 fees the key can burn, whatever it calls (denied requests burn gas too). The runtime checks the
 allowance against the *prepaid* gas at the current gas price and gives unused gas back, so the agent
 must attach what a request needs, not the 300 Tgas maximum; at the mainnet floor price (1e8 yoctoNEAR
@@ -199,10 +239,12 @@ recovery path is `owner_withdraw`.
 deployer's own, the addition fails silently and that key is the agent: the owner supplies a fresh key.
 (b) The agent key can burn its allowance on denied calls. (c) The runtime checks the allowance against prepaid gas at the current price (above), so a request attached with too much gas is refused before it runs.
 
-**State schema.** `Mandate` changed (`agent: AccountId` became `agent_key: PublicKey`), which changes
-the borsh layout of the stored state, and `grant_mandate` and `dry_run` take a key where they took an
-account. No migration is written: a testnet deployment from before this change needs a fresh account
-or wiped state.
+**State schema.** `Mandate` changed twice: `agent: AccountId` became `agent_key: PublicKey`, and it
+gained `scope: MandateScope`. Both change the borsh layout of the stored state, and `grant_mandate`
+and `dry_run` take a key where they took an account (and `grant_mandate` an optional scope). No
+migration is written: a testnet deployment from before these changes needs a fresh account or wiped
+state. The JSON of an existing `grant_mandate` call with a key still works unchanged (no `scope`
+means unscoped).
 
 ## Fund custody
 
@@ -513,7 +555,9 @@ worst-case fee), and the next nonce 2.
 The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevoked`,
 `MandateExpired` (`now >= expiry`), `NotAuthorized` (the call is not from the contract's own account, or its key is not the mandate's),
 `AssetNotAllowed`, `RecipientNotAllowed`, `PerTxCapExceeded` (`amount > cap`),
-`WindowLimitExceeded` (`effective_spend + amount > limit`, or overflow).
+`WindowLimitExceeded` (`effective_spend + amount > limit`, or overflow). These are the global
+checks. A request that passes them meets the mandate's scope: `AssetOutOfScope`,
+`RecipientOutOfScope`, then `PerTxCapExceeded` again for the mandate's own cap.
 
 ## Choices that need your review
 
@@ -599,6 +643,11 @@ with its real function-call key.
 | Recipient not allowlisted -> `RecipientNotAllowed` | `recipient_not_on_allowlist_is_denied` |
 | No policy -> `AssetNotAllowed` | `asset_without_a_policy_is_denied` |
 | A key other than the mandate's -> `NotAuthorized`; so is the right key from any account but the contract's own | `only_the_mandated_agent_is_authorized`; unit `policy::only_the_mandated_key_is_authorized`, `mandate_tests::another_key_on_the_contract_account_is_not_the_agent`, `the_agent_key_is_not_enough_from_any_other_account`; sandbox `agent_key::another_key_on_the_contract_account_is_not_the_agent` |
+| A scoped mandate allows what is in scope and denies a globally allowed but out-of-scope asset or recipient with the right reason, on both surfaces; `dry_run` and `dry_run_evm` agree | unit `policy::the_scope_allows_what_it_names_and_denies_the_rest_of_what_the_policy_allows`, `evm_recipients_are_scoped_apart_from_near_recipients`, `an_empty_list_permits_nothing_of_its_kind`; `mandate_tests::a_scoped_mandate_allows_what_is_in_scope_and_names_what_is_not`; `gate_tests::an_asset_scope_that_excludes_the_evm_asset_denies_evm_payments`, `an_evm_recipient_scope_is_enforced_after_the_global_allowlist`; sandbox `agent_key::a_scoped_mandate_confines_the_real_key_to_less_than_the_global_policy` |
+| The effective cap is the smaller of the global and the mandate's: tighter binds, looser does not widen | unit `policy::the_effective_cap_is_the_smaller_of_the_global_and_the_mandates`; `mandate_tests::the_effective_cap_is_the_smaller_of_the_global_cap_and_the_mandates`; `gate_tests::the_mandate_cap_applies_to_the_evm_outlay_and_only_ever_narrows` |
+| Intersection: an asset or recipient in the scope but not in the global policy is still denied by the global check; the global checks decide first | unit `policy::the_global_checks_come_first_so_a_scope_never_widens`; `mandate_tests::a_scope_cannot_widen_the_global_policy` |
+| An unscoped mandate behaves as before scopes (regression) | unit `policy::an_unscoped_mandate_is_the_global_policy_alone`; `mandate_tests::an_unscoped_mandate_behaves_as_it_did_before_scopes`; `gate_tests::an_unscoped_mandate_leaves_the_evm_surface_as_it_was`; every existing sandbox test, which grants without a scope |
+| A re-grant replaces the scope; scopes are validated and stored normalized; only the owner sets one | unit `mandate_tests::a_regrant_can_change_the_scope_and_the_new_scope_applies_from_the_new_grant`, `a_scope_is_validated_and_stored_normalized`, `only_the_owner_sets_a_scope_and_the_scope_is_visible` |
 | Grant provisions a function-call key scoped to the two agent methods, on the contract itself, with a limited allowance | unit `mandate_tests::a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods`, `the_key_can_reach_only_methods_that_exist_on_the_contract`; sandbox `agent_key::a_grant_puts_a_scoped_function_call_key_on_the_contract_account` (reads the key back from the chain) |
 | The real key is refused by the protocol everywhere but the two agent methods | sandbox `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` (every other exported method, no contract logic runs), `the_agent_key_cannot_call_another_contract_such_as_the_signer`, `the_agent_key_cannot_do_anything_but_call_the_two_methods`; and it passes the new auth on both: `the_agent_key_passes_the_new_authentication_on_both_agent_methods` |
 | Revoke flags the mandate and deletes the key; the flag denies independent of the delete; a failed delete does not fail the revoke | unit `mandate_tests::revoking_flags_the_mandate_and_deletes_the_key`, `a_request_after_revoking_is_denied_by_the_flag_with_no_deletion_landed`, `revoking_twice_is_a_no_op_and_issues_no_second_deletion`; sandbox `agent_key::revoking_deletes_the_key_and_the_deleted_key_can_no_longer_reach_the_contract`, `after_a_revoke_the_epoch_guard_denies_even_if_the_key_survived_the_delete`, `revoking_when_the_key_is_already_gone_does_not_fail` |
@@ -700,6 +749,9 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 - The agent is identified by public key, as in production: its calls come from the contract account
   signed with the mandate's key, and every grant rotates between two keys (the contract refuses to
   re-grant the live one). A `StaleKeyRequest` action signs a request with the other, stale key.
+- Every grant also carries one of six scopes (none, NEAR only, exactly the allowed recipients, only
+  the disallowed recipients, a cap of 40, a cap of 100). The shadow model states their effect
+  independently, after the global checks, so the contract's decision must equal the intersection.
 - Two assets (NEAR and EVM), an allowlisted and a non-allowlisted recipient, amounts at, below and
   over the per-transaction cap, owner tightening and loosening of a policy, grant, revoke, freeze,
   unfreeze, and time advances inside a slot, across a slot boundary and past a whole window.
@@ -721,7 +773,8 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | accounting (`exhaustive_accounting_across_interleavings`) | 9 | 20,289 | 87,451 | 63,830 | 2,324 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
 | authority (`exhaustive_authority_and_time`) | 11 | 30,715 | 143,154 | 103,057 | 29,194 | freeze, unfreeze, revoke, short and long grants (each rotating the agent key), slot advances, requests with the current and the stale key, interleaved with in-flight requests |
 | policy (`exhaustive_policy_changes_and_caps`) | 11 | 13,486 | 73,721 | 54,642 | 11,749 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
-| **Total** | | **64,490** | **304,326** | | | |
+| scope (`exhaustive_mandate_scopes`) | 10 | 13,346 | 64,263 | 50,918 | 4,057 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
+| **Total** | | **77,836** | **368,589** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -746,6 +799,7 @@ every step. Every step of every harness driver runs every check.
 | Monotonic revocation: once frozen, revoked or expired, nothing is approved until `unfreeze` or a new grant (stated by separate ghost bookkeeping, not by the oracle's `decide`) | | yes | | yes | |
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
+| The agent's authority is the intersection of the policy and the mandate's scope: the shadow model restricts every request to what both allow, with the scope checked after the global ones (out-of-scope asset or recipient, the tighter cap), so an allowlist or cap is never widened by a scope, and the stored scope equals the granted one (reached by the random driver and the `scope` suite) | | | | yes | |
 | Agent authentication is by key: every grant switches to the other of two keys, and a request signed with the key the mandate no longer names is never approved (`NotAuthorized` once the mandate checks that rank above it pass), and `dry_run` agrees | | yes | | yes | |
 | EVM nonce (agent path; `owner_evm_withdraw` is deliberately outside this rule and is not in the harness's alphabet): the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
 | Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |

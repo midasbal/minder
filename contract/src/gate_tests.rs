@@ -1266,3 +1266,145 @@ fn unusable_signer_results_emit_nothing_and_book_nothing_for_the_owner() {
         assert_eq!(committed(&minder, evm_asset()), 0);
     }
 }
+
+// ---- Mandate scope on the EVM surface ----
+
+use crate::MandateScope;
+
+/// Replaces the mandate with one for `other_key()` carrying `scope`, and acts
+/// as that key.
+fn scoped_agent(minder: &mut Minder, scope: MandateScope) {
+    as_owner();
+    minder.grant_mandate(other_key(), U64(u64::MAX), Some(scope));
+    testing_env!(agent_context_for(other_key()).build());
+}
+
+fn evm_decision(minder: &Minder, to: &str, value: u128) -> Decision {
+    minder.dry_run_evm(other_key(), to.to_string(), U128(value))
+}
+
+/// The reason a real request is denied for, or `None` if it is accepted.
+fn evm_request_denial(minder: &mut Minder, to: &str, value: u128) -> Option<String> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.request_evm_payment(to.to_string(), U128(value));
+    }))
+    .err()
+    .map(|payload| {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+#[test]
+fn an_asset_scope_that_excludes_the_evm_asset_denies_evm_payments() {
+    let mut minder = armed_evm();
+    scoped_agent(
+        &mut minder,
+        MandateScope {
+            allowed_assets: Some(vec![AssetId::Near]),
+            ..MandateScope::default()
+        },
+    );
+    assert_eq!(
+        evm_decision(&minder, RECIPIENT, 1000),
+        Decision::Deny(DenyReason::AssetOutOfScope)
+    );
+    let denial = evm_request_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(denial.contains("Denied: AssetOutOfScope"), "{denial}");
+    assert_eq!(
+        reserved(&minder, evm_asset()),
+        0,
+        "a denied request reserves nothing"
+    );
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(0), "and takes no nonce");
+}
+
+#[test]
+fn an_evm_recipient_scope_is_enforced_after_the_global_allowlist() {
+    let mut minder = armed_evm();
+    as_owner();
+    // A second, globally allowed recipient; and a scope naming the first (in
+    // upper case, to show the entry is matched normalized) and an address that
+    // is on no allowlist.
+    minder.set_evm_recipient(NOT_ALLOWLISTED.to_string(), true);
+    let unlisted = "0x00000000000000000000000000000000000000bb";
+    scoped_agent(
+        &mut minder,
+        MandateScope {
+            allowed_assets: Some(vec![evm_asset()]),
+            allowed_evm_recipients: Some(vec![
+                format!("0x{}", RECIPIENT[2..].to_uppercase()),
+                unlisted.to_string(),
+            ]),
+            ..MandateScope::default()
+        },
+    );
+    assert_eq!(evm_decision(&minder, RECIPIENT, 1000), Decision::Allow);
+    assert_eq!(
+        evm_decision(&minder, NOT_ALLOWLISTED, 1000),
+        Decision::Deny(DenyReason::RecipientOutOfScope),
+        "globally allowed, outside the scope"
+    );
+    assert_eq!(
+        evm_decision(&minder, unlisted, 1000),
+        Decision::Deny(DenyReason::RecipientNotAllowed),
+        "in the scope, not globally allowed: the global check decides"
+    );
+
+    assert!(evm_request_denial(&mut minder, RECIPIENT, 1000).is_none());
+    let denial = evm_request_denial(&mut minder, NOT_ALLOWLISTED, 1000).expect("denied");
+    assert!(denial.contains("Denied: RecipientOutOfScope"), "{denial}");
+}
+
+#[test]
+fn the_mandate_cap_applies_to_the_evm_outlay_and_only_ever_narrows() {
+    let mut minder = armed_evm(); // global per-transaction cap 1e14, outlay = value + 4.2e13
+    scoped_agent(
+        &mut minder,
+        MandateScope {
+            per_tx_cap: Some(U128(FEE_COST + 500)),
+            ..MandateScope::default()
+        },
+    );
+    assert_eq!(evm_decision(&minder, RECIPIENT, 500), Decision::Allow);
+    assert_eq!(
+        evm_decision(&minder, RECIPIENT, 501),
+        Decision::Deny(DenyReason::PerTxCapExceeded)
+    );
+
+    // Looser than the global cap: the global one still binds.
+    scoped_agent_after_revoke(
+        &mut minder,
+        MandateScope {
+            per_tx_cap: Some(U128(u128::MAX)),
+            ..MandateScope::default()
+        },
+    );
+    assert_eq!(
+        evm_decision(&minder, RECIPIENT, EVM_PER_TX_CAP - FEE_COST),
+        Decision::Allow
+    );
+    assert_eq!(
+        evm_decision(&minder, RECIPIENT, EVM_PER_TX_CAP - FEE_COST + 1),
+        Decision::Deny(DenyReason::PerTxCapExceeded)
+    );
+}
+
+/// As `scoped_agent`, for a mandate that is replaced again: revoked first, so
+/// its key may be granted once more.
+fn scoped_agent_after_revoke(minder: &mut Minder, scope: MandateScope) {
+    as_owner();
+    minder.revoke_mandate();
+    scoped_agent(minder, scope);
+}
+
+#[test]
+fn an_unscoped_mandate_leaves_the_evm_surface_as_it_was() {
+    let mut minder = armed_evm();
+    scoped_agent(&mut minder, MandateScope::default());
+    assert_eq!(evm_decision(&minder, RECIPIENT, 1000), Decision::Allow);
+    assert!(evm_request_denial(&mut minder, RECIPIENT, 1000).is_none());
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(1));
+}

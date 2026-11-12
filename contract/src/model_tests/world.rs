@@ -27,9 +27,9 @@ use crate::test_support::{
     account, fixture_signature, function_call, signer_response, test_sender_hex, Signer,
 };
 use crate::types::{Decision, Status};
-use crate::{AssetId, Minder};
+use crate::{AssetId, MandateScope, Minder};
 
-use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, ASSETS};
+use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, Scope, ASSETS};
 use super::model::{Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
@@ -106,7 +106,7 @@ impl World {
             U128(MAX_PRIORITY_FEE),
             Some(GAS_LIMIT),
         );
-        minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE));
+        minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None);
         World {
             storage: persist(minder),
             model: Model::new(T0, T0 + LONG_MANDATE),
@@ -213,13 +213,13 @@ impl World {
                 model.set_policy(asset, variant);
                 Observed::Other
             }
-            Action::GrantMandate(grant) => {
+            Action::GrantMandate(grant, scope) => {
                 let expiry = model.now + grant.lifetime();
                 // Every grant switches to the other key, as the contract requires
                 // a new key while a mandate is live.
                 let key = agent_key(model.stale_key());
-                owner_call(|| minder.grant_mandate(key, U64(expiry)))?;
-                model.grant(expiry);
+                owner_call(|| minder.grant_mandate(key, U64(expiry), grant_scope(scope)))?;
+                model.grant(expiry, scope);
                 Observed::Other
             }
             Action::RevokeMandate => {
@@ -581,11 +581,48 @@ fn check_invariants(
     ensure!(
         mandate.epoch == model.mandate.epoch
             && mandate.revoked == model.mandate.revoked
-            && mandate.expiry.0 == model.mandate.expiry,
+            && mandate.expiry.0 == model.mandate.expiry
+            && mandate.scope == stored_scope(model.mandate.scope),
         "mandate {mandate:?} differs from the model {:?}",
         model.mandate
     );
     Ok(())
+}
+
+/// What the owner passes to `grant_mandate` for a harness scope. `Unscoped`
+/// passes nothing at all, the way a call that predates scopes would.
+fn grant_scope(scope: Scope) -> Option<MandateScope> {
+    let only = MandateScope::default;
+    match scope {
+        Scope::Unscoped => None,
+        Scope::NearOnly => Some(MandateScope {
+            allowed_assets: Some(vec![AssetId::Near]),
+            ..only()
+        }),
+        Scope::AllowedRecipientsOnly => Some(MandateScope {
+            allowed_near_recipients: Some(vec![account(NEAR_ALLOWED)]),
+            allowed_evm_recipients: Some(vec![EVM_ALLOWED.to_string()]),
+            ..only()
+        }),
+        Scope::DisallowedRecipientsOnly => Some(MandateScope {
+            allowed_near_recipients: Some(vec![account(NEAR_DISALLOWED)]),
+            allowed_evm_recipients: Some(vec![EVM_DISALLOWED.to_string()]),
+            ..only()
+        }),
+        Scope::CapTight => Some(MandateScope {
+            per_tx_cap: Some(U128(40)),
+            ..only()
+        }),
+        Scope::CapLoose => Some(MandateScope {
+            per_tx_cap: Some(U128(100)),
+            ..only()
+        }),
+    }
+}
+
+/// The scope the contract should have stored for it.
+fn stored_scope(scope: Scope) -> MandateScope {
+    grant_scope(scope).unwrap_or_default()
 }
 
 // ---- Environment and helpers ----

@@ -118,6 +118,39 @@ impl Grant {
     }
 }
 
+/// What a mandate is granted beyond the global policy, chosen so that each
+/// kind of restriction both binds and, where it should, does not. Its meaning
+/// is restated independently in the shadow model.
+///
+/// The harness has one allowed and one disallowed recipient per surface and
+/// per-transaction caps of 30, 50 and 80 across the policy variants, so:
+/// - `NearOnly`: only the NEAR asset (every EVM request is out of scope);
+/// - `AllowedRecipientsOnly`: exactly the globally allowed recipients (a scope
+///   that names everything the policy allows, so it restricts nothing);
+/// - `DisallowedRecipientsOnly`: only the globally disallowed recipients (an
+///   allowed recipient is out of scope, and a disallowed one is still refused
+///   by the global allowlist);
+/// - `CapTight`: a cap of 40, below the default global cap of 50;
+/// - `CapLoose`: a cap of 100, above every global cap, so it never binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Unscoped,
+    NearOnly,
+    AllowedRecipientsOnly,
+    DisallowedRecipientsOnly,
+    CapTight,
+    CapLoose,
+}
+
+pub const SCOPES: [Scope; 6] = [
+    Scope::Unscoped,
+    Scope::NearOnly,
+    Scope::AllowedRecipientsOnly,
+    Scope::DisallowedRecipientsOnly,
+    Scope::CapTight,
+    Scope::CapLoose,
+];
+
 /// Time advances sized around the 100 ns slots and 400 ns window: inside a
 /// slot, across one slot boundary, and past a whole window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +188,7 @@ pub enum Action {
         asset: Asset,
         variant: PolicyVariant,
     },
-    GrantMandate(Grant),
+    GrantMandate(Grant, Scope),
     /// A request signed with the key of the mandate granted before the current
     /// one (or, before any rotation, a key never granted): the agent's old key
     /// after a re-grant. It must be refused as `NotAuthorized` once the mandate
@@ -216,9 +249,12 @@ pub fn full_alphabet() -> Vec<Action> {
     for asset in ASSETS {
         actions.push(Action::StaleKeyRequest(asset));
     }
+    for scope in SCOPES {
+        for grant in [Grant::Short, Grant::Long] {
+            actions.push(Action::GrantMandate(grant, scope));
+        }
+    }
     actions.extend([
-        Action::GrantMandate(Grant::Short),
-        Action::GrantMandate(Grant::Long),
         Action::RevokeMandate,
         Action::Freeze,
         Action::Unfreeze,

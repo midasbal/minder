@@ -18,10 +18,11 @@ use near_sdk::{
 };
 
 pub use types::{
-    AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, EvmConfigView, Mandate, Status,
+    AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, EvmConfigView, Mandate,
+    MandateScope, Status,
 };
 
-use policy::EvalInput;
+use policy::{EvalInput, RecipientRef};
 use window::SpendRing;
 
 /// Bounds the ring stored per asset and the work done per evaluation.
@@ -182,12 +183,23 @@ impl Minder {
     /// The provisioning is asynchronous: the mandate is recorded now and the
     /// key appears on the account in a later block. Until then nothing can
     /// authenticate as the agent, so the delay only withholds authority.
-    pub fn grant_mandate(&mut self, agent_key: PublicKey, expiry: U64) {
+    pub fn grant_mandate(
+        &mut self,
+        agent_key: PublicKey,
+        expiry: U64,
+        scope: Option<MandateScope>,
+    ) {
         self.assert_owner();
         require!(
             expiry.0 > env::block_timestamp(),
             "Mandate expiry must be in the future"
         );
+        // Unset means inherit: no scope is the unrestricted (global-policy-only)
+        // mandate, as before scopes existed. A re-grant replaces the scope.
+        let scope = scope
+            .unwrap_or_default()
+            .validated()
+            .unwrap_or_else(|reason| env::panic_str(reason));
         if let Some(previous) = self.mandate.as_ref().filter(|mandate| !mandate.revoked) {
             // The same key would race its own deletion against its re-addition.
             // After a revocation the deletion has long landed, so reuse is fine.
@@ -212,6 +224,7 @@ impl Minder {
             expiry,
             epoch: self.last_mandate_epoch,
             revoked: false,
+            scope,
         });
     }
 
@@ -528,6 +541,7 @@ impl Minder {
             caller_key,
             asset,
             amount,
+            RecipientRef::Near(recipient),
             self.recipients.contains(recipient),
         )
     }
@@ -540,6 +554,7 @@ impl Minder {
         caller_key: Option<&PublicKey>,
         asset: &AssetId,
         amount: u128,
+        recipient: RecipientRef,
         recipient_allowed: bool,
     ) -> Decision {
         policy::evaluate(&EvalInput {
@@ -547,7 +562,9 @@ impl Minder {
             mandate: self.mandate.as_ref(),
             now: env::block_timestamp(),
             caller_key,
+            asset,
             policy: self.policies.get(asset),
+            recipient,
             recipient_allowed,
             amount,
             effective_spend: policy::effective_spend(

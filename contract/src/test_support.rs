@@ -42,10 +42,15 @@ pub fn other_key() -> PublicKey {
 /// A call as the agent makes it: signed with its function-call key on the
 /// contract's own account, so the contract is both signer and predecessor.
 pub fn agent_context() -> VMContextBuilder {
+    agent_context_for(agent_key())
+}
+
+/// A call as the holder of `key` makes it.
+pub fn agent_context_for(key: PublicKey) -> VMContextBuilder {
     let mut builder = context("minder.near");
     builder
         .signer_account_id(account("minder.near"))
-        .signer_account_pk(agent_key());
+        .signer_account_pk(key);
     builder
 }
 
@@ -58,7 +63,7 @@ pub fn armed_as_agent() -> Minder {
         minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT));
     }
     minder.set_recipient(account("bob.near"), true);
-    minder.grant_mandate(agent_key(), U64(u64::MAX));
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
     testing_env!(agent_context().build());
     minder
 }

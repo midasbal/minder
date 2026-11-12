@@ -530,3 +530,78 @@ async fn removing_the_deployer_key_leaves_only_the_agent_key_and_control_stays_w
     let new_agent = Account::from_secret_key(f.contract.id().clone(), new_key, &f.worker);
     assert!(request(&f, &new_agent).await.is_success());
 }
+
+// ---- Scope: least privilege within the global policy ----
+
+#[tokio::test]
+async fn a_scoped_mandate_confines_the_real_key_to_less_than_the_global_policy() {
+    let f = Fixture::armed().await;
+    // Globally allowed: a second recipient and the token, at the default caps.
+    f.owner_ok(
+        "set_recipient",
+        json!({ "recipient": f.outsider.id(), "allowed": true }),
+    )
+    .await;
+    f.set_policy(nep141(), PER_TX_CAP, WINDOW_LIMIT).await;
+
+    // A mandate for a new key, scoped to NEAR, one recipient and a cap of 20.
+    let scoped_key = SecretKey::from_random(KeyType::ED25519);
+    let key = scoped_key.public_key().to_string();
+    let expiry = f.now().await + 3_600 * SECOND;
+    f.owner_ok(
+        "grant_mandate",
+        json!({
+            "agent_key": key, "expiry": expiry.to_string(),
+            "scope": {
+                "allowed_assets": [near()],
+                "allowed_near_recipients": [f.recipient.id()],
+                "per_tx_cap": "20",
+            },
+        }),
+    )
+    .await;
+    let m = mandate(&f).await;
+    assert_eq!(m["scope"]["per_tx_cap"], "20");
+    assert!(m["scope"]["allowed_evm_recipients"].is_null());
+    let agent = Account::from_secret_key(f.contract.id().clone(), scoped_key, &f.worker);
+    let ask = |asset: Value, amount: u128, to: AccountId| {
+        let (f, agent) = (&f, &agent);
+        async move {
+            let viewed = f
+                .dry_run_as(&key_of(agent), asset.clone(), amount, &to)
+                .await;
+            let result = agent
+                .call(f.contract.id(), "request_local_transfer")
+                .args_json(json!({ "asset": asset, "amount": amount.to_string(), "recipient": to }))
+                .gas(near_workspaces::types::Gas::from_tgas(AGENT_TGAS))
+                .transact()
+                .await
+                .unwrap();
+            (viewed, result)
+        }
+    };
+
+    // In scope: allowed, and the view agrees.
+    let (viewed, result) = ask(near(), 20, f.recipient.id().clone()).await;
+    assert_eq!(viewed, Decision::Allow);
+    assert!(result.is_success(), "{result:?}");
+
+    // Allowed globally, outside the scope: refused with the reason, and the view said so.
+    let (viewed, result) = ask(near(), 5, f.outsider.id().clone()).await;
+    assert_eq!(viewed, deny(minder::DenyReason::RecipientOutOfScope));
+    assert_reverts(result, "Denied: RecipientOutOfScope");
+    let (viewed, result) = ask(nep141(), 5, f.recipient.id().clone()).await;
+    assert_eq!(viewed, deny(minder::DenyReason::AssetOutOfScope));
+    assert_reverts(result, "Denied: AssetOutOfScope");
+    // Under the global cap (50), over the mandate's (20).
+    let (viewed, result) = ask(near(), 21, f.recipient.id().clone()).await;
+    assert_eq!(viewed, deny(minder::DenyReason::PerTxCapExceeded));
+    assert_reverts(result, "Denied: PerTxCapExceeded");
+
+    // A refused request changed nothing: only the first 20 is reserved or spent.
+    assert_eq!(f.reserved(near()).await + f.live_spend(near()).await, 20);
+}
+
+fn key_of(agent: &Account) -> String {
+    agent.secret_key().public_key().to_string()
+}

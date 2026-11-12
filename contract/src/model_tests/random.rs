@@ -39,7 +39,7 @@ fn action_strategy() -> impl Strategy<Value = Action> {
     prop_oneof![
         4 => class(|a| matches!(a, Action::Request { .. } | Action::StaleKeyRequest(_))),
         4 => class(|a| matches!(a, Action::Deliver { .. })),
-        2 => class(|a| matches!(a, Action::SetPolicy { .. } | Action::GrantMandate(_)
+        2 => class(|a| matches!(a, Action::SetPolicy { .. } | Action::GrantMandate(..)
             | Action::RevokeMandate | Action::Freeze | Action::Unfreeze)),
         1 => class(|a| matches!(a, Action::Advance(_))),
     ]

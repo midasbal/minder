@@ -14,6 +14,7 @@ use near_sdk::serde_json::{self, json};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseError, PublicKey};
 
 use crate::evm::{self, Eip1559Tx, EvmError, Signature};
+use crate::policy::RecipientRef;
 use crate::types::{AssetId, Decision, EvmConfig, EvmConfigView};
 use crate::{page, Minder, MinderExt};
 
@@ -226,9 +227,13 @@ impl Minder {
         let outlay = config.outlay(amount.0);
 
         let recipient_allowed = self.evm_recipients.contains(&to);
-        if let Decision::Deny(reason) =
-            self.evaluate_with(caller_key.as_ref(), &asset, outlay, recipient_allowed)
-        {
+        if let Decision::Deny(reason) = self.evaluate_with(
+            caller_key.as_ref(),
+            &asset,
+            outlay,
+            RecipientRef::Evm(&to),
+            recipient_allowed,
+        ) {
             env::panic_str(&format!("Denied: {reason:?}"));
         }
 
@@ -326,6 +331,7 @@ impl Minder {
             Some(&agent_key),
             &AssetId::Evm(config.chain_id),
             config.outlay(amount.0),
+            RecipientRef::Evm(&to),
             self.evm_recipients.contains(&to),
         )
     }

@@ -58,6 +58,60 @@ pub struct Mandate {
     pub expiry: U64,
     pub epoch: u64,
     pub revoked: bool,
+    /// What this mandate may do beyond the global policy: nothing, or less.
+    pub scope: MandateScope,
+}
+
+/// The most entries each list of a [`MandateScope`] may hold. Bounds what is
+/// stored and the work of one evaluation.
+pub const MAX_SCOPE_ENTRIES: usize = 64;
+
+/// Least-privilege limits on a mandate, set at grant time. The authority a
+/// mandate grants is always the **intersection** of the global policy and this
+/// scope: the global checks run first and a scope can only subtract from them,
+/// never add.
+///
+/// A field left `None` inherits: it adds no restriction beyond the global
+/// policy, and an all-`None` scope (the default) behaves exactly as a mandate
+/// did before scopes existed. A field that is `Some` restricts, and `Some` of
+/// an empty list permits nothing of that kind.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MandateScope {
+    /// The only assets the agent may move.
+    pub allowed_assets: Option<Vec<AssetId>>,
+    /// The only NEAR recipients (for NEAR and NEP-141 transfers).
+    pub allowed_near_recipients: Option<Vec<AccountId>>,
+    /// The only EVM recipients, as lowercase `0x` addresses. Entered in any
+    /// letter case; stored normalized.
+    pub allowed_evm_recipients: Option<Vec<String>>,
+    /// A per-transaction cap in addition to the global one: the effective cap
+    /// is the smaller of the two. It is in each asset's own units (for EVM, the
+    /// outlay in wei), so it is only meaningful together with `allowed_assets`
+    /// naming assets that share a unit.
+    pub per_tx_cap: Option<U128>,
+}
+
+impl MandateScope {
+    /// Checks the scope and puts it in its stored form (EVM addresses
+    /// normalized to lowercase), or says what is wrong with it.
+    pub fn validated(mut self) -> Result<Self, &'static str> {
+        let too_long = |len: Option<usize>| len.is_some_and(|len| len > MAX_SCOPE_ENTRIES);
+        if too_long(self.allowed_assets.as_ref().map(Vec::len))
+            || too_long(self.allowed_near_recipients.as_ref().map(Vec::len))
+            || too_long(self.allowed_evm_recipients.as_ref().map(Vec::len))
+        {
+            return Err("A scope list may hold at most 64 entries");
+        }
+        if let Some(addresses) = &mut self.allowed_evm_recipients {
+            for text in addresses.iter_mut() {
+                let address = crate::evm::parse_address(text)
+                    .ok_or("Invalid EVM address in the scope: expected 0x and 40 hex digits")?;
+                *text = crate::evm::format_address(&address);
+            }
+        }
+        Ok(self)
+    }
 }
 
 #[near(serializers = [borsh, json])]
@@ -72,6 +126,12 @@ pub enum DenyReason {
     RecipientNotAllowed,
     PerTxCapExceeded,
     WindowLimitExceeded,
+    // Appended, not inserted: enum tags are part of the borsh form. Checked
+    // after every global check; see `policy::evaluate`.
+    /// The mandate's scope does not include this asset.
+    AssetOutOfScope,
+    /// The mandate's scope does not include this recipient.
+    RecipientOutOfScope,
 }
 
 #[near(serializers = [borsh, json])]

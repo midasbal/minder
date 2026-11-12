@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use crate::evm::Eip1559Tx;
 use crate::types::DenyReason;
 
-use super::actions::{Action, Asset, Outcome, PolicyVariant, Recipient, Tick};
+use super::actions::{Action, Asset, Outcome, PolicyVariant, Recipient, Scope, Tick};
 use super::{NUM_BUCKETS, SLOT_LEN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub struct ModelMandate {
     /// contract refuses to re-grant the live key) and the previous key is the
     /// stale one.
     pub key: u8,
+    /// Granted beyond the global policy; see [`Scope`].
+    pub scope: Scope,
 }
 
 /// A dispatched request whose callback has not been delivered.
@@ -89,6 +91,7 @@ impl Model {
                 epoch: 1,
                 revoked: false,
                 key: 0,
+                scope: Scope::Unscoped,
             },
             last_epoch: 1,
             policy: [Policy::of(PolicyVariant::Default); 2],
@@ -158,8 +161,22 @@ impl Model {
             return Err(DenyReason::PerTxCapExceeded);
         }
         match self.effective(asset).checked_add(outlay) {
-            Some(total) if total <= policy.limit => Ok(()),
-            _ => Err(DenyReason::WindowLimitExceeded),
+            Some(total) if total <= policy.limit => {}
+            _ => return Err(DenyReason::WindowLimitExceeded),
+        }
+        // Only a request that passed every global check meets the mandate's
+        // scope, so a scope can only subtract from what the policy allows.
+        match self.mandate.scope {
+            Scope::NearOnly if asset != Asset::Near => Err(DenyReason::AssetOutOfScope),
+            Scope::DisallowedRecipientsOnly if to != Recipient::Disallowed => {
+                Err(DenyReason::RecipientOutOfScope)
+            }
+            Scope::AllowedRecipientsOnly if to != Recipient::Allowed => {
+                Err(DenyReason::RecipientOutOfScope)
+            }
+            Scope::CapTight if outlay > 40 => Err(DenyReason::PerTxCapExceeded),
+            Scope::CapLoose if outlay > 100 => Err(DenyReason::PerTxCapExceeded),
+            _ => Ok(()),
         }
     }
 
@@ -201,13 +218,14 @@ impl Model {
         1 - self.mandate.key
     }
 
-    pub fn grant(&mut self, expiry: u64) {
+    pub fn grant(&mut self, expiry: u64, scope: Scope) {
         self.last_epoch += 1;
         self.mandate = ModelMandate {
             expiry,
             epoch: self.last_epoch,
             revoked: false,
             key: self.stale_key(),
+            scope,
         };
     }
 
