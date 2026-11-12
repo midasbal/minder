@@ -14,6 +14,21 @@ pub enum AssetId {
     /// Native ETH on the EVM chain with this chain id. Paid out by signing a
     /// transaction, not by a NEAR transfer, so it has its own entry point.
     Evm(u64),
+    /// An ERC-20 token on the EVM chain with this chain id. An asset in its own
+    /// right: its own policy, caps, window, budget and reservations, all in the
+    /// token's base units. Paid by signing a `transfer` call the contract
+    /// builds, so it has its own entry point; the gas of that call is accounted
+    /// against the chain's native asset, `Evm(chain_id)`. In JSON the token is
+    /// a list of its 20 bytes.
+    Evm20 { chain_id: u64, token: [u8; 20] },
+}
+
+impl AssetId {
+    /// Whether this asset is paid by signing an EVM transaction rather than by
+    /// a NEAR transfer.
+    pub fn is_evm(&self) -> bool {
+        matches!(self, AssetId::Evm(_) | AssetId::Evm20 { .. })
+    }
 }
 
 #[near(serializers = [borsh, json])]
@@ -179,6 +194,26 @@ pub struct EvmConfig {
     pub max_fee_per_gas: U128,
     pub max_priority_fee_per_gas: U128,
     pub gas_limit: u64,
+    /// Gas limit of an ERC-20 `transfer` call, which costs more than a native
+    /// send. Mutable like the fees; what a token payment's gas is accounted at.
+    pub token_gas_limit: u64,
+}
+
+/// Default for [`EvmConfig::token_gas_limit`]: above what a plain or proxied
+/// token (USDC, USDT) spends on a `transfer`, which is about 50,000 to 65,000.
+pub const DEFAULT_TOKEN_GAS_LIMIT: u64 = 100_000;
+
+/// What `dry_run_evm_token` says about a token payment: the decision for each
+/// of its two legs, so a denial names the leg that caused it. The payment is
+/// allowed only if both are `Allow`.
+#[near(serializers = [json])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenPaymentDecision {
+    /// The token amount, against the token's own policy, the recipient
+    /// allowlist and the mandate's scope.
+    pub token: Decision,
+    /// The gas, against the chain's native ETH policy.
+    pub gas: Decision,
 }
 
 /// The JSON form of [`EvmConfig`], with the sender as a `0x` address rather
@@ -193,6 +228,7 @@ pub struct EvmConfigView {
     pub max_fee_per_gas: U128,
     pub max_priority_fee_per_gas: U128,
     pub gas_limit: u64,
+    pub token_gas_limit: u64,
 }
 
 impl From<&EvmConfig> for EvmConfigView {
@@ -205,6 +241,7 @@ impl From<&EvmConfig> for EvmConfigView {
             max_fee_per_gas: config.max_fee_per_gas,
             max_priority_fee_per_gas: config.max_priority_fee_per_gas,
             gas_limit: config.gas_limit,
+            token_gas_limit: config.token_gas_limit,
         }
     }
 }
@@ -222,7 +259,34 @@ impl EvmConfig {
             gas_limit: self.gas_limit,
             to,
             value,
+            data: Vec::new(),
         }
+    }
+
+    /// The transaction for `token.transfer(recipient, amount)` at `nonce`: sent
+    /// to the token with no ETH, the calldata built by
+    /// [`crate::evm::erc20_transfer_calldata`], at the token gas limit and the
+    /// configured fees. The only place a token transfer is assembled.
+    pub fn build_token_tx(
+        &self,
+        nonce: u64,
+        token: [u8; 20],
+        recipient: &[u8; 20],
+        amount: u128,
+    ) -> crate::evm::Eip1559Tx {
+        crate::evm::Eip1559Tx {
+            gas_limit: self.token_gas_limit,
+            data: crate::evm::erc20_transfer_calldata(recipient, amount),
+            ..self.build_tx(nonce, token, 0)
+        }
+    }
+
+    /// Worst-case wei the gas of a token transfer can cost. Saturates;
+    /// `set_evm_config` rejects configurations where it would.
+    pub fn token_fee_cost(&self) -> u128 {
+        self.max_fee_per_gas
+            .0
+            .saturating_mul(u128::from(self.token_gas_limit))
     }
 
     /// Worst-case wei the transaction can spend on fees. Saturates; `set_evm_config`

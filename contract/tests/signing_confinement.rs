@@ -30,8 +30,12 @@ use std::path::{Path, PathBuf};
 /// - `owner_evm_withdraw`: the owner's recovery and cancellation, outside
 ///   policy by design. It builds the transaction itself from the owner's
 ///   recipient, value and nonce and the configured chain and fees.
+/// - `request_evm_token_payment`: the agent's ERC-20 payment. The contract
+///   builds the `transfer` calldata itself (the selector, the padded recipient
+///   and the amount, nothing else) and policy approves both its legs first.
 const ALLOWED_SIGN_DISPATCH: &[(&str, &str)] = &[
     ("src/gate.rs", "request_evm_payment"),
+    ("src/gate.rs", "request_evm_token_payment"),
     ("src/gate.rs", "owner_evm_withdraw"),
 ];
 
@@ -652,6 +656,7 @@ fn only_the_listed_function_in_the_listed_file_is_allowed() {
     let name = |s: &str| Some(s.to_string());
     assert!(allowed("src/gate.rs", &name("request_evm_payment")));
     assert!(allowed("src/gate.rs", &name("owner_evm_withdraw")));
+    assert!(allowed("src/gate.rs", &name("request_evm_token_payment")));
     assert!(!allowed("src/gate.rs", &name("freeze")));
     // The callbacks and the argument builder are not dispatchers.
     assert!(!allowed("src/gate.rs", &name("on_owner_sign_complete")));

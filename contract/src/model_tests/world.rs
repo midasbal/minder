@@ -29,11 +29,12 @@ use crate::test_support::{
 use crate::types::{Decision, Status};
 use crate::{AssetId, MandateScope, Minder};
 
-use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, Scope, ASSETS};
+use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, Scope, ASSETS, ASSET_COUNT};
 use super::model::{Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
-    MAX_PRIORITY_FEE, NEAR_ALLOWED, NEAR_DISALLOWED, NUM_BUCKETS, T0, WINDOW_LEN,
+    MAX_PRIORITY_FEE, NEAR_ALLOWED, NEAR_DISALLOWED, NUM_BUCKETS, T0, TOKEN_ADDRESS, TOKEN_GAS,
+    TOKEN_GAS_LIMIT, WINDOW_LEN,
 };
 
 const OWNER: &str = "owner.near";
@@ -63,7 +64,10 @@ macro_rules! ensure {
 #[derive(Clone, Copy, Debug)]
 pub enum Observed {
     Allowed(Asset),
+    /// Denied on the transfer leg (or the only leg).
     Denied(Asset, crate::DenyReason),
+    /// A token payment whose transfer leg passed and whose gas leg was denied.
+    GasDenied(crate::DenyReason),
     Delivered(Asset, Outcome),
     Other,
 }
@@ -74,6 +78,7 @@ impl Observed {
         match self {
             Observed::Allowed(asset) => format!("Allowed({asset:?})"),
             Observed::Denied(asset, reason) => format!("Denied({asset:?}, {reason:?})"),
+            Observed::GasDenied(reason) => format!("GasDenied({reason:?})"),
             Observed::Delivered(asset, outcome) => format!("Delivered({asset:?}, {outcome:?})"),
             Observed::Other => "Other".to_string(),
         }
@@ -110,6 +115,7 @@ impl World {
             U128(MAX_FEE),
             U128(MAX_PRIORITY_FEE),
             Some(GAS_LIMIT),
+            Some(TOKEN_GAS_LIMIT),
         );
         minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None);
         World {
@@ -149,17 +155,14 @@ impl World {
             _ => None,
         };
         // What this step's delivery should do to the window total.
-        let delivered = delivery.map(|(index, outcome)| {
-            let pending = &model.queue[index];
-            (
-                pending.asset,
-                if outcome.books_spend() {
-                    pending.outlay
-                } else {
-                    0
-                },
-            )
-        });
+        let mut delivered = [0u128; ASSET_COUNT];
+        if let Some((index, outcome)) = delivery {
+            if outcome.books_spend() {
+                for (asset, amount) in model.queue[index].legs() {
+                    delivered[asset.index()] += amount;
+                }
+            }
+        }
         // The agent calls through its function-call key on the contract's own
         // account: the contract is the predecessor and the key is what tells
         // the agent from anyone else.
@@ -277,7 +280,17 @@ fn request(
     to: Recipient,
     stale_key: bool,
 ) -> Result<Observed, Violation> {
-    let predicted = model.decide(asset, outlay, to, stale_key);
+    // A token payment has two legs, each decided on its own: the transfer
+    // (token amount, recipient, scope) and the gas (native asset's policy).
+    // For every other asset there is only the transfer.
+    let transfer = model.decide(asset, outlay, to, stale_key);
+    let gas = (asset == Asset::Token).then(|| model.decide_gas(TOKEN_GAS, stale_key));
+    // The real path reports the first leg that denies, the transfer first.
+    let predicted = match (transfer, gas) {
+        (Err(reason), _) => Err((reason, false)),
+        (Ok(()), Some(Err(reason))) => Err((reason, true)),
+        (Ok(()), _) => Ok(()),
+    };
     // Monotonic revocation, from the independent ghost bookkeeping: once the
     // agent has lost authority nothing is approved, whatever `decide` says. A
     // key the mandate no longer names never has authority.
@@ -286,7 +299,7 @@ fn request(
         !must_deny || predicted.is_err(),
         "the model approves a request after authority was lost"
     );
-    let expected = match predicted {
+    let decision = |result: Result<(), crate::DenyReason>| match result {
         Ok(()) => Decision::Allow,
         Err(reason) => Decision::Deny(reason),
     };
@@ -297,19 +310,41 @@ fn request(
     } else {
         model.mandate.key
     });
-    let viewed = match asset {
-        Asset::Near => minder.dry_run(
-            agent.clone(),
-            AssetId::Near,
-            U128(outlay),
-            account(near_recipient(to)),
-        ),
-        Asset::Evm => minder.dry_run_evm(agent, evm_recipient(to).to_string(), U128(evm_value)),
-    };
-    ensure!(
-        viewed == expected,
-        "dry_run says {viewed:?}, the model expects {expected:?}"
-    );
+    match asset {
+        Asset::Near | Asset::Evm => {
+            let viewed = if asset == Asset::Near {
+                minder.dry_run(
+                    agent,
+                    AssetId::Near,
+                    U128(outlay),
+                    account(near_recipient(to)),
+                )
+            } else {
+                minder.dry_run_evm(agent, evm_recipient(to).to_string(), U128(evm_value))
+            };
+            ensure!(
+                viewed == decision(transfer),
+                "dry_run says {viewed:?}, the model expects {:?}",
+                decision(transfer)
+            );
+        }
+        Asset::Token => {
+            let viewed = minder.dry_run_evm_token(
+                agent,
+                TOKEN_ADDRESS.to_string(),
+                evm_recipient(to).to_string(),
+                U128(outlay),
+            );
+            let expected = crate::TokenPaymentDecision {
+                token: decision(transfer),
+                gas: decision(gas.expect("a token payment has a gas leg")),
+            };
+            ensure!(
+                viewed == expected,
+                "dry_run_evm_token says {viewed:?}, the model expects {expected:?}"
+            );
+        }
+    }
 
     let called = guarded(|| match asset {
         Asset::Near => {
@@ -322,6 +357,13 @@ fn request(
         Asset::Evm => {
             let _ = minder.request_evm_payment(evm_recipient(to).to_string(), U128(evm_value));
         }
+        Asset::Token => {
+            let _ = minder.request_evm_token_payment(
+                TOKEN_ADDRESS.to_string(),
+                evm_recipient(to).to_string(),
+                U128(outlay),
+            );
+        }
     });
 
     match (predicted, called) {
@@ -332,14 +374,29 @@ fn request(
         (Ok(()), Err(message)) => Err(Violation(format!(
             "the contract refused a request the model allows: {message}"
         ))),
-        (Err(reason), Err(message)) => {
+        (Err((reason, gas_leg)), Err(message)) => {
             ensure!(
                 message.contains(&format!("Denied: {reason:?}")),
                 "denied with the wrong reason: {message} (expected {reason:?})"
             );
-            Ok(Observed::Denied(asset, reason))
+            if asset == Asset::Token {
+                let leg = if gas_leg {
+                    "(gas, native ETH)"
+                } else {
+                    "(token transfer)"
+                };
+                ensure!(
+                    message.contains(leg),
+                    "denied on the wrong leg: {message} (expected {leg})"
+                );
+            }
+            Ok(if gas_leg {
+                Observed::GasDenied(reason)
+            } else {
+                Observed::Denied(asset, reason)
+            })
         }
-        (Err(reason), Ok(())) => Err(Violation(format!(
+        (Err((reason, _)), Ok(())) => Err(Violation(format!(
             "the contract approved a request the model denies with {reason:?}{}",
             if must_deny {
                 " (monotonic revocation broken: authority had been lost)"
@@ -361,6 +418,7 @@ fn dispatched(
 ) -> Result<(), Violation> {
     let receipts = get_created_receipts();
     let mut tx = None;
+    let mut gas = 0;
     match asset {
         Asset::Near => {
             let callback = function_call(&receipts, CONTRACT, "on_transfer_complete");
@@ -381,33 +439,61 @@ fn dispatched(
                 });
             ensure!(paid, "no native transfer of {outlay} to the recipient");
         }
-        Asset::Evm => {
+        Asset::Evm | Asset::Token => {
             let sign = function_call(&receipts, SIGNER, "sign");
             let callback = function_call(&receipts, CONTRACT, "on_sign_complete");
-            let (callback_asset, callback_outlay, built) =
-                <(AssetId, u128, Eip1559Tx)>::try_from_slice(&callback.raw_args)
+            let (reservations, built) =
+                <(Vec<(AssetId, u128)>, Eip1559Tx)>::try_from_slice(&callback.raw_args)
                     .map_err(|_| Violation("undecodable on_sign_complete arguments".to_string()))?;
-            ensure!(
-                callback_asset == AssetId::Evm(CHAIN_ID),
-                "wrong callback asset"
-            );
-            ensure!(
-                callback_outlay == outlay,
-                "callback outlay {callback_outlay}"
-            );
-            // The contract, not the caller, fixed everything but to and value.
-            let expected = Eip1559Tx {
-                chain_id: CHAIN_ID,
-                nonce: model.next_nonce,
-                max_priority_fee_per_gas: MAX_PRIORITY_FEE,
-                max_fee_per_gas: MAX_FEE,
-                gas_limit: GAS_LIMIT,
-                to: evm::parse_address(evm_recipient(to)).expect("fixture address"),
-                value: evm_value,
+            // The contract, not the caller, fixed everything but the recipient
+            // and the amount: owner-set fees, the contract's nonce, and for a
+            // token the transfer calldata, restated here byte by byte.
+            let (expected_reservations, expected) = if asset == Asset::Evm {
+                (
+                    vec![(asset_id(Asset::Evm), outlay)],
+                    Eip1559Tx {
+                        chain_id: CHAIN_ID,
+                        nonce: model.next_nonce,
+                        max_priority_fee_per_gas: MAX_PRIORITY_FEE,
+                        max_fee_per_gas: MAX_FEE,
+                        gas_limit: GAS_LIMIT,
+                        to: evm::parse_address(evm_recipient(to)).expect("fixture address"),
+                        value: evm_value,
+                        data: Vec::new(),
+                    },
+                )
+            } else {
+                gas = TOKEN_GAS;
+                let recipient = evm::parse_address(evm_recipient(to)).expect("fixture address");
+                let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
+                data.extend([0u8; 12]);
+                data.extend(recipient);
+                data.extend([0u8; 16]);
+                data.extend(outlay.to_be_bytes());
+                (
+                    vec![
+                        (asset_id(Asset::Token), outlay),
+                        (asset_id(Asset::Evm), TOKEN_GAS),
+                    ],
+                    Eip1559Tx {
+                        chain_id: CHAIN_ID,
+                        nonce: model.next_nonce,
+                        max_priority_fee_per_gas: MAX_PRIORITY_FEE,
+                        max_fee_per_gas: MAX_FEE,
+                        gas_limit: TOKEN_GAS_LIMIT,
+                        to: evm::parse_address(TOKEN_ADDRESS).expect("fixture address"),
+                        value: 0,
+                        data,
+                    },
+                )
             };
+            ensure!(
+                reservations == expected_reservations,
+                "the callback carries reservations {reservations:?}, expected {expected_reservations:?}"
+            );
             ensure!(built == expected, "built {built:?}, expected {expected:?}");
             // Hash integrity: what the signer is asked to sign is the hash of
-            // exactly that transaction.
+            // exactly that transaction, data included.
             ensure!(
                 sign.args["request"]["payload_v2"]["Ecdsa"]
                     == evm::hex_encode(&evm::signing_hash(&built)),
@@ -428,8 +514,14 @@ fn dispatched(
             tx = Some(built);
         }
     }
-    model.reserve(asset, outlay);
-    model.queue.push(Pending { asset, outlay, tx });
+    let pending = Pending {
+        asset,
+        outlay,
+        gas,
+        tx,
+    };
+    model.reserve_pending(&pending);
+    model.queue.push(pending);
     Ok(())
 }
 
@@ -443,9 +535,12 @@ fn deliver(
     let tx = pending.tx.clone();
     let called = guarded(|| match pending.asset {
         Asset::Near => minder.on_transfer_complete(AssetId::Near, U128(pending.outlay)),
-        Asset::Evm => minder.on_sign_complete(
-            AssetId::Evm(CHAIN_ID),
-            pending.outlay,
+        Asset::Evm | Asset::Token => minder.on_sign_complete(
+            pending
+                .legs()
+                .into_iter()
+                .map(|(asset, amount)| (asset_id(asset), amount))
+                .collect(),
             tx.expect("an EVM request carries its transaction"),
         ),
     });
@@ -463,7 +558,7 @@ fn deliver(
         .collect();
     match pending.asset {
         Asset::Near => ensure!(events.is_empty(), "a local settlement emitted an event"),
-        Asset::Evm => {
+        Asset::Evm | Asset::Token => {
             // The signed transaction is emitted iff the signature assembles and
             // recovers to the configured sender: only `Ok` delivers such a signature.
             ensure!(
@@ -510,17 +605,20 @@ fn deliver(
 
 // ---- Invariants ----
 
-/// `delivered` is the asset and amount a delivery in this step should have
-/// added to the window total (zero for a failed receipt).
+/// `delivered` is, per asset, what a delivery in this step should have added
+/// to the window total (zero for a failed receipt). A token payment adds to
+/// two assets.
 fn check_invariants(
     minder: &Minder,
     model: &Model,
-    delivered: Option<(Asset, u128)>,
-    live_before: [u128; 2],
+    delivered: [u128; ASSET_COUNT],
+    live_before: [u128; ASSET_COUNT],
 ) -> Result<(), Violation> {
-    let mut in_flight = [0u128; 2];
+    let mut in_flight = [0u128; ASSET_COUNT];
     for pending in &model.queue {
-        in_flight[pending.asset.index()] += pending.outlay;
+        for (asset, amount) in pending.legs() {
+            in_flight[asset.index()] += amount;
+        }
     }
     for asset in ASSETS {
         let i = asset.index();
@@ -573,10 +671,7 @@ fn check_invariants(
         // Spend appears only when a callback is delivered, and then by exactly
         // the delivered outlay. The clock is fixed within a step (an `Advance`
         // moves it before `live_before` is read), so nothing ages out here.
-        let added = match delivered {
-            Some((delivered_asset, amount)) if delivered_asset == asset => amount,
-            _ => 0,
-        };
+        let added = delivered[i];
         ensure!(
             live == live_before[i].saturating_add(added),
             "{asset:?}: spend went from {} to {live}, expected +{added}",
@@ -658,6 +753,10 @@ fn asset_id(asset: Asset) -> AssetId {
     match asset {
         Asset::Near => AssetId::Near,
         Asset::Evm => AssetId::Evm(CHAIN_ID),
+        Asset::Token => AssetId::Evm20 {
+            chain_id: CHAIN_ID,
+            token: evm::parse_address(TOKEN_ADDRESS).expect("fixture address"),
+        },
     }
 }
 
@@ -739,21 +838,23 @@ fn promise_result(pending: &Pending, outcome: Outcome) -> PromiseResult {
         (Asset::Near, Outcome::Ok) => PromiseResult::Successful(Vec::new()),
         // A local transfer that succeeded but returned data.
         (Asset::Near, _) => PromiseResult::Successful(vec![1, 2, 3]),
-        (Asset::Evm, Outcome::Ok) => PromiseResult::Successful(signature(pending, Signer::Sender)),
+        (Asset::Evm | Asset::Token, Outcome::Ok) => {
+            PromiseResult::Successful(signature(pending, Signer::Sender))
+        }
         // Well formed and genuine, over the right hash, but by a key that is not the sender.
-        (Asset::Evm, Outcome::OtherSigner) => {
+        (Asset::Evm | Asset::Token, Outcome::OtherSigner) => {
             PromiseResult::Successful(signature(pending, Signer::Other))
         }
-        (Asset::Evm, Outcome::WrongShape) => PromiseResult::Successful(
+        (Asset::Evm | Asset::Token, Outcome::WrongShape) => PromiseResult::Successful(
             json!({ "big_r": format!("02{R}"), "s": S, "recovery_id": 1 })
                 .to_string()
                 .into_bytes(),
         ),
-        (Asset::Evm, Outcome::Garbage) => {
+        (Asset::Evm | Asset::Token, Outcome::Garbage) => {
             PromiseResult::Successful(b"\xff\xfe not a signature".to_vec())
         }
         // A genuine signature padded past the 4096-byte read buffer.
-        (Asset::Evm, Outcome::Oversized) => {
+        (Asset::Evm | Asset::Token, Outcome::Oversized) => {
             let mut value: Value =
                 near_sdk::serde_json::from_slice(&signature(pending, Signer::Sender))
                     .expect("fixture signature is JSON");

@@ -54,6 +54,7 @@ fn armed_evm() -> Minder {
         U128(MAX_FEE),
         U128(MAX_PRIORITY_FEE),
         None,
+        None,
     );
     testing_env!(agent_context().build());
     minder
@@ -72,6 +73,7 @@ fn expected_tx(nonce: u64, value: u128) -> Eip1559Tx {
         gas_limit: GAS_LIMIT,
         to: recipient_bytes(),
         value,
+        data: Vec::new(),
     }
 }
 
@@ -114,7 +116,7 @@ fn settle(
         Default::default(),
         vec![result]
     );
-    minder.on_sign_complete(evm_asset(), outlay, expected_tx(nonce, value));
+    minder.on_sign_complete(vec![(evm_asset(), outlay)], expected_tx(nonce, value));
     let logs = get_logs();
     testing_env!(agent_context().build());
     logs
@@ -177,12 +179,11 @@ fn the_contract_sends_the_signer_a_hash_it_computed_itself() {
     assert_eq!(sign.deposit, NearToken::from_yoctonear(1));
     assert!(sign.gas >= Gas::from_tgas(15), "the signer demands 15 Tgas");
 
-    // The callback carries the asset, the accounted outlay and the exact
-    // transaction that was hashed, borsh-encoded.
+    // The callback carries the reservations (here the one asset and its accounted
+    // outlay) and the exact transaction that was hashed, borsh-encoded.
     let callback = function_call(&receipts, "minder.near", "on_sign_complete");
     assert!(callback.gas >= Gas::from_tgas(25));
-    let mut expected_args = near_sdk::borsh::to_vec(&evm_asset()).unwrap();
-    expected_args.extend(near_sdk::borsh::to_vec(&(1000 + FEE_COST)).unwrap());
+    let mut expected_args = near_sdk::borsh::to_vec(&vec![(evm_asset(), 1000 + FEE_COST)]).unwrap();
     expected_args.extend(near_sdk::borsh::to_vec(&expected_tx(0, 1000)).unwrap());
     assert_eq!(callback.raw_args, expected_args);
 }
@@ -355,6 +356,7 @@ fn configure(
         U128(fee),
         U128(tip),
         gas,
+        None,
     );
 }
 
@@ -421,6 +423,7 @@ fn fees_and_chain_can_change_but_the_signing_identity_cannot() {
             U128(5),
             U128(1),
             None,
+            None,
         );
     }));
     assert!(panic_message(new_sender).contains("cannot change once set"));
@@ -457,6 +460,7 @@ fn the_sender_must_be_a_usable_address() {
                 U128(1),
                 U128(1),
                 None,
+                None,
             )
         }));
         assert!(result.is_err(), "{label} must be rejected");
@@ -491,6 +495,7 @@ fn the_config_rejects_unusable_values() {
             0,
             U128(1),
             U128(1),
+            None,
             None
         )),
         "chain id 0"
@@ -680,6 +685,7 @@ fn a_sender_that_differs_from_the_signing_key_blocks_emission() {
         CHAIN_ID,
         U128(MAX_FEE),
         U128(MAX_PRIORITY_FEE),
+        None,
         None,
     );
     testing_env!(agent_context().build());
@@ -1234,6 +1240,7 @@ fn a_mismatched_sender_configuration_emits_nothing_for_the_owner() {
         U128(MAX_FEE),
         U128(MAX_PRIORITY_FEE),
         None,
+        None,
     );
     let _ = minder.owner_evm_withdraw(RECIPIENT.to_string(), U128(1000), U64(0));
     let tx = owner_tx(0, RECIPIENT, 1000);
@@ -1457,4 +1464,492 @@ fn the_evm_budget_counts_outlays_in_flight_and_binds_before_the_window() {
         U64(2),
         "a denied request takes no nonce"
     );
+}
+
+// ---- ERC-20 token payments ----
+
+/// USDC on Sepolia, the token of the fixture signatures.
+const TOKEN: &str = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
+/// 100000 gas at 2 gwei: what a token payment's gas is accounted at.
+const TOKEN_GAS: u128 = 200_000_000_000_000;
+const TOKEN_CAP: u128 = 5_000;
+const TOKEN_WINDOW: u128 = 8_000;
+
+fn token_bytes() -> [u8; 20] {
+    evm::parse_address(TOKEN).unwrap()
+}
+
+fn token_asset() -> AssetId {
+    AssetId::Evm20 {
+        chain_id: CHAIN_ID,
+        token: token_bytes(),
+    }
+}
+
+/// `transfer(recipient, amount)` calldata written out as hex text, the way the
+/// ABI lays it out, independently of the code that builds it. Equal to viem's
+/// `encodeFunctionData` for these inputs, which the signed fixtures confirm.
+fn transfer_calldata(recipient: &str, amount: u128) -> Vec<u8> {
+    let text = format!("a9059cbb{:0>64}{:0>64x}", &recipient[2..], amount);
+    evm::hex_decode(&text).unwrap()
+}
+
+fn token_tx(nonce: u64, recipient: &str, amount: u128) -> Eip1559Tx {
+    Eip1559Tx {
+        gas_limit: 100_000,
+        to: token_bytes(),
+        value: 0,
+        data: transfer_calldata(recipient, amount),
+        ..expected_tx(nonce, 0)
+    }
+}
+
+/// Armed for native ETH as in `armed_evm`, with a room for token gas in the
+/// native policy and a policy for the token. The environment is left as the agent.
+fn armed_token() -> Minder {
+    let mut minder = armed_evm();
+    as_owner();
+    // Room for two token transfers' gas in the window, and each under the cap.
+    minder.set_asset_policy(
+        evm_asset(),
+        U128(4 * TOKEN_GAS / 2),
+        U128(5 * TOKEN_GAS / 2),
+        None,
+    );
+    minder.set_asset_policy(token_asset(), U128(TOKEN_CAP), U128(TOKEN_WINDOW), None);
+    testing_env!(agent_context().build());
+    minder
+}
+
+fn pay_token(minder: &mut Minder, recipient: &str, amount: u128) {
+    let _ =
+        minder.request_evm_token_payment(TOKEN.to_string(), recipient.to_string(), U128(amount));
+}
+
+/// The text a real token request panics with, or `None` if it is accepted.
+fn token_denial(minder: &mut Minder, recipient: &str, amount: u128) -> Option<String> {
+    catch_unwind(AssertUnwindSafe(|| pay_token(minder, recipient, amount)))
+        .err()
+        .map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        })
+}
+
+fn settle_token(
+    minder: &mut Minder,
+    amount: u128,
+    tx: Eip1559Tx,
+    result: PromiseResult,
+) -> Vec<String> {
+    testing_env!(
+        context("minder.near").build(),
+        near_sdk::test_vm_config(),
+        RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result]
+    );
+    minder.on_sign_complete(vec![(token_asset(), amount), (evm_asset(), TOKEN_GAS)], tx);
+    let logs = get_logs();
+    testing_env!(agent_context().build());
+    logs
+}
+
+fn token_view(minder: &Minder, recipient: &str, amount: u128) -> crate::TokenPaymentDecision {
+    minder.dry_run_evm_token(
+        agent_key(),
+        TOKEN.to_string(),
+        recipient.to_string(),
+        U128(amount),
+    )
+}
+
+#[test]
+fn the_firewall_builds_exactly_the_transfer_calldata_and_hashes_it() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 1000);
+
+    let receipts = get_created_receipts();
+    let tx = token_tx(0, RECIPIENT, 1000);
+    // To the token, no ETH, the transfer calldata: selector, padded recipient, amount.
+    assert_eq!(tx.to, token_bytes());
+    assert_eq!(tx.value, 0);
+    assert_eq!(tx.data.len(), 4 + 32 + 32);
+    assert_eq!(tx.data[..4], [0xa9, 0x05, 0x9c, 0xbb]);
+    assert_eq!(tx.data[4..16], [0u8; 12], "the recipient is left-padded");
+    assert_eq!(tx.data[16..36], recipient_bytes());
+    assert_eq!(tx.data[36..52], [0u8; 16]);
+    assert_eq!(tx.data[52..], 1000u128.to_be_bytes());
+
+    // The signer is sent the hash of exactly that transaction, data included,
+    // and the callback carries both reservations and the transaction.
+    let sign = function_call(&receipts, "signer.near", "sign");
+    assert_eq!(
+        sign.args["request"]["payload_v2"]["Ecdsa"],
+        evm::hex_encode(&evm::signing_hash(&tx))
+    );
+    let callback = function_call(&receipts, "minder.near", "on_sign_complete");
+    let mut expected =
+        near_sdk::borsh::to_vec(&vec![(token_asset(), 1000u128), (evm_asset(), TOKEN_GAS)])
+            .unwrap();
+    expected.extend(near_sdk::borsh::to_vec(&tx).unwrap());
+    assert_eq!(callback.raw_args, expected);
+    assert!(callback.gas >= Gas::from_tgas(25));
+
+    // The hash covers the data: the same transaction with other calldata hashes differently.
+    let other = Eip1559Tx {
+        data: transfer_calldata(RECIPIENT, 1001),
+        ..tx.clone()
+    };
+    assert_ne!(evm::signing_hash(&tx), evm::signing_hash(&other));
+}
+
+#[test]
+fn a_signed_token_transfer_is_emitted_byte_for_byte_as_viem_serializes_it() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 1000);
+    let tx = token_tx(0, RECIPIENT, 1000);
+    let logs = settle_token(
+        &mut minder,
+        1000,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Sender)),
+    );
+    let events = event_lines(&logs);
+    assert_eq!(events.len(), 1);
+    let reference = fixture_signature(&evm::signing_hash(&tx), Signer::Sender).raw_tx;
+    assert_eq!(
+        events[0]["data"][0]["raw_tx"],
+        format!("0x{}", evm::hex_encode(&reference))
+    );
+    assert_eq!(
+        events[0]["data"][0]["to"], TOKEN,
+        "the transaction goes to the token"
+    );
+    assert_eq!(events[0]["data"][0]["value"], "0");
+    // Both assets were booked, once each.
+    assert_eq!(reserved(&minder, token_asset()), 0);
+    assert_eq!(reserved(&minder, evm_asset()), 0);
+    assert_eq!(committed(&minder, token_asset()), 1000);
+    assert_eq!(committed(&minder, evm_asset()), TOKEN_GAS);
+}
+
+#[test]
+fn the_calldata_matches_viems_abi_encoding() {
+    // viem's encodeFunctionData(erc20Abi, transfer, [0x7099..., 1000000]).
+    assert_eq!(
+        evm::hex_encode(&evm::erc20_transfer_calldata(&recipient_bytes(), 1_000_000)),
+        "a9059cbb00000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c800000000000000000000000000000000000000000000000000000000000f4240"
+    );
+}
+
+#[test]
+fn a_transfer_over_the_token_cap_is_denied_on_the_token_leg() {
+    let mut minder = armed_token();
+    let denial = token_denial(&mut minder, RECIPIENT, TOKEN_CAP + 1).expect("denied");
+    assert!(
+        denial.contains("Denied: PerTxCapExceeded (token transfer)"),
+        "{denial}"
+    );
+    assert_eq!(
+        token_view(&minder, RECIPIENT, TOKEN_CAP + 1).token,
+        Decision::Deny(DenyReason::PerTxCapExceeded)
+    );
+    assert!(token_denial(&mut minder, RECIPIENT, TOKEN_CAP).is_none());
+    // Nothing was reserved or numbered by the denial.
+    assert_eq!(reserved(&minder, token_asset()), TOKEN_CAP);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(1));
+}
+
+#[test]
+fn gas_that_would_exceed_the_native_policy_is_denied_on_the_gas_leg() {
+    let mut minder = armed_token();
+    as_owner();
+    // A native cap below one transfer's gas.
+    minder.set_asset_policy(evm_asset(), U128(TOKEN_GAS - 1), U128(10 * TOKEN_GAS), None);
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(
+        denial.contains("Denied: PerTxCapExceeded (gas, native ETH)"),
+        "{denial}"
+    );
+    let view = token_view(&minder, RECIPIENT, 1000);
+    assert_eq!(view.token, Decision::Allow, "the token leg is fine");
+    assert_eq!(view.gas, Decision::Deny(DenyReason::PerTxCapExceeded));
+    assert_eq!(
+        reserved(&minder, token_asset()),
+        0,
+        "neither leg is reserved"
+    );
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(0));
+}
+
+#[test]
+fn a_token_transfer_with_no_native_policy_is_denied_clearly() {
+    let mut minder = armed_token();
+    as_owner();
+    minder.remove_asset_policy(evm_asset());
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(
+        denial.contains("needs a native ETH policy for its gas"),
+        "{denial}"
+    );
+    assert_eq!(
+        token_view(&minder, RECIPIENT, 1000).gas,
+        Decision::Deny(DenyReason::AssetNotAllowed)
+    );
+    assert_eq!(reserved(&minder, token_asset()), 0);
+}
+
+#[test]
+fn a_token_without_a_policy_is_denied() {
+    let mut minder = armed_token();
+    as_owner();
+    minder.remove_asset_policy(token_asset());
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1000).expect("denied");
+    assert!(
+        denial.contains("Denied: AssetNotAllowed (token transfer)"),
+        "{denial}"
+    );
+}
+
+#[test]
+fn the_decoded_recipient_must_be_on_the_evm_allowlist() {
+    let mut minder = armed_token();
+    let denial = token_denial(&mut minder, NOT_ALLOWLISTED, 1000).expect("denied");
+    assert!(
+        denial.contains("Denied: RecipientNotAllowed (token transfer)"),
+        "{denial}"
+    );
+    assert_eq!(
+        token_view(&minder, NOT_ALLOWLISTED, 1000).token,
+        Decision::Deny(DenyReason::RecipientNotAllowed)
+    );
+    assert_eq!(reserved(&minder, token_asset()), 0);
+}
+
+#[test]
+fn the_mandate_scope_applies_to_the_token_and_the_recipient_but_not_to_the_gas() {
+    use crate::MandateScope;
+    let mut minder = armed_token();
+    as_owner();
+    minder.set_evm_recipient(NOT_ALLOWLISTED.to_string(), true);
+    // Only the token, only the first recipient. The native asset is not in scope.
+    minder.grant_mandate(
+        other_key(),
+        U64(u64::MAX),
+        Some(MandateScope {
+            allowed_assets: Some(vec![token_asset()]),
+            allowed_evm_recipients: Some(vec![RECIPIENT.to_string()]),
+            per_tx_cap: Some(U128(2000)),
+            ..MandateScope::default()
+        }),
+    );
+    testing_env!(agent_context_for(other_key()).build());
+    let view = |to: &str, amount: u128| {
+        minder.dry_run_evm_token(other_key(), TOKEN.to_string(), to.to_string(), U128(amount))
+    };
+    // In scope: allowed, and the gas leg is not refused for the native asset being out of scope.
+    let allowed = view(RECIPIENT, 2000);
+    assert_eq!(
+        (allowed.token, allowed.gas),
+        (Decision::Allow, Decision::Allow)
+    );
+    assert_eq!(
+        view(NOT_ALLOWLISTED, 1000).token,
+        Decision::Deny(DenyReason::RecipientOutOfScope)
+    );
+    assert_eq!(
+        view(RECIPIENT, 2001).token,
+        Decision::Deny(DenyReason::PerTxCapExceeded),
+        "the mandate's cap, in token units"
+    );
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ =
+            minder.request_evm_token_payment(TOKEN.to_string(), RECIPIENT.to_string(), U128(2000));
+    }))
+    .is_ok());
+
+    // A scope that leaves the token out refuses it.
+    as_owner();
+    minder.revoke_mandate();
+    minder.grant_mandate(
+        agent_key(),
+        U64(u64::MAX),
+        Some(MandateScope {
+            allowed_assets: Some(vec![evm_asset()]),
+            ..MandateScope::default()
+        }),
+    );
+    testing_env!(agent_context().build());
+    assert_eq!(
+        token_view(&minder, RECIPIENT, 1000).token,
+        Decision::Deny(DenyReason::AssetOutOfScope)
+    );
+}
+
+#[test]
+fn both_reservations_are_made_together_and_the_second_request_sees_them() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 3000);
+    assert_eq!(reserved(&minder, token_asset()), 3000);
+    assert_eq!(reserved(&minder, evm_asset()), TOKEN_GAS);
+    // The token window (8000) has room for 5000 more, but the first request's
+    // reservation is already counted against the per-transaction cap, not the window:
+    pay_token(&mut minder, RECIPIENT, 5000);
+    assert_eq!(reserved(&minder, token_asset()), 8000);
+    // The token window is now full, before anything has settled.
+    let denial = token_denial(&mut minder, RECIPIENT, 1).expect("denied");
+    assert!(
+        denial.contains("Denied: WindowLimitExceeded (token transfer)"),
+        "{denial}"
+    );
+    // And the gas of the two in flight fills the native window (2.5 transfers' worth).
+    as_owner();
+    minder.set_asset_policy(token_asset(), U128(TOKEN_CAP), U128(1_000_000), None);
+    testing_env!(agent_context().build());
+    let denial = token_denial(&mut minder, RECIPIENT, 1).expect("denied");
+    assert!(
+        denial.contains("Denied: WindowLimitExceeded (gas, native ETH)"),
+        "{denial}"
+    );
+    assert_eq!(
+        minder.get_evm_nonce(CHAIN_ID),
+        U64(2),
+        "only two nonces were taken"
+    );
+}
+
+#[test]
+fn a_successful_receipt_books_both_assets_and_a_failed_one_releases_both_and_books_none() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 1000);
+    pay_token(&mut minder, RECIPIENT, 2000);
+    let (first, second) = (token_tx(0, RECIPIENT, 1000), token_tx(1, RECIPIENT, 2000));
+
+    let failed = settle_token(&mut minder, 1000, first, PromiseResult::Failed);
+    assert!(event_lines(&failed).is_empty());
+    assert_eq!(
+        reserved(&minder, token_asset()),
+        2000,
+        "one released, exactly once"
+    );
+    assert_eq!(reserved(&minder, evm_asset()), TOKEN_GAS);
+    assert_eq!(committed(&minder, token_asset()), 0);
+    assert_eq!(committed(&minder, evm_asset()), 0);
+
+    let signed = settle_token(
+        &mut minder,
+        2000,
+        second.clone(),
+        PromiseResult::Successful(signer_response_for(&second, Signer::Sender)),
+    );
+    assert_eq!(event_lines(&signed).len(), 1);
+    assert_eq!(reserved(&minder, token_asset()), 0);
+    assert_eq!(reserved(&minder, evm_asset()), 0);
+    assert_eq!(committed(&minder, token_asset()), 2000);
+    assert_eq!(committed(&minder, evm_asset()), TOKEN_GAS);
+}
+
+#[test]
+fn a_token_transfer_signed_by_another_key_is_booked_on_both_assets_but_not_emitted() {
+    let mut minder = armed_token();
+    pay_token(&mut minder, RECIPIENT, 1000);
+    let tx = token_tx(0, RECIPIENT, 1000);
+    let logs = settle_token(
+        &mut minder,
+        1000,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Other)),
+    );
+    assert!(
+        event_lines(&logs).is_empty(),
+        "authenticity still gates emission"
+    );
+    assert!(logs.iter().any(|l| l.contains("authenticity failure")));
+    // G1: the receipt succeeded, so the spend is booked on both legs.
+    assert_eq!(committed(&minder, token_asset()), 1000);
+    assert_eq!(committed(&minder, evm_asset()), TOKEN_GAS);
+    assert_eq!(
+        reserved(&minder, token_asset()) + reserved(&minder, evm_asset()),
+        0
+    );
+}
+
+#[test]
+fn a_native_payment_is_unchanged_by_token_support() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000);
+    // One reservation, the outlay against the native asset, nothing against any token.
+    assert_eq!(reserved(&minder, evm_asset()), 1000 + FEE_COST);
+    assert_eq!(reserved(&minder, token_asset()), 0);
+    let tx = expected_tx(0, 1000);
+    assert!(tx.data.is_empty());
+    let logs = settle(
+        &mut minder,
+        1000 + FEE_COST,
+        0,
+        1000,
+        PromiseResult::Successful(valid_signature()),
+    );
+    assert_eq!(event_lines(&logs).len(), 1);
+    assert_eq!(committed(&minder, evm_asset()), 1000 + FEE_COST);
+}
+
+#[test]
+fn token_payments_share_the_nonce_counter_with_native_payments() {
+    let mut minder = armed_token();
+    request(&mut minder, 1000);
+    pay_token(&mut minder, RECIPIENT, 1000);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(2));
+    let sign = get_created_receipts()
+        .iter()
+        .filter(|r| r.receiver_id == account("signer.near"))
+        .count();
+    assert_eq!(sign, 2);
+}
+
+#[test]
+fn the_token_gas_limit_is_configurable_and_must_be_positive() {
+    let mut minder = armed_token();
+    as_owner();
+    let reconfigure = |minder: &mut Minder, token_gas: u64| {
+        catch_unwind(AssertUnwindSafe(|| {
+            minder.set_evm_config(
+                account("signer.near"),
+                "minder-evm-1".to_string(),
+                test_sender_hex(),
+                CHAIN_ID,
+                U128(MAX_FEE),
+                U128(MAX_PRIORITY_FEE),
+                None,
+                Some(token_gas),
+            )
+        }))
+    };
+    assert!(reconfigure(&mut minder, 0).is_err(), "zero is refused");
+    assert!(reconfigure(&mut minder, 65_000).is_ok());
+    assert_eq!(minder.get_evm_config().unwrap().token_gas_limit, 65_000);
+    // The gas a payment reserves follows it.
+    testing_env!(agent_context().build());
+    pay_token(&mut minder, RECIPIENT, 1000);
+    assert_eq!(reserved(&minder, evm_asset()), 65_000 * MAX_FEE);
+}
+
+#[test]
+fn the_native_entry_points_refuse_token_assets() {
+    let mut minder = armed_token();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.request_local_transfer(token_asset(), U128(1), account("bob.near"));
+    }));
+    assert!(panic_message(result).contains("request_evm_token_payment"));
+    as_owner();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.owner_withdraw(token_asset(), U128(1), account("bob.near"));
+    }));
+    assert!(panic_message(result).contains("request_evm_token_payment"));
 }

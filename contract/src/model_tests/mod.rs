@@ -45,6 +45,12 @@ pub(crate) const MAX_FEE: u128 = 5;
 pub(crate) const MAX_PRIORITY_FEE: u128 = 1;
 pub(crate) const GAS_LIMIT: u64 = 2;
 pub(crate) const FEE_COST: u128 = MAX_FEE * GAS_LIMIT as u128;
+/// The token used by token payments, and the gas limit of its `transfer`:
+/// a token payment's gas is `TOKEN_GAS_LIMIT * MAX_FEE` = 20 wei, accounted
+/// against the native asset's policy.
+pub(crate) const TOKEN_ADDRESS: &str = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
+pub(crate) const TOKEN_GAS_LIMIT: u64 = 4;
+pub(crate) const TOKEN_GAS: u128 = MAX_FEE * TOKEN_GAS_LIMIT as u128;
 
 pub(crate) const NEAR_ALLOWED: &str = "bob.near";
 pub(crate) const NEAR_DISALLOWED: &str = "mallory.near";
@@ -234,6 +240,52 @@ fn exhaustive_epoch_budgets() {
 }
 
 #[test]
+fn exhaustive_token_payments() {
+    // ERC-20 payments with their two legs: the token amount against the
+    // token's policy, recipient allowlist and scope, and the gas against the
+    // native policy, shared with native payments. Both are reserved together,
+    // both settle or release together, a tight native window or budget can
+    // refuse the gas of a transfer the token side allows, and a scope that
+    // excludes the token refuses it without refusing its gas.
+    let alphabet = [
+        request(Asset::Token, Amount::Mid),
+        request(Asset::Token, Amount::AtCap),
+        Action::Request {
+            asset: Asset::Token,
+            amount: Amount::Mid,
+            to: Recipient::Disallowed,
+        },
+        request(Asset::Evm, Amount::Mid),
+        Action::SetPolicy {
+            asset: Asset::Evm,
+            variant: PolicyVariant::Tight,
+        },
+        Action::SetPolicy {
+            asset: Asset::Token,
+            variant: PolicyVariant::Budget70,
+        },
+        Action::GrantMandate(Grant::Long, Scope::NearOnly),
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
+        deliver(Pick::Oldest, Outcome::Ok),
+        deliver(Pick::Newest, Outcome::Fail),
+    ];
+    let stats = run_exhaustive("token", &alphabet, DEPTH);
+    assert_covered(
+        &stats.coverage,
+        &[
+            "Allowed(Token)",
+            "Allowed(Evm)",
+            "Denied(Token, RecipientNotAllowed)",
+            "Denied(Token, AssetOutOfScope)",
+            "Denied(Token, MandateBudgetExceeded)",
+            "GasDenied(WindowLimitExceeded)",
+            "Delivered(Token, Ok)",
+            "Delivered(Token, Fail)",
+        ],
+    );
+}
+
+#[test]
 fn exhaustive_policy_changes_and_caps() {
     // The owner tightening and loosening limits under in-flight spend, caps,
     // and a recipient that is not allowlisted.
@@ -317,6 +369,12 @@ fn random_long_sequences() {
             "Denied(Near, RecipientOutOfScope)",
             "Denied(Near, MandateBudgetExceeded)",
             "Denied(Evm, MandateBudgetExceeded)",
+            "Allowed(Token)",
+            "Denied(Token, RecipientNotAllowed)",
+            "Denied(Token, AssetOutOfScope)",
+            "GasDenied(WindowLimitExceeded)",
+            "Delivered(Token, Ok)",
+            "Delivered(Token, Fail)",
             "Delivered(Near, Ok)",
             "Delivered(Near, Fail)",
             "Delivered(Evm, Ok)",

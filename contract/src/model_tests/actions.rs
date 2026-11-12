@@ -6,16 +6,22 @@ use super::FEE_COST;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asset {
     Near,
+    /// Native ETH.
     Evm,
+    /// An ERC-20 token on the same chain. A token payment has two legs: its
+    /// amount against this asset and its gas against `Evm`.
+    Token,
 }
 
-pub const ASSETS: [Asset; 2] = [Asset::Near, Asset::Evm];
+pub const ASSETS: [Asset; ASSET_COUNT] = [Asset::Near, Asset::Evm, Asset::Token];
+pub const ASSET_COUNT: usize = 3;
 
 impl Asset {
     pub fn index(self) -> usize {
         match self {
             Asset::Near => 0,
             Asset::Evm => 1,
+            Asset::Token => 2,
         }
     }
 }

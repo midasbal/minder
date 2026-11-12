@@ -18,7 +18,7 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(process.cwd() + '/');
-const { serializeTransaction, keccak256, toBytes } = require('viem');
+const { serializeTransaction, keccak256, toBytes, encodeFunctionData, erc20Abi } = require('viem');
 const { sign, privateKeyToAccount } = require('viem/accounts');
 
 const PINNED_VIEM = '2.57.16';
@@ -69,6 +69,31 @@ const scenarios = [
   },
 ];
 
+// ERC-20 token transfers: what request_evm_token_payment builds. The calldata
+// is viem's ABI encoding of transfer(recipient, amount), independent of the
+// contract's hand-built bytes. The token is USDC on Sepolia.
+const TOKEN = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238';
+const EVM_ALLOWED = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+const transferData = (to, amount) => encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] });
+const tokenScenarios = [
+  {
+    // the gate unit tests and the sandbox: the default token gas limit of 100000
+    name: 'token-unit-and-sandbox',
+    base: { chainId: 11155111n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2_000_000_000n, gas: 100000n },
+    recipients: [EVM_ALLOWED],
+    amounts: [1000n, 2000n],
+    nonces: [0n, 1n, 2n, 3n, 4n],
+  },
+  {
+    // the model harness: tiny fees, a token gas limit of 4, amounts at, below and over the cap
+    name: 'token-model-harness',
+    base: { chainId: 5n, maxPriorityFeePerGas: 1n, maxFeePerGas: 5n, gas: 4n },
+    recipients: [EVM_ALLOWED],
+    amounts: [30n, 50n, 51n],
+    nonces: Array.from({ length: 64 }, (_, i) => BigInt(i)),
+  },
+];
+
 const signatures = {};
 for (const scenario of scenarios) {
   for (const recipient of scenario.tos) {
@@ -90,6 +115,23 @@ for (const scenario of scenarios) {
   }
 }
 
+for (const scenario of tokenScenarios) {
+  for (const recipient of scenario.recipients) {
+    for (const nonce of scenario.nonces) {
+      for (const amount of scenario.amounts) {
+        const tx = { type: 'eip1559', ...scenario.base, to: TOKEN, nonce, value: 0n, data: transferData(recipient, amount), accessList: [] };
+        const hash = keccak256(serializeTransaction(tx));
+        const entry = {};
+        for (const [name, privateKey] of Object.entries(keys)) {
+          const { r, s, yParity } = await sign({ hash, privateKey });
+          entry[name] = { r, s, y_parity: yParity, raw_tx: serializeTransaction(tx, { r, s, yParity }) };
+        }
+        signatures[hash] = entry;
+      }
+    }
+  }
+}
+
 const header = {
   description:
     'Real signatures over the signing hashes the tests produce, by two fixed keys, with the signed serialization of each by viem. Keyed by the 0x signing hash. A is the configured sender; B is another signer.',
@@ -100,6 +142,15 @@ const header = {
     'A = keccak256("minder evm signing fixture key A v1"), B = keccak256("minder evm signing fixture key B v1"): derived from public strings, control no funds, not secrets',
   sender_a: addresses.A,
   sender_b: addresses.B,
+  token_scenarios: tokenScenarios.map((s) => ({
+    name: s.name,
+    chain_id: s.base.chainId.toString(),
+    token: TOKEN,
+    gas_limit: s.base.gas.toString(),
+    recipients: s.recipients,
+    amounts: s.amounts.map(String),
+    nonces: `${s.nonces[0]}..=${s.nonces[s.nonces.length - 1]}`,
+  })),
   scenarios: scenarios.map((s) => ({
     name: s.name,
     chain_id: s.base.chainId.toString(),

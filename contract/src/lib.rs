@@ -19,7 +19,7 @@ use near_sdk::{
 
 pub use types::{
     AssetId, AssetPolicy, Config, Decision, DenyReason, EpochSpend, EvmConfig, EvmConfigView,
-    Mandate, MandateScope, Status,
+    Mandate, MandateScope, Status, TokenPaymentDecision,
 };
 
 use policy::{EvalInput, RecipientRef};
@@ -38,10 +38,10 @@ const SETTLE_CALLBACK_GAS: Gas = Gas::from_tgas(15);
 /// The only methods the agent's access key may call, fixed here and never taken
 /// from a parameter. A function-call access key restricts the methods at the
 /// protocol level, before any contract code runs; this list is what makes the
-/// restriction exactly the two agent entry points. It is a comma-separated
+/// restriction exactly the three agent entry points. It is a comma-separated
 /// list, as the runtime takes it. A sandbox test reads the key back from the
 /// chain and compares it to this.
-const AGENT_METHODS: &str = "request_local_transfer,request_evm_payment";
+const AGENT_METHODS: &str = "request_local_transfer,request_evm_payment,request_evm_token_payment";
 
 /// The gas allowance of the agent's access key (0.25 NEAR). It is
 /// the most the key can spend on transaction fees in total, paid from this
@@ -50,7 +50,8 @@ const AGENT_METHODS: &str = "request_local_transfer,request_evm_payment";
 /// influence it and the owner's exposure from it is bounded and documented.
 const AGENT_KEY_ALLOWANCE: NearToken = NearToken::from_millinear(250);
 
-const LOCAL_ONLY: &str = "EVM assets are paid through request_evm_payment";
+const LOCAL_ONLY: &str =
+    "EVM assets are paid through request_evm_payment and request_evm_token_payment";
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -188,7 +189,7 @@ impl Minder {
 
     /// Replaces any existing mandate with a new one under a fresh epoch, and
     /// provisions `agent_key` as a function-call access key on this contract's
-    /// own account, restricted to the two agent methods and to a fixed gas
+    /// own account, restricted to the three agent methods and to a fixed gas
     /// allowance. This is the only way to restore authority after revocation or
     /// expiry.
     ///
@@ -469,14 +470,15 @@ impl Minder {
                 NearToken::from_yoctonear(1),
                 FT_TRANSFER_GAS,
             ),
-            AssetId::Evm(_) => env::panic_str(LOCAL_ONLY),
+            AssetId::Evm(_) | AssetId::Evm20 { .. } => env::panic_str(LOCAL_ONLY),
         }
     }
 
     /// The NEAR entry points handle NEAR and NEP-141 assets only; EVM assets
-    /// have no NEAR recipient and are paid through `request_evm_payment`.
+    /// (native ETH and ERC-20 tokens) have no NEAR recipient and are paid
+    /// through `request_evm_payment` and `request_evm_token_payment`.
     fn require_local(asset: &AssetId) {
-        require!(!matches!(asset, AssetId::Evm(_)), LOCAL_ONLY);
+        require!(!asset.is_evm(), LOCAL_ONLY);
     }
 
     /// The key that signed this call, if the call reached this contract from
@@ -597,8 +599,9 @@ impl Minder {
     }
 
     /// Gathers state and defers every decision to [`policy::evaluate`]. The
-    /// one place an `EvalInput` is built, whichever allowlist the recipient
-    /// came from.
+    /// one place an `EvalInput` is built (with [`Self::evaluate_gas`], which
+    /// differs only in the rules it applies), whichever allowlist the
+    /// recipient came from.
     fn evaluate_with(
         &self,
         caller_key: Option<&PublicKey>,
@@ -607,7 +610,29 @@ impl Minder {
         recipient: RecipientRef,
         recipient_allowed: bool,
     ) -> Decision {
-        policy::evaluate(&EvalInput {
+        policy::evaluate(&self.eval_input(caller_key, asset, amount, recipient, recipient_allowed))
+    }
+
+    /// The gas leg of a token payment: `gas` wei against the native asset's
+    /// policy. See [`policy::evaluate_gas`].
+    fn evaluate_gas(
+        &self,
+        caller_key: Option<&PublicKey>,
+        native: &AssetId,
+        gas: u128,
+    ) -> Decision {
+        policy::evaluate_gas(&self.eval_input(caller_key, native, gas, RecipientRef::None, true))
+    }
+
+    fn eval_input<'a>(
+        &'a self,
+        caller_key: Option<&'a PublicKey>,
+        asset: &'a AssetId,
+        amount: u128,
+        recipient: RecipientRef<'a>,
+        recipient_allowed: bool,
+    ) -> EvalInput<'a> {
+        EvalInput {
             status: self.config.status,
             mandate: self.mandate.as_ref(),
             now: env::block_timestamp(),
@@ -625,7 +650,7 @@ impl Minder {
                 self.epoch_committed(asset),
                 self.reserved_of(asset),
             ),
-        })
+        }
     }
 }
 

@@ -16,7 +16,11 @@ use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::{AccessKeyPermission, KeyType, NearToken, SecretKey};
 use near_workspaces::{Account, AccountId};
 
-const AGENT_METHODS: [&str; 2] = ["request_local_transfer", "request_evm_payment"];
+const AGENT_METHODS: [&str; 3] = [
+    "request_local_transfer",
+    "request_evm_payment",
+    "request_evm_token_payment",
+];
 
 /// What the runtime says when it refuses a transaction, or what the receipt
 /// says if it was accepted and failed. A refusal at the protocol level is an
@@ -107,7 +111,7 @@ async fn a_grant_puts_a_scoped_function_call_key_on_the_contract_account() {
     let AccessKeyPermission::FunctionCall(permission) = permission else {
         panic!("the agent key must be a function-call key, not full access");
     };
-    // The protocol-level scope: only the contract itself, only the two agent
+    // The protocol-level scope: only the contract itself, only the three agent
     // methods, and a fixed gas allowance that is never unlimited.
     assert_eq!(permission.receiver_id, f.contract.id().to_string());
     assert_eq!(permission.method_names, AGENT_METHODS);
@@ -136,7 +140,7 @@ async fn the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones(
         );
         refused += 1;
     }
-    // Owner methods, views, callbacks, init: everything except the two.
+    // Owner methods, views, callbacks, init: everything except the three.
     assert!(refused > 25, "only {refused} methods were exercised");
 
     // And no contract logic ran for any of them.

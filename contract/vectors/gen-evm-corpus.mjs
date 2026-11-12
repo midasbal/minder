@@ -9,12 +9,15 @@
 //   npm install viem@2.57.16
 //   node /path/to/contract/vectors/gen-evm-corpus.mjs > /path/to/contract/vectors/evm-corpus.json
 //
-// Shape under test: type-2 value transfer, empty data, empty access list.
-// Extend this when calldata is allowed.
+// Shape under test: type-2 transaction with an empty access list. Most cases
+// are value transfers with empty data; the last sections add calldata: ERC-20
+// transfer calls as request_evm_token_payment builds them (the calldata is
+// viem's ABI encoding, independent of the contract's hand-built bytes) and data
+// at the RLP length edges.
 import { createRequire } from 'node:module';
 
 const require = createRequire(process.cwd() + '/');
-const { serializeTransaction, keccak256, toBytes } = require('viem');
+const { serializeTransaction, keccak256, toBytes, encodeFunctionData, erc20Abi } = require('viem');
 const { sign } = require('viem/accounts');
 
 const PINNED_VIEM = '2.57.16';
@@ -134,7 +137,7 @@ function withField(tx, field, value) {
 const privateKey = keccak256(toBytes('minder evm corpus test key v1'));
 const cases = [];
 
-const asBase = (tx) => ({ ...tx, type: 'eip1559', data: '0x', accessList: [] });
+const asBase = (tx) => ({ ...tx, type: 'eip1559', data: tx.data ?? '0x', accessList: [] });
 
 function record(name, kind, tx, signature) {
   const base = asBase(tx);
@@ -150,6 +153,7 @@ function record(name, kind, tx, signature) {
       gas_limit: tx.gas.toString(),
       to: tx.to,
       value: tx.value.toString(),
+      data: tx.data ?? '0x',
     },
     unsigned,
     signing_hash: keccak256(unsigned),
@@ -287,6 +291,42 @@ for (const [sLabel, s] of Object.entries(lowS)) {
   }
 }
 
+// 8. ERC-20 transfer calls, as request_evm_token_payment builds them: to the
+//    token, zero value, the 68-byte transfer calldata. Every other field random.
+const transferData = (recipient, amount) => encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [recipient, amount] });
+const TOKEN_CASES = 300;
+for (let i = 0; i < TOKEN_CASES; i++) {
+  const tx = { ...randomTx(), value: 0n };
+  const recipient = '0x' + rng.bytes(20);
+  const amount = rng.bits(128);
+  await addSigned(`token/random/${String(i).padStart(4, '0')}`, 'token-transfer', { ...tx, data: transferData(recipient, amount) }, { mirror: i % 2 === 0 });
+}
+
+// 9. Token transfers at the edges: every amount width boundary (the calldata
+//    word is always 32 bytes, so the data length never changes), and recipients
+//    at the address extremes.
+const amountEdges = [0n, 1n, 127n, 128n, 255n, 256n, 2n ** 64n - 1n, 2n ** 64n, 2n ** 127n, U128_MAX];
+const recipientEdges = { zero: ZERO_ADDRESS, ones: ONES_ADDRESS, 'low-bit': '0x' + '00'.repeat(19) + '01', 'high-bit': '0x80' + '00'.repeat(19) };
+for (const [rLabel, recipient] of Object.entries(recipientEdges)) {
+  for (const amount of amountEdges) {
+    await addSigned(`token/edge/${rLabel}/${amount}`, 'token-transfer-edge', { ...randomTx(), value: 0n, data: transferData(recipient, amount) }, { mirror: false });
+  }
+}
+
+// 10. Data at the RLP string-length edges: empty, one byte below 0x80 (its own
+//     encoding), 0x80 (not), 55 and 56 bytes (the short and long string forms),
+//     and longer, with the transaction otherwise random.
+const dataBytes = (length, seed) => '0x' + Array.from({ length }, (_, i) => ((i * 7 + seed) & 0xff).toString(16).padStart(2, '0')).join('');
+const dataLengths = [0, 1, 2, 54, 55, 56, 57, 100, 255, 256, 1000];
+for (const length of dataLengths) {
+  for (const seed of [1, 0x7f]) {
+    await addSigned(`data/length-${length}/seed-${seed}`, 'data-length', { ...randomTx(), data: dataBytes(length, seed) }, { mirror: false });
+  }
+}
+for (const [label, data] of [['0x00', '0x00'], ['0x7f', '0x7f'], ['0x80', '0x80'], ['0xff', '0xff']]) {
+  await addSigned(`data/single-byte/${label}`, 'data-single-byte', { ...randomTx(), data }, { mirror: false });
+}
+
 // ---- Output ----
 
 const kinds = {};
@@ -296,7 +336,7 @@ const header = {
   description:
     'Differential corpus for src/evm.rs. For every case: viem\'s unsigned serialization, its keccak signing hash, and its signed serialization. ' +
     'Cases with high_s also give the high-s form of the same signature (s = n - s, y_parity flipped); the contract must reproduce the canonical signed bytes from it.',
-  tx_shape: 'EIP-1559 value transfer: empty data, empty access list',
+  tx_shape: 'EIP-1559, empty access list: value transfers with empty data, ERC-20 transfer calls, and data at the RLP length edges',
   viem: PINNED_VIEM,
   regenerate:
     'In a directory with `npm install viem@2.57.16`: node <repo>/contract/vectors/gen-evm-corpus.mjs > <repo>/contract/vectors/evm-corpus.json',

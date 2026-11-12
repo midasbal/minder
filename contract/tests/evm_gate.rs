@@ -40,6 +40,14 @@ const HASH_OWNER_CANCEL: &str = "7760e5f1f2353e980ecdf78f8821709fdc3347262f5dd2f
 // ... 1000 wei to the unallowed address at nonce 5, and the agent's payment at nonce 6.
 const HASH_OWNER_NONCE_5: &str = "8775d42074fe48ab63c545d123b85ad7d9eabbde1ce276be49b9414658f6f8b8";
 const HASH_AGENT_NONCE_6: &str = "8d45cd7aa9407c4649ac3163ca9519d674448dca44bd2efe0b38aa50f3085761";
+// viem's signing hashes for the agent's ERC-20 transfers of USDC (Sepolia) to
+// RECIPIENT: 1000 units at nonce 0 and 2000 at nonce 1, at the default token gas
+// limit of 100000. The calldata is viem's ABI encoding.
+const HASH_TOKEN_NONCE_0: &str = "457bff992d74e59ac0dc6b9fcae10b15efa6272f2a9674ef1fa4193a23631b85";
+const HASH_TOKEN_NONCE_1: &str = "3c15cb8ec54c0e0f027648d8a88cd17d53e5366b6ce2a2281fc58a9a82869b0b";
+const TOKEN: &str = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
+/// 100000 gas at 2 gwei: what a token payment's gas is accounted at.
+const TOKEN_GAS: u128 = 200_000_000_000_000;
 const NOT_ALLOWLISTED: &str = "0x00000000000000000000000000000000000000aa";
 /// Far over the per-transaction cap and the window limit.
 const HUGE: u128 = 5_000_000_000_000_000;
@@ -74,6 +82,8 @@ async fn armed_evm_with_sender(sender: &str) -> (Fixture, Contract) {
             HASH_OWNER_CANCEL,
             HASH_OWNER_NONCE_5,
             HASH_AGENT_NONCE_6,
+            HASH_TOKEN_NONCE_0,
+            HASH_TOKEN_NONCE_1,
         ],
     )
     .await;
@@ -773,6 +783,224 @@ async fn the_owner_callback_has_gas_to_spare() {
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
     println!("on_owner_sign_complete gas burnt: {burnt}");
+    assert!(
+        burnt < 12_500_000_000_000,
+        "under half the 25 Tgas reserve: {burnt}"
+    );
+}
+
+// ---- ERC-20 token payments ----
+
+/// The token as the `AssetId` JSON takes it: the chain and the token's 20 bytes.
+fn token_asset() -> Value {
+    let bytes: Vec<u8> = (0..20)
+        .map(|i| u8::from_str_radix(&TOKEN[2 + 2 * i..4 + 2 * i], 16).unwrap())
+        .collect();
+    json!({ "Evm20": { "chain_id": CHAIN_ID, "token": bytes } })
+}
+
+/// `armed_evm`, with room in the native policy for the gas of two token
+/// transfers (each 2e14) and a policy for the token itself.
+async fn armed_token() -> (Fixture, Contract) {
+    let (f, signer) = armed_evm().await;
+    f.set_policy(evm(), 400_000_000_000_000, 500_000_000_000_000)
+        .await;
+    f.set_policy(token_asset(), 5_000, 8_000).await;
+    (f, signer)
+}
+
+async fn pay_token(
+    f: &Fixture,
+    who: &near_workspaces::Account,
+    recipient: &str,
+    amount: u128,
+) -> ExecutionFinalResult {
+    who.call(f.contract.id(), "request_evm_token_payment")
+        .args_json(json!({ "token": TOKEN, "recipient": recipient, "amount": amount.to_string() }))
+        .gas(Gas::from_tgas(AGENT_TGAS))
+        .transact()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_agent_key_pays_a_token_the_contract_builds_and_both_assets_are_accounted() {
+    let (f, signer) = armed_token().await;
+    let result = pay_token(&f, &f.agent, RECIPIENT, 1000).await;
+    assert!(result.is_success(), "{result:?}");
+
+    // The signer was sent viem's hash of the transfer: to the token, no ETH, the
+    // calldata viem ABI-encodes, at the token gas limit.
+    let requests = signer_requests(&signer).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["hash"], HASH_TOKEN_NONCE_0);
+    // And the emitted transaction is viem's serialization of it, signed by the sender.
+    let events = events(&result);
+    assert_eq!(events.len(), 1);
+    let data = &events[0]["data"][0];
+    assert_eq!(data["raw_tx"], raw_tx(HASH_TOKEN_NONCE_0));
+    assert_eq!(data["to"], TOKEN);
+    assert_eq!(data["value"], "0");
+
+    // Dual-asset accounting: the amount against the token, the gas against ETH.
+    assert_eq!(f.reserved(token_asset()).await, 0);
+    assert_eq!(f.reserved(evm()).await, 0);
+    assert_eq!(f.live_spend(token_asset()).await, 1000);
+    assert_eq!(f.live_spend(evm()).await, TOKEN_GAS);
+    assert_eq!(nonce(&f).await, "1");
+}
+
+#[tokio::test]
+async fn an_in_flight_token_payment_holds_both_reservations_and_releases_both_when_it_fails() {
+    let (f, signer) = armed_token().await;
+    // The native window holds the gas of one token transfer (2e14), not two.
+    f.set_policy(evm(), 400_000_000_000_000, 300_000_000_000_000)
+        .await;
+    signer
+        .call("set_slow_hops")
+        .args_json(json!({ "hops": 6 }))
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    // 5000 at nonce 0 has no signature registered with the mock signer, so it
+    // fails when it comes back: its reservations must be released, not booked.
+    let first = f
+        .agent
+        .call(f.contract.id(), "request_evm_token_payment")
+        .args_json(json!({ "token": TOKEN, "recipient": RECIPIENT, "amount": "5000" }))
+        .gas(Gas::from_tgas(AGENT_TGAS))
+        .transact_async()
+        .await
+        .unwrap();
+
+    let mut seen = false;
+    for _ in 0..600 {
+        if f.reserved(token_asset()).await == 5000 {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seen, "never observed the in-flight reservation");
+    // Both legs are held while the signature is outstanding, nothing committed.
+    assert_eq!(f.reserved(evm()).await, TOKEN_GAS);
+    assert_eq!(f.live_spend(token_asset()).await, 0);
+    assert_eq!(f.live_spend(evm()).await, 0);
+
+    // The token window (8000) is counted with the 5000 in flight ...
+    assert_reverts(
+        pay_token(&f, &f.agent, RECIPIENT, 4000).await,
+        "Denied: WindowLimitExceeded (token transfer)",
+    );
+    // ... and so is the gas: the token side would allow 100, the native window
+    // cannot hold a second transfer's gas.
+    assert_reverts(
+        pay_token(&f, &f.agent, RECIPIENT, 100).await,
+        "Denied: WindowLimitExceeded (gas, native ETH)",
+    );
+    assert_eq!(nonce(&f).await, "1", "denied requests take no nonce");
+
+    let first = first.await.unwrap();
+    assert!(first.is_success(), "{first:?}");
+    assert!(logs_contain(&first, "not signed"));
+    // The failed receipt released both reservations and booked neither ...
+    assert_eq!(f.reserved(token_asset()).await, 0);
+    assert_eq!(f.reserved(evm()).await, 0);
+    assert_eq!(f.live_spend(token_asset()).await, 0);
+    assert_eq!(f.live_spend(evm()).await, 0);
+    // ... so the budget it held is available again: 2000 at nonce 1 is signed.
+    set_mode(&signer, "Sign").await;
+    let second = pay_token(&f, &f.agent, RECIPIENT, 2000).await;
+    assert!(second.is_success(), "{second:?}");
+    assert_eq!(
+        events(&second)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_TOKEN_NONCE_1)
+    );
+    assert_eq!(f.live_spend(token_asset()).await, 2000);
+    assert_eq!(f.live_spend(evm()).await, TOKEN_GAS);
+}
+
+#[tokio::test]
+async fn token_denials_name_the_leg_and_change_nothing() {
+    let (f, signer) = armed_token().await;
+    assert_reverts(
+        pay_token(&f, &f.agent, RECIPIENT, 5001).await,
+        "Denied: PerTxCapExceeded (token transfer)",
+    );
+    assert_reverts(
+        pay_token(&f, &f.agent, NOT_ALLOWLISTED, 100).await,
+        "Denied: RecipientNotAllowed (token transfer)",
+    );
+    // Gas above the native per-transaction cap.
+    f.set_policy(evm(), TOKEN_GAS - 1, 10 * TOKEN_GAS).await;
+    assert_reverts(
+        pay_token(&f, &f.agent, RECIPIENT, 100).await,
+        "Denied: PerTxCapExceeded (gas, native ETH)",
+    );
+    // And with no native policy at all, a clear message.
+    f.owner_ok("remove_asset_policy", json!({ "asset": evm() }))
+        .await;
+    assert_reverts(
+        pay_token(&f, &f.agent, RECIPIENT, 100).await,
+        "needs a native ETH policy for its gas",
+    );
+    // The view says the same, leg by leg.
+    let view: Value = f
+        .view(
+            "dry_run_evm_token",
+            json!({ "agent_key": f.agent_key, "token": TOKEN, "recipient": RECIPIENT, "amount": "100" }),
+        )
+        .await;
+    assert_eq!(view["token"], "Allow");
+    assert_eq!(view["gas"], json!({ "Deny": "AssetNotAllowed" }));
+
+    assert!(signer_requests(&signer).await.is_empty());
+    assert_eq!(nonce(&f).await, "0");
+    assert_eq!(f.reserved(token_asset()).await, 0);
+}
+
+#[tokio::test]
+async fn a_failing_signer_releases_both_legs_and_books_neither() {
+    let (f, signer) = armed_token().await;
+    set_mode(&signer, "Fail").await;
+    let result = pay_token(&f, &f.agent, RECIPIENT, 1000).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(&result, "not signed"));
+    assert_eq!(f.reserved(token_asset()).await, 0);
+    assert_eq!(f.reserved(evm()).await, 0);
+    assert_eq!(f.live_spend(token_asset()).await, 0);
+    assert_eq!(f.live_spend(evm()).await, 0);
+
+    // A signature by another key is booked on both legs (the receipt succeeded)
+    // but not emitted.
+    set_mode(&signer, "OtherSigner").await;
+    let result = pay_token(&f, &f.agent, RECIPIENT, 2000).await;
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(&result, "authenticity failure"));
+    assert_eq!(f.live_spend(token_asset()).await, 2000);
+    assert_eq!(f.live_spend(evm()).await, TOKEN_GAS);
+}
+
+#[tokio::test]
+async fn the_token_callback_has_gas_to_spare() {
+    let (f, _signer) = armed_token().await;
+    let result = pay_token(&f, &f.agent, RECIPIENT, 1000).await;
+    assert_eq!(events(&result).len(), 1);
+    let burnt = result
+        .receipt_outcomes()
+        .iter()
+        .find(|outcome| {
+            outcome
+                .logs
+                .iter()
+                .any(|line| line.starts_with("EVENT_JSON:"))
+        })
+        .map(|outcome| outcome.gas_burnt.as_gas())
+        .expect("the callback receipt emitted the event");
+    println!("token on_sign_complete gas burnt: {burnt}");
     assert!(
         burnt < 12_500_000_000_000,
         "under half the 25 Tgas reserve: {burnt}"

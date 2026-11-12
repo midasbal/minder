@@ -1,4 +1,5 @@
-//! EIP-1559 (type 2) transaction encoding for native ETH transfers.
+//! EIP-1559 (type 2) transaction encoding for native ETH transfers and for
+//! ERC-20 `transfer` calls.
 //!
 //! Pure functions over plain data: no contract state, no storage. The only
 //! host call is `env::keccak256_array`, which is deterministic. Everything is
@@ -12,7 +13,9 @@
 //!   recovery id itself, never `+27` and never `chain_id * 2 + 35`).
 //! - Signatures are normalized to low-s ([`normalize_s`]) before assembly,
 //!   because Ethereum rejects `s > n / 2` (EIP-2).
-//! - Data and access list are empty: this is a plain value transfer.
+//! - The access list is always empty. The data is empty for a native transfer,
+//!   and for an ERC-20 transfer it is exactly [`erc20_transfer_calldata`]: the
+//!   contract builds it and never relays calldata from anyone else.
 
 use near_sdk::{env, near};
 
@@ -31,7 +34,9 @@ const SECP256K1_HALF_ORDER: [u8; 32] = [
     0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
 ];
 
-/// An EIP-1559 native transfer: empty data, empty access list.
+/// An EIP-1559 transaction with an empty access list: a native transfer (empty
+/// `data`) or an ERC-20 transfer (`to` the token, zero `value`, `data` the
+/// `transfer` calldata).
 #[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eip1559Tx {
@@ -43,6 +48,31 @@ pub struct Eip1559Tx {
     pub to: [u8; 20],
     /// Value in wei.
     pub value: u128,
+    /// Calldata. Empty for a native transfer.
+    pub data: Vec<u8>,
+}
+
+/// The ERC-20 `transfer(address,uint256)` selector, `keccak256` of its
+/// signature's first four bytes. The only function the contract ever calls on
+/// a token.
+pub const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+
+/// Length of [`erc20_transfer_calldata`]: the selector and two 32-byte words.
+pub const ERC20_TRANSFER_CALLDATA_LEN: usize = 4 + 32 + 32;
+
+/// The calldata of `token.transfer(recipient, amount)`: the selector, the
+/// recipient left-padded to 32 bytes, and the amount as a 32-byte big-endian
+/// integer. `amount` is a `u128`, so the high 16 bytes of its word are zero.
+/// This is the only calldata the contract constructs: no other selector, and
+/// nothing is taken from a caller.
+pub fn erc20_transfer_calldata(recipient: &[u8; 20], amount: u128) -> Vec<u8> {
+    let mut data = Vec::with_capacity(ERC20_TRANSFER_CALLDATA_LEN);
+    data.extend_from_slice(&ERC20_TRANSFER_SELECTOR);
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(recipient);
+    data.extend_from_slice(&[0u8; 16]);
+    data.extend_from_slice(&amount.to_be_bytes());
+    data
 }
 
 /// The bytes that get signed over: `0x02 || rlp([...fields, data, access_list])`.
@@ -238,7 +268,7 @@ fn unsigned_fields(tx: &Eip1559Tx) -> Vec<u8> {
     fields.extend(rlp_uint(&tx.gas_limit.to_be_bytes()));
     fields.extend(rlp_bytes(&tx.to));
     fields.extend(rlp_uint(&tx.value.to_be_bytes()));
-    fields.extend(rlp_bytes(&[])); // data
+    fields.extend(rlp_bytes(&tx.data));
     fields.extend(rlp_list(&[])); // access list
     fields
 }
@@ -352,6 +382,7 @@ mod tests {
                     gas_limit: 21000,
                     to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
                     value: 100000000000000,
+                    data: Vec::new(),
                 },
                 r: "5b2fc0e1f6d4a7c98e3b1d2a4f5c6e7d8a9b0c1d2e3f405162738495a6b7c8d9",
                 s: "2a4d6f8091b3d5f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f",
@@ -370,6 +401,7 @@ mod tests {
                     gas_limit: 21000,
                     to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
                     value: 0,
+                    data: Vec::new(),
                 },
                 r: "0000a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e",
                 s: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -388,6 +420,7 @@ mod tests {
                     gas_limit: 256,
                     to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
                     value: 1,
+                    data: Vec::new(),
                 },
                 r: "0000000000000000000000000000000000000000000000000000000000000080",
                 s: "0000000000000000000000000000000000000000000000000000000000000001",
@@ -406,6 +439,7 @@ mod tests {
                     gas_limit: 21000,
                     to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
                     value: 79850778293499848189627010061,
+                    data: Vec::new(),
                 },
                 r: "00000000000000000000000000000000000000000000000000000000000000ff",
                 s: "0000000000000000000000000000000000000000000000000000000000000100",
@@ -424,6 +458,7 @@ mod tests {
                     gas_limit: 21000,
                     to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
                     value: 20441799243135961136544514575630,
+                    data: Vec::new(),
                 },
                 r: "00000000000000000000000000000000000000000000000000000000000000ff",
                 s: "0000000000000000000000000000000000000000000000000000000000000100",
@@ -442,6 +477,7 @@ mod tests {
                     gas_limit: 18446744073709551615,
                     to: hex20("ffffffffffffffffffffffffffffffffffffffff"),
                     value: 340282366920938463463374607431768211455,
+                    data: Vec::new(),
                 },
                 r: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 s: "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
@@ -449,6 +485,120 @@ mod tests {
                 unsigned: "02f86588ffffffffffffffff88ffffffffffffffff90ffffffffffffffffffffffffffffffff90ffffffffffffffffffffffffffffffff88ffffffffffffffff94ffffffffffffffffffffffffffffffffffffffff90ffffffffffffffffffffffffffffffff80c0",
                 signing_hash: "97195fa62dedecdd2c16545da71bc85b6e26b6f8436ac09724e8f3dc704b42d3",
                 signed: "02f8a888ffffffffffffffff88ffffffffffffffff90ffffffffffffffffffffffffffffffff90ffffffffffffffffffffffffffffffff88ffffffffffffffff94ffffffffffffffffffffffffffffffffffffffff90ffffffffffffffffffffffffffffffff80c001a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
+            },
+            Vector {
+                name: "erc20_transfer",
+                tx: Eip1559Tx {
+                    chain_id: 11155111,
+                    nonce: 3,
+                    max_priority_fee_per_gas: 1000000000,
+                    max_fee_per_gas: 30000000000,
+                    gas_limit: 100000,
+                    to: hex20("1c7d4b196cb0c7b01d743fbc6116a902379c7238"),
+                    value: 0,
+                    data: hex("a9059cbb00000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c800000000000000000000000000000000000000000000000000000000000f4240"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02f87183aa36a703843b9aca008506fc23ac00830186a0941c7d4b196cb0c7b01d743fbc6116a902379c723880b844a9059cbb00000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c800000000000000000000000000000000000000000000000000000000000f4240c0",
+                signing_hash: "7cd9f2ffb176e84a2dc300d0a1fbd9cb2cd5bc84b330efc0249b6d33b84cdc7c",
+                signed: "02f87783aa36a703843b9aca008506fc23ac00830186a0941c7d4b196cb0c7b01d743fbc6116a902379c723880b844a9059cbb00000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c800000000000000000000000000000000000000000000000000000000000f4240c08081ff820100",
+            },
+            Vector {
+                name: "erc20_transfer_max_amount",
+                tx: Eip1559Tx {
+                    chain_id: 1,
+                    nonce: 0,
+                    max_priority_fee_per_gas: 0,
+                    max_fee_per_gas: 7,
+                    gas_limit: 65000,
+                    to: hex20("1c7d4b196cb0c7b01d743fbc6116a902379c7238"),
+                    value: 0,
+                    data: hex("a9059cbb000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000ffffffffffffffffffffffffffffffff"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02f8640180800782fde8941c7d4b196cb0c7b01d743fbc6116a902379c723880b844a9059cbb000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000ffffffffffffffffffffffffffffffffc0",
+                signing_hash: "23a96f85b945c7b4ca222c92bfbf4acd447e851e5d11af195566b9f457f97bd0",
+                signed: "02f86a0180800782fde8941c7d4b196cb0c7b01d743fbc6116a902379c723880b844a9059cbb000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000ffffffffffffffffffffffffffffffffc08081ff820100",
+            },
+            Vector {
+                name: "data_one_byte_below_0x80",
+                tx: Eip1559Tx {
+                    chain_id: 1,
+                    nonce: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 30000,
+                    to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+                    value: 5,
+                    data: hex("7f"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02df010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c8057fc0",
+                signing_hash: "9535f635b34e9a635ace51bc5c6958edee6028481ce328110168cfbafe497dd6",
+                signed: "02e5010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c8057fc08081ff820100",
+            },
+            Vector {
+                name: "data_one_byte_0x80",
+                tx: Eip1559Tx {
+                    chain_id: 1,
+                    nonce: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 30000,
+                    to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+                    value: 5,
+                    data: hex("80"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02e0010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c8058180c0",
+                signing_hash: "6cb9c7bddd12b9cea892a2a9abe253989246fce421de936f73c550b60febc5ad",
+                signed: "02e6010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c8058180c08081ff820100",
+            },
+            Vector {
+                name: "data_55_bytes",
+                tx: Eip1559Tx {
+                    chain_id: 1,
+                    nonce: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 30000,
+                    to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+                    value: 5,
+                    data: hex("01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02f856010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c805b701080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747bc0",
+                signing_hash: "609c645a4909da70f83fbea9b36096a7b960eb54a2929ab74eb724a1f2db53c2",
+                signed: "02f85c010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c805b701080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747bc08081ff820100",
+            },
+            Vector {
+                name: "data_56_bytes",
+                tx: Eip1559Tx {
+                    chain_id: 1,
+                    nonce: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 30000,
+                    to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+                    value: 5,
+                    data: hex("01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b82"),
+                },
+                r: "00000000000000000000000000000000000000000000000000000000000000ff",
+                s: "0000000000000000000000000000000000000000000000000000000000000100",
+                y_parity: 0,
+                unsigned: "02f858010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c805b83801080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b82c0",
+                signing_hash: "d6367838a4366534f9a475f59c27c91b174bdcf56c150196c95767765ac80e0d",
+                signed: "02f85e010101028275309470997970c51812dc3a010c7d01b50e0d17dc79c805b83801080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b82c08081ff820100",
             },
         ]
     }
@@ -807,6 +957,7 @@ mod tests {
             gas_limit: 21_000,
             to: hex20("70997970c51812dc3a010c7d01b50e0d17dc79c8"),
             value: 1000,
+            data: Vec::new(),
         };
         let hash = signing_hash(&tx);
         let recovered = |signer| {

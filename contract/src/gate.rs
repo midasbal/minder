@@ -15,7 +15,9 @@ use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise, PromiseEr
 
 use crate::evm::{self, Eip1559Tx, EvmError, Signature};
 use crate::policy::RecipientRef;
-use crate::types::{AssetId, Decision, EvmConfig, EvmConfigView};
+use crate::types::{
+    AssetId, Decision, EvmConfig, EvmConfigView, TokenPaymentDecision, DEFAULT_TOKEN_GAS_LIMIT,
+};
 use crate::{page, Minder, MinderExt};
 
 /// Event names. An owner withdrawal is told apart from an agent payment, since
@@ -57,7 +59,9 @@ impl Minder {
     /// every signature is checked against. `sender` is this contract's own EVM
     /// address, the one the signer derives for this contract account and
     /// `derivation_path` (`0x` and 40 hex digits). Chain id and fees may be
-    /// changed. `gas_limit` defaults to 21000, a plain ETH transfer.
+    /// changed. `gas_limit` defaults to 21000, a plain ETH transfer;
+    /// `token_gas_limit` (the gas of an ERC-20 `transfer`, also changeable)
+    /// defaults to 100000.
     // The flat argument list is the call's JSON interface; grouping the fields
     // into one object would change it for every caller.
     #[allow(clippy::too_many_arguments)]
@@ -70,6 +74,7 @@ impl Minder {
         max_fee_per_gas: U128,
         max_priority_fee_per_gas: U128,
         gas_limit: Option<u64>,
+        token_gas_limit: Option<u64>,
     ) {
         self.assert_owner();
         let config = EvmConfig {
@@ -80,9 +85,14 @@ impl Minder {
             max_fee_per_gas,
             max_priority_fee_per_gas,
             gas_limit: gas_limit.unwrap_or(DEFAULT_GAS_LIMIT),
+            token_gas_limit: token_gas_limit.unwrap_or(DEFAULT_TOKEN_GAS_LIMIT),
         };
         require!(config.chain_id > 0, "chain_id must be positive");
         require!(config.gas_limit > 0, "gas_limit must be positive");
+        require!(
+            config.token_gas_limit > 0,
+            "token_gas_limit must be positive"
+        );
         require!(
             config.sender != [0u8; 20],
             "sender must not be the zero address"
@@ -102,6 +112,14 @@ impl Minder {
                 .checked_mul(u128::from(config.gas_limit))
                 .is_some(),
             "max_fee_per_gas * gas_limit overflows"
+        );
+        require!(
+            config
+                .max_fee_per_gas
+                .0
+                .checked_mul(u128::from(config.token_gas_limit))
+                .is_some(),
+            "max_fee_per_gas * token_gas_limit overflows"
         );
         if let Some(existing) = &self.evm_config {
             require!(
@@ -253,22 +271,102 @@ impl Minder {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(SIGN_CALLBACK_GAS)
-                    .on_sign_complete(asset, outlay, tx),
+                    .on_sign_complete(vec![(asset, outlay)], tx),
             )
     }
 
-    /// Settles a payment started by `request_evm_payment`. Must never panic,
-    /// or the reservation would be stranded.
+    /// Pays `amount` of the ERC-20 `token` to `recipient` on the configured
+    /// chain, if policy allows, by getting the Chain Signatures contract to
+    /// sign a call to `token.transfer(recipient, amount)` that this contract
+    /// builds itself. The agent supplies only (token, recipient, amount): the
+    /// calldata is the `transfer` selector, the padded recipient and the amount,
+    /// and nothing else. No raw calldata is accepted and no other function is
+    /// ever called (no `approve`, no general decoding).
     ///
-    /// It releases the reservation first and unconditionally. Whether to book
-    /// the spend then depends only on whether the signer's receipt *succeeded*,
+    /// The firewall inspects what the transaction does, so a payment has two
+    /// legs, each evaluated and reserved before any promise exists:
+    /// - the **transfer**: `amount` in the token's units, against the token's
+    ///   own policy (an `Evm20` asset), the EVM recipient allowlist for the
+    ///   decoded `recipient`, and the mandate's scope;
+    /// - the **gas**: `token_gas_limit * max_fee_per_gas` wei, against the
+    ///   chain's native ETH policy, which must exist.
+    ///
+    /// A denial of either reverts with its reason and the leg. On allow both
+    /// are reserved; `on_sign_complete` releases both and, under the same G1
+    /// rule as a native payment, books both whenever the signer's receipt did
+    /// not fail.
+    pub fn request_evm_token_payment(
+        &mut self,
+        token: String,
+        recipient: String,
+        amount: U128,
+    ) -> Promise {
+        let config = self.require_evm_config();
+        let token_address = parse_address(&token);
+        let to = parse_address(&recipient);
+        let caller_key = Self::authenticated_key();
+        let token_asset = AssetId::Evm20 {
+            chain_id: config.chain_id,
+            token: token_address,
+        };
+        let gas_asset = AssetId::Evm(config.chain_id);
+        let gas = config.token_fee_cost();
+        require!(
+            self.policies.contains_key(&gas_asset),
+            "A token transfer needs a native ETH policy for its gas: none is set"
+        );
+
+        let recipient_allowed = self.evm_recipients.contains(&to);
+        if let Decision::Deny(reason) = self.evaluate_with(
+            caller_key.as_ref(),
+            &token_asset,
+            amount.0,
+            RecipientRef::Evm(&to),
+            recipient_allowed,
+        ) {
+            env::panic_str(&format!("Denied: {reason:?} (token transfer)"));
+        }
+        if let Decision::Deny(reason) = self.evaluate_gas(caller_key.as_ref(), &gas_asset, gas) {
+            env::panic_str(&format!("Denied: {reason:?} (gas, native ETH)"));
+        }
+
+        self.reserve(&token_asset, amount.0);
+        self.reserve(&gas_asset, gas);
+
+        let nonce = self.take_nonce(config.chain_id);
+        let tx = config.build_token_tx(nonce, token_address, &to, amount.0);
+        let hash = evm::signing_hash(&tx);
+
+        Promise::new(config.signer_id.clone())
+            .function_call(
+                "sign".to_string(),
+                signing_request_args(&config, &hash),
+                SIGN_DEPOSIT,
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(SIGN_CALLBACK_GAS)
+                    .on_sign_complete(vec![(token_asset, amount.0), (gas_asset, gas)], tx),
+            )
+    }
+
+    /// Settles a payment started by `request_evm_payment` or
+    /// `request_evm_token_payment`. Must never panic, or a reservation would be
+    /// stranded.
+    ///
+    /// `reservations` are the `(asset, amount)` pairs the request reserved: one
+    /// for a native payment, two for a token payment (the token amount and the
+    /// native gas). Each is released exactly once, first and unconditionally,
+    /// and each is booked or not by the same single rule. Whether to book the
+    /// spend depends only on whether the signer's receipt *succeeded*,
     /// never on whether this contract could read, size-fit, parse, assemble or
     /// authenticate what it returned:
     /// - **Receipt failed** (`PromiseError::Failed`, which includes the signer's
     ///   own timeout): nothing was signed. Nothing is booked.
     /// - **Receipt did not fail**: the signer produced output that sits in a
     ///   public receipt and may be broadcastable by anyone, whether or not we can
-    ///   use it. The outlay is booked unconditionally.
+    ///   use it. Every reserved amount is booked unconditionally.
     ///
     /// Emission is a separate, stricter matter. The raw signed transaction is
     /// emitted for an off-chain relayer only if the output assembles into a
@@ -284,11 +382,12 @@ impl Minder {
     #[private]
     pub fn on_sign_complete(
         &mut self,
-        #[serializer(borsh)] asset: AssetId,
-        #[serializer(borsh)] outlay: u128,
+        #[serializer(borsh)] reservations: Vec<(AssetId, u128)>,
         #[serializer(borsh)] tx: Eip1559Tx,
     ) {
-        self.release(&asset, outlay);
+        for (asset, amount) in &reservations {
+            self.release(asset, *amount);
+        }
 
         // Read bytes and parse them ourselves: `#[callback_result]` would
         // panic on a payload that does not deserialize. The size cap only
@@ -309,7 +408,9 @@ impl Minder {
 
         // Fail-safe: a receipt that did not fail may hold a usable signature.
         // Nothing below changes this: ecrecover decides emission, not booking.
-        self.record_spend(&asset, outlay);
+        for (asset, amount) in &reservations {
+            self.record_spend(asset, *amount);
+        }
 
         match self.authenticate(&tx, response.as_deref()) {
             Ok(raw_tx) => env::log_str(&signed_tx_event(PAYMENT_EVENT, &tx, &raw_tx)),
@@ -334,6 +435,38 @@ impl Minder {
             RecipientRef::Evm(&to),
             self.evm_recipients.contains(&to),
         )
+    }
+
+    /// `dry_run` for token payments: what the holder of `agent_key` would get
+    /// from `request_evm_token_payment` right now, counting in-flight
+    /// reservations, for each of its two legs.
+    pub fn dry_run_evm_token(
+        &self,
+        agent_key: PublicKey,
+        token: String,
+        recipient: String,
+        amount: U128,
+    ) -> TokenPaymentDecision {
+        let config = self.require_evm_config();
+        let token_address = parse_address(&token);
+        let to = parse_address(&recipient);
+        TokenPaymentDecision {
+            token: self.evaluate_with(
+                Some(&agent_key),
+                &AssetId::Evm20 {
+                    chain_id: config.chain_id,
+                    token: token_address,
+                },
+                amount.0,
+                RecipientRef::Evm(&to),
+                self.evm_recipients.contains(&to),
+            ),
+            gas: self.evaluate_gas(
+                Some(&agent_key),
+                &AssetId::Evm(config.chain_id),
+                config.token_fee_cost(),
+            ),
+        }
     }
 
     pub fn get_evm_config(&self) -> Option<EvmConfigView> {
@@ -546,6 +679,7 @@ mod tests {
             gas_limit: 21_000,
             to: [0x11; 20],
             value: 1000,
+            data: Vec::new(),
         }
     }
 

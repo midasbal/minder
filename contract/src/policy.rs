@@ -11,6 +11,22 @@ use crate::types::{AssetId, AssetPolicy, Decision, DenyReason, Mandate, Status};
 pub enum RecipientRef<'a> {
     Near(&'a AccountId),
     Evm(&'a [u8; 20]),
+    /// No recipient: the gas leg of a token payment, which pays the network
+    /// and no one.
+    None,
+}
+
+/// Which part of a payment a request is being evaluated for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    /// The transfer itself: every check, including the recipient allowlist and
+    /// the mandate's scope.
+    Transfer,
+    /// The gas of a token transfer, paid in the chain's native asset: the same
+    /// authority and the native asset's global policy (cap, window, budget),
+    /// but no recipient and no scope. A scope limits what the agent may *move*;
+    /// gas is a cost, and the native policy is what bounds it.
+    Gas,
 }
 
 pub struct EvalInput<'a> {
@@ -53,13 +69,23 @@ pub fn effective_spend(committed_live: u128, reserved: u128) -> u128 {
 /// then its per-transaction cap). A scope therefore only ever subtracts: it
 /// can turn an allow into a deny, never the reverse.
 pub fn evaluate(input: &EvalInput) -> Decision {
-    match deny_reason(input) {
+    decision(deny_reason(input, Leg::Transfer))
+}
+
+/// The gas leg of a token payment: the checks of [`evaluate`] that do not
+/// concern a recipient or the mandate's scope, for the native asset's policy.
+pub fn evaluate_gas(input: &EvalInput) -> Decision {
+    decision(deny_reason(input, Leg::Gas))
+}
+
+fn decision(reason: Option<DenyReason>) -> Decision {
+    match reason {
         Some(reason) => Decision::Deny(reason),
         None => Decision::Allow,
     }
 }
 
-fn deny_reason(input: &EvalInput) -> Option<DenyReason> {
+fn deny_reason(input: &EvalInput, leg: Leg) -> Option<DenyReason> {
     if input.status == Status::Frozen {
         return Some(DenyReason::Frozen);
     }
@@ -80,7 +106,7 @@ fn deny_reason(input: &EvalInput) -> Option<DenyReason> {
     let Some(policy) = input.policy else {
         return Some(DenyReason::AssetNotAllowed);
     };
-    if !input.recipient_allowed {
+    if leg == Leg::Transfer && !input.recipient_allowed {
         return Some(DenyReason::RecipientNotAllowed);
     }
     if input.amount > policy.per_tx_cap.0 {
@@ -100,7 +126,10 @@ fn deny_reason(input: &EvalInput) -> Option<DenyReason> {
             _ => return Some(DenyReason::MandateBudgetExceeded),
         }
     }
-    scope_denial(input, mandate)
+    match leg {
+        Leg::Transfer => scope_denial(input, mandate),
+        Leg::Gas => None,
+    }
 }
 
 /// The mandate's scope, applied to a request that passed every global check
@@ -127,6 +156,8 @@ fn scope_denial(input: &EvalInput, mandate: &Mandate) -> Option<DenyReason> {
                 .as_ref()
                 .is_some_and(|allowed| !allowed.contains(&address))
         }
+        // A transfer always has a recipient.
+        RecipientRef::None => false,
     };
     if recipient_out_of_scope {
         return Some(DenyReason::RecipientOutOfScope);

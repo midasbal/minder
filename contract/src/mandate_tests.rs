@@ -101,7 +101,8 @@ fn a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods() {
             receiver: "minder.near".to_string(),
             methods: vec![
                 "request_local_transfer".to_string(),
-                "request_evm_payment".to_string()
+                "request_evm_payment".to_string(),
+                "request_evm_token_payment".to_string()
             ],
             // A fixed, limited gas allowance: never unlimited.
             allowance: Some(NearToken::from_millinear(250)),
@@ -123,7 +124,7 @@ fn the_key_can_reach_only_methods_that_exist_on_the_contract() {
             "{method} is not a plain call method in the surface snapshot"
         );
     }
-    assert_eq!(crate::AGENT_METHODS.split(',').count(), 2);
+    assert_eq!(crate::AGENT_METHODS.split(',').count(), 3);
 }
 
 #[test]
@@ -229,7 +230,8 @@ fn granting_after_a_revocation_provisions_a_fresh_key_under_a_new_epoch() {
             receiver: "minder.near".to_string(),
             methods: vec![
                 "request_local_transfer".to_string(),
-                "request_evm_payment".to_string()
+                "request_evm_payment".to_string(),
+                "request_evm_token_payment".to_string()
             ],
             allowance: Some(NearToken::from_millinear(250)),
         }]

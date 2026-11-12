@@ -13,6 +13,11 @@
 //!   `(s, y_parity)` and `try_assemble_signed` on it yields the same signed
 //!   bytes.
 //!
+//! - for every ERC-20 transfer case, `erc20_transfer_calldata` built from the
+//!   recipient and amount that viem's ABI encoder put in the data reproduces
+//!   viem's calldata byte for byte, and the transaction (data included) hashes
+//!   and serializes as viem does.
+//!
 //! It also asserts the corpus really contains the boundary cases it claims, so
 //! it cannot pass vacuously.
 
@@ -20,8 +25,8 @@ use std::collections::HashSet;
 use std::str::FromStr;
 
 use minder::evm::{
-    encode_signed, encode_unsigned, hex_decode, normalize_s, signing_hash, try_assemble_signed,
-    Eip1559Tx,
+    encode_signed, encode_unsigned, erc20_transfer_calldata, hex_decode, normalize_s, signing_hash,
+    try_assemble_signed, Eip1559Tx,
 };
 use near_sdk::serde_json::{self, Value};
 
@@ -93,6 +98,7 @@ fn load() -> (Value, Vec<Case>) {
                     gas_limit: number(&tx["gas_limit"]),
                     to: array(&tx["to"]),
                     value: number(&tx["value"]),
+                    data: bytes(&tx["data"]),
                 },
                 unsigned: bytes(&case["unsigned"]),
                 signing_hash: array(&case["signing_hash"]),
@@ -131,6 +137,26 @@ fn check(index: usize, case: &Case) -> Vec<String> {
         }
     };
 
+    if case.kind.starts_with("token-transfer") {
+        // The calldata the contract would build for the recipient and amount
+        // viem encoded is viem's own, byte for byte.
+        let data = &case.tx.data;
+        expect(data.len() == 68, "a token transfer's calldata is 68 bytes");
+        expect(
+            data[..4] == [0xa9, 0x05, 0x9c, 0xbb],
+            "the transfer selector",
+        );
+        let recipient: [u8; 20] = data[16..36].try_into().expect("20 bytes");
+        let amount = u128::from_be_bytes(data[52..68].try_into().expect("16 bytes"));
+        expect(
+            data[4..16] == [0u8; 12] && data[36..52] == [0u8; 16],
+            "viem pads the recipient and the amount with zeros",
+        );
+        expect(
+            erc20_transfer_calldata(&recipient, amount) == *data,
+            "erc20_transfer_calldata differs from viem's ABI encoding",
+        );
+    }
     expect(
         encode_unsigned(&case.tx) == case.unsigned,
         "encode_unsigned differs from viem",
@@ -229,6 +255,10 @@ fn corpus_really_contains_the_boundaries_it_claims() {
     assert!(count("boundary-signed-list-length") >= 50);
     assert!(count("normalize-edge") >= 20);
     assert!(cases.iter().filter(|case| case.high_s.is_some()).count() >= 500);
+    assert!(count("token-transfer") >= 300);
+    assert!(count("token-transfer-edge") >= 40);
+    assert!(count("data-length") >= 20);
+    assert!(count("data-single-byte") >= 4);
     assert!(cases.iter().any(|case| case.synthetic_signature));
     assert!(cases.iter().any(|case| !case.synthetic_signature));
 
@@ -253,6 +283,43 @@ fn corpus_really_contains_the_boundaries_it_claims() {
         u64::MAX as u128 + 1,
     ] {
         assert!(any(&|tx| tx.value == value), "no case with value {value}");
+    }
+
+    // Calldata: every RLP string-length edge (empty, a single byte below and at
+    // 0x80, 55 and 56 bytes, and longer), and token transfers at the amount
+    // edges (zero, one, the RLP single-byte boundary, 2^64, 2^127, the maximum).
+    for length in [0usize, 1, 54, 55, 56, 57, 255, 256, 1000] {
+        assert!(
+            cases.iter().any(|case| case.tx.data.len() == length),
+            "no case with {length} bytes of data"
+        );
+    }
+    for byte in [0x00u8, 0x7f, 0x80, 0xff] {
+        assert!(
+            cases.iter().any(|case| case.tx.data == [byte]),
+            "no case with the single data byte {byte:#x}"
+        );
+    }
+    let token_amount = |case: &Case| {
+        (case.kind == "token-transfer-edge")
+            .then(|| u128::from_be_bytes(case.tx.data[52..68].try_into().expect("16 bytes")))
+    };
+    for amount in [
+        0u128,
+        1,
+        127,
+        128,
+        255,
+        256,
+        u64::MAX as u128,
+        1 << 64,
+        1 << 127,
+        u128::MAX,
+    ] {
+        assert!(
+            cases.iter().any(|case| token_amount(case) == Some(amount)),
+            "no token transfer of {amount}"
+        );
     }
 
     // All-zero and all-ones addresses.

@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use crate::evm::Eip1559Tx;
 use crate::types::DenyReason;
 
-use super::actions::{Action, Asset, Outcome, PolicyVariant, Recipient, Scope, Tick};
+use super::actions::{Action, Asset, Outcome, PolicyVariant, Recipient, Scope, Tick, ASSET_COUNT};
 use super::{NUM_BUCKETS, SLOT_LEN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,8 +58,22 @@ pub struct ModelMandate {
 pub struct Pending {
     pub asset: Asset,
     pub outlay: u128,
+    /// For a token payment, the gas reserved against the native asset along
+    /// with `outlay` of the token; zero otherwise.
+    pub gas: u128,
     /// The transaction the contract built, for EVM requests.
     pub tx: Option<Eip1559Tx>,
+}
+
+impl Pending {
+    /// What this request reserved, per asset.
+    pub fn legs(&self) -> Vec<(Asset, u128)> {
+        let mut legs = vec![(self.asset, self.outlay)];
+        if self.asset == Asset::Token {
+            legs.push((Asset::Evm, self.gas));
+        }
+        legs
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,20 +83,20 @@ pub struct Model {
     /// Boot grants a mandate and nothing removes it, so there is always one.
     pub mandate: ModelMandate,
     pub last_epoch: u64,
-    pub policy: [Policy; 2],
+    pub policy: [Policy; ASSET_COUNT],
     /// Committed spend per asset as `(booked at, amount)`.
-    pub committed: [Vec<(u64, u128)>; 2],
-    pub reserved: [u128; 2],
+    pub committed: [Vec<(u64, u128)>; ASSET_COUNT],
+    pub reserved: [u128; ASSET_COUNT],
     /// The owner lowered this asset's limit below what was already counted;
     /// until it decays, `effective > limit` is expected for that asset.
-    pub lowered: [bool; 2],
+    pub lowered: [bool; ASSET_COUNT],
     /// The same for the lifetime budget: the owner set a budget below what the
     /// current grant has already used. Usage only falls when a new grant resets
     /// it, so it stays set until then (or until the budget is raised).
-    pub budget_lowered: [bool; 2],
+    pub budget_lowered: [bool; ASSET_COUNT],
     /// Committed spend per asset since the current mandate was granted. Unlike
     /// the window it never ages out; a new grant resets it.
-    pub epoch_committed: [u128; 2],
+    pub epoch_committed: [u128; ASSET_COUNT],
     pub next_nonce: u64,
     /// Every `(chain, nonce)` the contract has handed out, as observed in the
     /// transactions it built. History only: not part of the fingerprint.
@@ -107,12 +121,12 @@ impl Model {
                 scope: Scope::Unscoped,
             },
             last_epoch: 1,
-            policy: [Policy::of(PolicyVariant::Default); 2],
-            committed: [Vec::new(), Vec::new()],
-            reserved: [0; 2],
-            lowered: [false; 2],
-            budget_lowered: [false; 2],
-            epoch_committed: [0; 2],
+            policy: [Policy::of(PolicyVariant::Default); ASSET_COUNT],
+            committed: [Vec::new(), Vec::new(), Vec::new()],
+            reserved: [0; ASSET_COUNT],
+            lowered: [false; ASSET_COUNT],
+            budget_lowered: [false; ASSET_COUNT],
+            epoch_committed: [0; ASSET_COUNT],
             next_nonce: 0,
             issued: BTreeSet::new(),
             queue: Vec::new(),
@@ -162,35 +176,11 @@ impl Model {
         to: Recipient,
         stale_key: bool,
     ) -> Result<(), DenyReason> {
-        if self.frozen {
-            return Err(DenyReason::Frozen);
-        }
-        if self.mandate.revoked {
-            return Err(DenyReason::MandateRevoked);
-        }
-        if self.now >= self.mandate.expiry {
-            return Err(DenyReason::MandateExpired);
-        }
-        if stale_key {
-            return Err(DenyReason::NotAuthorized);
-        }
-        let policy = self.policy[asset.index()];
+        self.authority(stale_key)?;
         if to == Recipient::Disallowed {
             return Err(DenyReason::RecipientNotAllowed);
         }
-        if outlay > policy.cap {
-            return Err(DenyReason::PerTxCapExceeded);
-        }
-        match self.effective(asset).checked_add(outlay) {
-            Some(total) if total <= policy.limit => {}
-            _ => return Err(DenyReason::WindowLimitExceeded),
-        }
-        if let Some(budget) = policy.budget {
-            match self.epoch_usage(asset).checked_add(outlay) {
-                Some(total) if total <= budget => {}
-                _ => return Err(DenyReason::MandateBudgetExceeded),
-            }
-        }
+        self.limits(asset, outlay)?;
         // Only a request that passed every global check meets the mandate's
         // scope, so a scope can only subtract from what the policy allows.
         match self.mandate.scope {
@@ -205,6 +195,51 @@ impl Model {
             Scope::CapLoose if outlay > 100 => Err(DenyReason::PerTxCapExceeded),
             _ => Ok(()),
         }
+    }
+
+    /// The gas leg of a token payment: `gas` wei against the native asset's
+    /// policy. The same authority as any request and the native asset's caps,
+    /// window and budget, but no recipient and no scope: a scope limits what
+    /// the agent may move, and gas is a cost bounded by the native policy.
+    pub fn decide_gas(&self, gas: u128, stale_key: bool) -> Result<(), DenyReason> {
+        self.authority(stale_key)?;
+        self.limits(Asset::Evm, gas)
+    }
+
+    fn authority(&self, stale_key: bool) -> Result<(), DenyReason> {
+        if self.frozen {
+            return Err(DenyReason::Frozen);
+        }
+        if self.mandate.revoked {
+            return Err(DenyReason::MandateRevoked);
+        }
+        if self.now >= self.mandate.expiry {
+            return Err(DenyReason::MandateExpired);
+        }
+        if stale_key {
+            return Err(DenyReason::NotAuthorized);
+        }
+        Ok(())
+    }
+
+    /// The per-transaction cap, the window and the lifetime budget of `asset`
+    /// for a spend of `amount`, counting what is in flight.
+    fn limits(&self, asset: Asset, amount: u128) -> Result<(), DenyReason> {
+        let policy = self.policy[asset.index()];
+        if amount > policy.cap {
+            return Err(DenyReason::PerTxCapExceeded);
+        }
+        match self.effective(asset).checked_add(amount) {
+            Some(total) if total <= policy.limit => {}
+            _ => return Err(DenyReason::WindowLimitExceeded),
+        }
+        if let Some(budget) = policy.budget {
+            match self.epoch_usage(asset).checked_add(amount) {
+                Some(total) if total <= budget => {}
+                _ => return Err(DenyReason::MandateBudgetExceeded),
+            }
+        }
+        Ok(())
     }
 
     /// After time or state changed: forget spend that can never count again
@@ -254,7 +289,7 @@ impl Model {
     pub fn grant(&mut self, expiry: u64, scope: Scope) {
         self.last_epoch += 1;
         // The epoch bump resets every asset's budget.
-        self.epoch_committed = [0; 2];
+        self.epoch_committed = [0; ASSET_COUNT];
         self.mandate = ModelMandate {
             expiry,
             epoch: self.last_epoch,
@@ -283,17 +318,29 @@ impl Model {
         self.reserved[i] = self.reserved[i].saturating_add(outlay);
     }
 
+    /// Reserves everything a request holds: its amount, and for a token
+    /// payment its gas against the native asset.
+    pub fn reserve_pending(&mut self, pending: &Pending) {
+        for (asset, amount) in pending.legs() {
+            self.reserve(asset, amount);
+        }
+    }
+
     /// Delivers one in-flight callback: release exactly once, and book unless
     /// the receipt failed.
     pub fn deliver(&mut self, index: usize, outcome: Outcome) -> Pending {
         let pending = self.queue.remove(index);
-        let i = pending.asset.index();
-        self.reserved[i] = self.reserved[i].saturating_sub(pending.outlay);
-        if outcome.books_spend() {
-            self.committed[i].push((self.now, pending.outlay));
-            // Booked under the grant that is current at settlement, which may
-            // be a later one than the request was made under.
-            self.epoch_committed[i] = self.epoch_committed[i].saturating_add(pending.outlay);
+        // A token payment holds two reservations, one per asset, and settles
+        // both by the one rule.
+        for (asset, amount) in pending.legs() {
+            let i = asset.index();
+            self.reserved[i] = self.reserved[i].saturating_sub(amount);
+            if outcome.books_spend() {
+                self.committed[i].push((self.now, amount));
+                // Booked under the grant that is current at settlement, which may
+                // be a later one than the request was made under.
+                self.epoch_committed[i] = self.epoch_committed[i].saturating_add(amount);
+            }
         }
         pending
     }

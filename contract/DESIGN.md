@@ -3,10 +3,10 @@
 Scope so far: pure policy state and evaluation, the local NEAR enforcement path (the agent moves
 NEAR or NEP-141 tokens held by this contract, gated by policy, with a reserve/settle/release
 lifecycle), fund custody (owner withdrawal and deposits), the pure EVM transaction encoder, and the
-cross-chain signing gate (`request_evm_payment`): the agent pays native ETH on an EVM chain by getting
-the Chain Signatures contract to sign a transaction the contract built itself. The agent is a native
-function-call access key on the contract's own account (see Agent authority). ERC-20 payments are not
-built yet.
+cross-chain signing gate (`request_evm_payment`, `request_evm_token_payment`): the agent pays native
+ETH or an ERC-20 token on an EVM chain by getting the Chain Signatures contract to sign a transaction
+the contract built itself, calldata included. The agent is a native function-call access key on the
+contract's own account (see Agent authority).
 
 ## Layout
 
@@ -15,8 +15,8 @@ built yet.
 | `src/types.rs` | `AssetId`, `Status`, `Config`, `AssetPolicy`, `Mandate`, `DenyReason`, `Decision` |
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
-| `src/evm.rs` | Pure EIP-1559 transfer encoding: `Eip1559Tx`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
-| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `on_owner_sign_complete`), EVM views |
+| `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
+| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
@@ -36,11 +36,11 @@ built yet.
 | `spend` | `LookupMap<AssetId, SpendRing>` | Per-asset committed window accounting |
 | `epoch_spend` | `LookupMap<AssetId, EpochSpend { epoch, committed }>` | Per-asset committed spend under one mandate epoch, for the lifetime budget. A stale epoch reads as zero. Kept when a policy is removed |
 | `reserved` | `LookupMap<AssetId, u128>` | Per-asset amount reserved for transfers still in flight. Absent means zero |
-| `evm_config` | `Option<EvmConfig { signer_id, derivation_path, sender, chain_id, max_fee_per_gas, max_priority_fee_per_gas, gas_limit }>` | Owner-set; `signer_id`, `derivation_path` and `sender` fixed once set |
+| `evm_config` | `Option<EvmConfig { signer_id, derivation_path, sender, chain_id, max_fee_per_gas, max_priority_fee_per_gas, gas_limit, token_gas_limit }>` | Owner-set; `signer_id`, `derivation_path` and `sender` fixed once set |
 | `evm_recipients` | `IterableSet<[u8; 20]>` | Allowed EVM recipients, separate from `recipients` |
 | `evm_nonces` | `LookupMap<u64, u64>` | Next nonce per chain id; only ever increases |
 
-`AssetId` is `Near | Nep141(AccountId) | Evm(u64)`; `Evm(chain_id)` is native ETH on that chain. The policy, spend ring and reserved counter key on `AssetId` unchanged. The NEAR entry points (`request_local_transfer`, `dry_run`, `owner_withdraw`) refuse `Evm` assets, which are paid only through `request_evm_payment`.
+`AssetId` is `Near | Nep141(AccountId) | Evm(u64) | Evm20 { chain_id, token }`; `Evm(chain_id)` is native ETH on that chain and `Evm20` an ERC-20 token on it. The policy, spend ring and reserved counter key on `AssetId` unchanged. The NEAR entry points (`request_local_transfer`, `dry_run`, `owner_withdraw`) refuse `Evm` assets, which are paid only through `request_evm_payment`.
 
 Single initialization comes from `#[init]`, which panics when state exists.
 
@@ -168,7 +168,7 @@ owner account (separate, init rejects owner == contract)   -- owner methods, own
 contract account  minder.near
   full-access key ........ the deployer's; REMOVED after deploy + init (deployment step below)
   function-call key ...... the agent's; receiver = minder.near,
-                            method_names = request_local_transfer, request_evm_payment,
+                            method_names = request_local_transfer, request_evm_payment, request_evm_token_payment,
                             allowance = 0.25 NEAR; added by grant_mandate, deleted by revoke_mandate
 ```
 
@@ -250,7 +250,8 @@ a constant). It is spendable from the contract's own balance, so **the most the 
 owner is the policy limits plus this allowance per granted key**, and for a scoped mandate the policy
 part is bounded by the tighter of the two: only the scope's assets, only to the scope's recipients,
 at most `min(global cap, mandate cap)` per transaction, no more than the global window limit per
-asset in any window, and no more than the asset's `epoch_budget` over the whole grant (so
+asset in any window, and no more than the asset's `epoch_budget` over the whole grant (a token
+payment is bounded twice: the amount by the token's policy and its gas by the native asset's) (so
 `min(sum of the windows over the grant, epoch_budget)` per asset). The allowance bounds the transaction
 fees the key can burn, whatever it calls (denied requests burn gas too). The runtime checks the
 allowance against the *prepaid* gas at the current gas price and gives unused gas back, so the agent
@@ -285,7 +286,9 @@ gained `scope: MandateScope`. Both change the borsh layout of the stored state, 
 and `dry_run` take a key where they took an account (and `grant_mandate` an optional scope). No
 migration is written: a testnet deployment from before these changes needs a fresh account or wiped
 state. `AssetPolicy` (a trailing `epoch_budget`) and the contract state (a new `epoch_spend` map)
-changed the same way, and `set_asset_policy` takes an optional `epoch_budget`; a call without it still
+changed the same way, and so did `AssetId` (the appended `Evm20`), `EvmConfig` (a trailing
+`token_gas_limit`) and `Eip1559Tx` (a trailing `data`, which is also the borsh form of the
+`on_sign_complete` arguments, now `(Vec<(AssetId, u128)>, Eip1559Tx)`), and `set_asset_policy` takes an optional `epoch_budget`; a call without it still
 works. The JSON of an existing `grant_mandate` call with a key still works unchanged (no `scope`
 means unscoped).
 
@@ -342,15 +345,20 @@ to turn the signer's response into a raw signed transaction.
 ### Type
 
 `Eip1559Tx { chain_id: u64, nonce: u64, max_priority_fee_per_gas: u128, max_fee_per_gas: u128,
-gas_limit: u64, to: [u8; 20], value: u128 }`. A native ETH transfer only: **data and access list are
-empty** (ERC-20 calldata is a later sub-chunk). Widths follow the Ethereum fields: `u128` holds any
-wei value or fee that fits in practice, `u64` holds nonce, gas and chain id.
+gas_limit: u64, to: [u8; 20], value: u128, data: Vec<u8> }`. The **access list is always empty**. For a
+native ETH transfer `data` is empty; for an ERC-20 transfer `to` is the token, `value` is zero and
+`data` is `erc20_transfer_calldata(recipient, amount)`: the `0xa9059cbb` selector, the recipient
+left-padded to 32 bytes, and the amount as a 32-byte big-endian word (68 bytes in all; the amount is a
+`u128`, so the high 16 bytes of its word are zero). That is the only calldata the contract ever
+builds. Widths follow the Ethereum fields: `u128` holds any wei value, fee or token amount that fits
+in practice, `u64` holds nonce, gas and chain id.
 
 ### Functions
 
 | Function | Result |
 | --- | --- |
-| `encode_unsigned(&tx)` | `0x02 \|\| rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list])` with empty data and access list |
+| `encode_unsigned(&tx)` | `0x02 \|\| rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list])` with the transaction's data and an empty access list |
+| `erc20_transfer_calldata(&recipient, amount)` | the 68 bytes of `transfer(recipient, amount)` |
 | `signing_hash(&tx)` | `keccak256(encode_unsigned(tx))`, the 32 bytes handed to the signer |
 | `normalize_s(s, recovery_id)` | `(s, y_parity)`: if `s > n/2` then `s = n - s` and the parity flips, else unchanged |
 | `encode_signed(&tx, r, s, y_parity)` | `0x02 \|\| rlp([...same fields, y_parity, r, s])`, ready to broadcast |
@@ -396,6 +404,18 @@ equality for all three. Run it from a directory with viem installed (the spike h
 | `list_payload_55_bytes`, `list_payload_56_bytes` | The exact switch from short list header `0xf7` to long form `0xf8 0x38` |
 | `high_top_bytes` | `u64::MAX`, `u128::MAX` and an all-`0xff` address and `r`: full-width, high top byte values |
 
+Three more vectors cover calldata: `erc20_transfer` and `erc20_transfer_max_amount` (the data is
+viem's own `encodeFunctionData` of `transfer`, an encoder independent of ours), and the RLP string
+edges `data_one_byte_below_0x80` (a single byte under `0x80` is its own encoding), `data_one_byte_0x80`,
+`data_55_bytes` and `data_56_bytes` (the short and long string headers).
+
+The seeded differential corpus (`vectors/gen-evm-corpus.mjs`, 1,743 cases) covers calldata too:
+300 random and 40 edge ERC-20 transfers (amounts across every width boundary up to `u128::MAX`,
+recipients at the address extremes) and data lengths from 0 to 1,000 bytes with the single-byte
+cases. For every token case the test also rebuilds the calldata with `erc20_transfer_calldata` from
+the recipient and amount viem encoded and requires viem's bytes back, so the contract's builder is
+checked against viem's ABI encoder 340 times as well as the serialization and the hash.
+
 A mutation check was run when writing these: deliberately breaking the list-length threshold, the
 single-byte rule, leading-zero trimming, the type byte, the data encoding, the parity flip, the
 half-order comparison and the borrow in the subtraction each made the tests fail.
@@ -410,6 +430,9 @@ transfer, with a `sign` call to the Chain Signatures contract in place of the tr
 
 ### Flow
 
+(This is the native path, `request_evm_payment`. A token payment is the section after the
+authenticity check.)
+
 1. Read the EVM config, parse the recipient (`0x` + 40 hex digits), and evaluate with `evaluate` for
    `AssetId::Evm(chain_id)`: `effective_spend = ring.live_sum + reserved`, the recipient checked
    against the **EVM** allowlist. A denial reverts with `Denied: <Reason>`; nothing changes.
@@ -419,18 +442,20 @@ transfer, with a `sign` call to the Chain Signatures contract in place of the tr
    inputs) and compute `evm::signing_hash`.
 5. Call `signer.sign({ request: { path, payload_v2: { Ecdsa: <hash hex> }, domain_id: 0 } })` with
    1 yoctoNEAR and 30 Tgas (the signer needs 15), then `.then` the private
-   `on_sign_complete(asset, outlay, tx)` with 25 Tgas reserved for it. Its arguments are borsh.
+   `on_sign_complete(reservations, tx)` with 25 Tgas reserved for it, where `reservations` is the list
+   of `(asset, amount)` pairs the request reserved (here the single `(Evm(chain_id), outlay)`). Its
+   arguments are borsh.
 
 `on_sign_complete` never panics. In order:
 
-1. Release the reservation (saturating, unconditional).
+1. Release every reservation in `reservations`, each exactly once (saturating, unconditional).
 2. Read the result with `promise_result_checked` and parse the JSON ourselves (never
    `#[callback_result]`). The helper separates the cases: `Err(Failed)` means the signer's receipt
    failed (its own timeout included); `Err(TooLong)` means the receipt **succeeded** but its output
    exceeds our 4096-byte read buffer; `Ok(bytes)` is a readable output. `PromiseError` is
    non-exhaustive, so a variant added later is treated as "not proven failed".
 3. **`Err(Failed)`: nothing was signed.** Log it and stop. Nothing is booked.
-4. **Anything else: the receipt did not fail, so book the outlay (`record_spend`) unconditionally.**
+4. **Anything else: the receipt did not fail, so book every reserved amount (`record_spend`) unconditionally.**
 5. Only then try to use the output. If it was readable, the signature normalizes (`normalized_signature`:
    recovery id 0 or 1, `0 < r, s < n`, low `s`), and **it recovers to the configured `sender`**,
    log the NEP-297 event
@@ -497,7 +522,10 @@ No method signs a caller-supplied hash. The only value ever sent as `payload_v2`
 and the validated `to` and `value` (agent). Policy was evaluated on exactly those `to` and `value`
 in the same receipt. The callback carries the same `Eip1559Tx` back by value, so the transaction it
 assembles is the one that was hashed. The sandbox tests compare the hash the mock signer receives
-with viem's keccak of viem's serialization.
+with viem's keccak of viem's serialization. For a token payment the hashed transaction includes the
+`data` field the contract built (`to` the token, zero value, the transfer calldata), so the hash
+covers what the transaction does; the sandbox compares it with viem's hash of viem's own ABI-encoded
+calldata.
 
 ### Owner-controlled gas, contract-owned nonce
 
@@ -546,6 +574,63 @@ to any recipient in any amount. It has two jobs: recovery, and cancellation.
 - **Signing confinement.** `owner_evm_withdraw` is the second, and only other, function allowed to
   dispatch `sign` (`tests/signing_confinement.rs`). The request-body builder is a separate function
   that does not dispatch, and both callbacks are not dispatchers.
+
+### ERC-20 token payments: `request_evm_token_payment(token, recipient, amount)`
+
+The firewall inspects what a transaction does, not only how much ETH it sends. The agent supplies only
+`(token, recipient, amount)`. **The contract builds the transfer calldata itself and never accepts raw
+calldata**; there is no other selector (no `approve`, no general decoding), and the transaction is
+`to` = the token, `value` = 0, `data` = `erc20_transfer_calldata(recipient, amount)`, the nonce from the
+shared counter, the configured fees and `EvmConfig.token_gas_limit`
+(`EvmConfig::build_token_tx`, the one place a token transfer is assembled). The signing hash covers
+the data exactly as it does for a native payment, and the callback's `ecrecover` authenticity gate is
+unchanged: the transaction is emitted only if the signature recovers to `sender`.
+
+- **A token is an asset.** `AssetId` gains an appended variant `Evm20 { chain_id, token: [u8; 20] }`
+  (the existing `Near`, `Nep141` and `Evm` borsh tags are unchanged). It has its own policy, per-tx
+  cap, window, lifetime budget, reserved counter and mandate-scope entry, all in the token's base
+  units. In JSON the token is the list of its 20 bytes, because the ABI describes it that way.
+- **Dual-asset accounting, the correctness core.** A token transfer moves the token amount and
+  burns gas, `token_gas_limit * max_fee_per_gas` wei. The amount is accounted against `Evm20` and the
+  gas against the native asset `Evm(chain_id)`, as **two reservations in the one request**:
+  1. the **transfer leg** is evaluated like any request: authority, the token's policy, the decoded
+     recipient on the EVM allowlist, the cap, window and budget, then the mandate's scope;
+  2. the **gas leg** (`policy::evaluate_gas`) is evaluated against the native policy: the same
+     authority, then the native asset's cap, window and budget. It has no recipient and **no scope**:
+     a scope limits what the agent may *move*, gas is a cost, and the native policy is what bounds
+     it. A scope that names only the token therefore still allows the transfer;
+  3. a token payment needs a native ETH policy. Without one the request reverts with "A token
+     transfer needs a native ETH policy for its gas: none is set";
+  4. both legs are evaluated before anything changes. A denial reverts with its reason and its leg,
+     `Denied: <Reason> (token transfer)` or `Denied: <Reason> (gas, native ETH)`; the transfer leg is
+     reported first;
+  5. only if both allow, both amounts are reserved (`reserved[Evm20]` and `reserved[Evm]`) before any
+     promise exists, so a second request, native or token, sees both. The gas competes with native
+     payments for the same native window and budget.
+- **Settlement.** `on_sign_complete(reservations, tx)` takes the list of reservations (a native
+  payment passes one pair, a token payment two). It releases each exactly once and books each under
+  the one G1 rule: nothing if the signer's receipt failed, everything otherwise, whatever the contract
+  could read or authenticate. Emission still depends only on the authenticity gate. A failed receipt
+  therefore releases the token amount and the gas and books neither; a signature by another key books
+  both and emits nothing.
+- **`dry_run_evm_token(agent_key, token, recipient, amount)`** returns
+  `{ token: Decision, gas: Decision }`, each leg decided independently, so a caller sees which leg
+  would refuse before sending.
+- **Configuration.** `set_evm_config` takes an optional `token_gas_limit` (default 100,000, above the
+  roughly 50,000 to 65,000 that plain and proxied tokens spend on `transfer`), mutable like the fees,
+  must be positive, and `max_fee_per_gas * token_gas_limit` must not overflow.
+- **Confinement.** The agent's access key may call `request_evm_token_payment` (it is in
+  `AGENT_METHODS`), and the function is the third that may dispatch `sign`
+  (`tests/signing_confinement.rs`).
+- **Boundaries this chunk leaves, disclosed.** (a) *Owner recovery of tokens is not built:* the owner
+  can send the derived address's ETH anywhere with `owner_evm_withdraw`, but there is no owner path
+  that moves an ERC-20 balance out; only the agent, within policy, can. That is a gap in the
+  owner-recovery invariant for tokens and the next piece to build. (b) *The outcome is not observed:*
+  as for native payments, the contract is outbound-only. It cannot see whether the token call
+  succeeds on the destination chain (a token may revert, charge a fee, or return nothing, as USDT
+  does); the amount and the worst-case gas are booked on a signed receipt regardless, which can only
+  over-count. (c) *Amounts are `u128`,* narrower than the ERC-20 `uint256`; (d) *only `transfer`:*
+  `approve`, `transferFrom` and calls to arbitrary contracts are not possible.
 
 ### Outlay: fees count against policy
 
@@ -599,7 +684,8 @@ The first failing check decides the reason: `Frozen`, `NoMandate`, `MandateRevok
 `MandateExpired` (`now >= expiry`), `NotAuthorized` (the call is not from the contract's own account, or its key is not the mandate's),
 `AssetNotAllowed`, `RecipientNotAllowed`, `PerTxCapExceeded` (`amount > cap`),
 `WindowLimitExceeded` (`effective_spend + amount > limit`, or overflow). These are the global
-checks (the budget, `MandateBudgetExceeded`, follows the window). A request that passes them meets the mandate's scope: `AssetOutOfScope`,
+checks (the budget, `MandateBudgetExceeded`, follows the window). A token payment's gas leg runs the
+same checks without the recipient allowlist and without the scope. A request that passes them meets the mandate's scope: `AssetOutOfScope`,
 `RecipientOutOfScope`, then `PerTxCapExceeded` again for the mandate's own cap.
 
 ## Choices that need your review
@@ -696,8 +782,8 @@ with its real function-call key.
 | The budget and the window are independent and the tighter decides; where both deny the window is the reason | unit `budget_tests::the_budget_binds_before_the_window_when_it_is_the_smaller`, `the_window_binds_before_the_budget_and_the_budget_outlasts_the_window`, `where_both_would_deny_the_window_is_the_reason`; `policy::the_window_is_the_reason_when_both_would_deny_and_the_budget_decides_otherwise` |
 | An unset budget is the window alone; a budget set mid-grant counts earlier spend; lowering it denies until the next grant; removing and re-adding a policy does not reset it; it is per asset | unit `budget_tests::an_unset_budget_is_the_window_alone`, `a_budget_set_mid_grant_counts_what_the_grant_already_spent`, `lowering_the_budget_below_what_was_used_denies_until_the_next_grant`, `removing_and_re_adding_a_policy_does_not_reset_the_budget`, `the_budget_is_per_asset`; `policy::no_budget_means_the_window_alone_however_much_was_spent` |
 | A re-grant replaces the scope; scopes are validated and stored normalized; only the owner sets one | unit `mandate_tests::a_regrant_can_change_the_scope_and_the_new_scope_applies_from_the_new_grant`, `a_scope_is_validated_and_stored_normalized`, `only_the_owner_sets_a_scope_and_the_scope_is_visible` |
-| Grant provisions a function-call key scoped to the two agent methods, on the contract itself, with a limited allowance | unit `mandate_tests::a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods`, `the_key_can_reach_only_methods_that_exist_on_the_contract`; sandbox `agent_key::a_grant_puts_a_scoped_function_call_key_on_the_contract_account` (reads the key back from the chain) |
-| The real key is refused by the protocol everywhere but the two agent methods | sandbox `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` (every other exported method, no contract logic runs), `the_agent_key_cannot_call_another_contract_such_as_the_signer`, `the_agent_key_cannot_do_anything_but_call_the_two_methods`; and it passes the new auth on both: `the_agent_key_passes_the_new_authentication_on_both_agent_methods` |
+| Grant provisions a function-call key scoped to the three agent methods, on the contract itself, with a limited allowance | unit `mandate_tests::a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods`, `the_key_can_reach_only_methods_that_exist_on_the_contract`; sandbox `agent_key::a_grant_puts_a_scoped_function_call_key_on_the_contract_account` (reads the key back from the chain) |
+| The real key is refused by the protocol everywhere but the three agent methods | sandbox `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` (every other exported method, no contract logic runs), `the_agent_key_cannot_call_another_contract_such_as_the_signer`, `the_agent_key_cannot_do_anything_but_call_the_two_methods`; and it passes the new auth on both: `the_agent_key_passes_the_new_authentication_on_both_agent_methods` |
 | Revoke flags the mandate and deletes the key; the flag denies independent of the delete; a failed delete does not fail the revoke | unit `mandate_tests::revoking_flags_the_mandate_and_deletes_the_key`, `a_request_after_revoking_is_denied_by_the_flag_with_no_deletion_landed`, `revoking_twice_is_a_no_op_and_issues_no_second_deletion`; sandbox `agent_key::revoking_deletes_the_key_and_the_deleted_key_can_no_longer_reach_the_contract`, `after_a_revoke_the_epoch_guard_denies_even_if_the_key_survived_the_delete`, `revoking_when_the_key_is_already_gone_does_not_fail` |
 | Re-grant reissues a fresh key and epoch; replacing a live mandate swaps the keys in separate receipts; the live key cannot be granted again | unit `mandate_tests::granting_after_a_revocation_provisions_a_fresh_key_under_a_new_epoch`, `replacing_a_live_mandate_deletes_the_old_key_and_adds_the_new_one`, `the_live_key_cannot_be_granted_again`; sandbox `agent_key::granting_after_a_revoke_reissues_a_fresh_key_and_epoch`, `replacing_a_live_mandate_swaps_the_keys_on_the_account`, `the_key_of_a_live_mandate_cannot_be_granted_again` |
 | Expiry denies through `evaluate` and leaves the key | unit `mandate_tests::an_expired_mandate_denies_even_for_its_own_key`; sandbox `agent_key::an_expired_mandate_denies_through_evaluate_while_the_key_stays_on_the_account` |
@@ -762,6 +848,12 @@ with its real function-call key.
 | Owner path authenticity: a signature by another key, or a mismatched `sender`, emits nothing and is logged; unusable results emit nothing and book nothing | unit `gate_tests::a_signature_by_another_key_is_not_emitted_for_the_owner_either`, `a_mismatched_sender_configuration_emits_nothing_for_the_owner`, `unusable_signer_results_emit_nothing_and_book_nothing_for_the_owner`; sandbox `evm_gate::a_signature_by_another_key_is_not_emitted_for_the_owner`, `a_mismatched_sender_configuration_emits_nothing_for_the_owner` |
 | The owner callback has gas to spare | sandbox `evm_gate::the_owner_callback_has_gas_to_spare` (about 2.0 of 25 Tgas) |
 | Signing is confined to `request_evm_payment` and `owner_evm_withdraw`; the public surface is the committed snapshot | `tests/signing_confinement.rs`; `tests/method_surface.rs` against `tests/snapshots/method-surface.txt` |
+| The firewall builds exactly the transfer calldata (selector, padded recipient, amount) and the signing hash covers the data | unit `gate_tests::the_firewall_builds_exactly_the_transfer_calldata_and_hashes_it`, `the_calldata_matches_viems_abi_encoding`, `evm::erc20_transfer_vector` (viem); corpus `evm_corpus::encoder_matches_viem_byte_for_byte_over_the_whole_corpus` (340 token cases, calldata rebuilt and compared); sandbox `evm_gate::the_agent_key_pays_a_token_the_contract_builds_and_both_assets_are_accounted` (viem's hash and signed bytes) |
+| Policy on both legs: over the token cap, gas over the native policy, no native policy, no token policy, off-allowlist decoded recipient, each reverting with its leg | unit `gate_tests::a_transfer_over_the_token_cap_is_denied_on_the_token_leg`, `gas_that_would_exceed_the_native_policy_is_denied_on_the_gas_leg`, `a_token_transfer_with_no_native_policy_is_denied_clearly`, `a_token_without_a_policy_is_denied`, `the_decoded_recipient_must_be_on_the_evm_allowlist`; sandbox `evm_gate::token_denials_name_the_leg_and_change_nothing` |
+| The mandate scope applies to the token and the decoded recipient and its cap, not to the gas | unit `gate_tests::the_mandate_scope_applies_to_the_token_and_the_recipient_but_not_to_the_gas`; `policy` gas-leg checks via the harness |
+| Dual reservation is TOCTOU-safe; both legs settle or release exactly once; a failed receipt books neither; authenticity still gates emission (G1 on both legs) | unit `gate_tests::both_reservations_are_made_together_and_the_second_request_sees_them`, `a_successful_receipt_books_both_assets_and_a_failed_one_releases_both_and_books_none`, `a_token_transfer_signed_by_another_key_is_booked_on_both_assets_but_not_emitted`; sandbox `evm_gate::an_in_flight_token_payment_holds_both_reservations_and_releases_both_when_it_fails`, `a_failing_signer_releases_both_legs_and_books_neither` |
+| Native ETH path unchanged; token and native payments share the nonce counter; the token gas limit is configurable | unit `gate_tests::a_native_payment_is_unchanged_by_token_support`, `token_payments_share_the_nonce_counter_with_native_payments`, `the_token_gas_limit_is_configurable_and_must_be_positive`, `the_native_entry_points_refuse_token_assets`; every native test above |
+| The token callback has gas to spare | sandbox `evm_gate::the_token_callback_has_gas_to_spare` (about 3.2 of 25 Tgas) |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
@@ -797,6 +889,11 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 - The agent is identified by public key, as in production: its calls come from the contract account
   signed with the mandate's key, and every grant rotates between two keys (the contract refuses to
   re-grant the live one). A `StaleKeyRequest` action signs a request with the other, stale key.
+- A third asset, a token, makes a request a payment with two legs: the harness reserves the token amount
+  and the gas against the native asset, expects the contract's callback to carry both, rebuilds the
+  transfer calldata byte by byte on its own, and checks that the view (`dry_run_evm_token`) and the
+  real path agree with the oracle on each leg (the transfer leg decided first, with its recipient and
+  scope, the gas leg by the native policy alone). A delivery releases both and books both or neither.
 - Policies include two with a lifetime budget (70 and 150, over the default cap and window). The
   oracle keeps per-asset, per-grant committed spend that never ages out and a grant resets, and counts
   in-flight spend against it. Because that counter is part of the state, it separates states the
@@ -827,7 +924,8 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | policy (`exhaustive_policy_changes_and_caps`) | 11 | 13,486 | 73,721 | 54,642 | 11,749 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
 | scope (`exhaustive_mandate_scopes`) | 10 | 24,854 | 104,843 | 79,990 | 6,517 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
 | budget (`exhaustive_epoch_budgets`) | 10 | 60,702 | 237,500 | 163,103 | 30,220 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
-| **Total** | | **166,904** | **692,195** | | | |
+| token (`exhaustive_token_payments`) | 10 | 21,652 | 91,702 | 70,051 | 9,358 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
+| **Total** | | **188,556** | **783,897** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -852,6 +950,7 @@ every step. Every step of every harness driver runs every check.
 | Monotonic revocation: once frozen, revoked or expired, nothing is approved until `unfreeze` or a new grant (stated by separate ghost bookkeeping, not by the oracle's `decide`) | | yes | | yes | |
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
+| Token payments: both legs are decided as the oracle says (the transfer by the token's policy, allowlist and scope; the gas by the native policy alone), both are reserved together and counted by the next request, the callback carries both reservations and the exact transfer transaction with its calldata, and a delivery releases and books both or neither (reached by the random driver and the `token` suite) | | | | yes | |
 | The lifetime budget: the contract's per-epoch committed spend (read through its lazy-reset accessor) equals the oracle's after every step; budget usage, committed plus in flight, never passes the budget unless the owner lowered it; a new grant resets it, a delivery after the re-grant is booked to the new grant, and the decision (allow or `MandateBudgetExceeded`, with the window deciding first when both deny) equals the oracle's (reached by the random driver and the `budget` suite) | | | | yes | |
 | The agent's authority is the intersection of the policy and the mandate's scope: the shadow model restricts every request to what both allow, with the scope checked after the global ones (out-of-scope asset or recipient, the tighter cap), so an allowlist or cap is never widened by a scope, and the stored scope equals the granted one (reached by the random driver and the `scope` suite) | | | | yes | |
 | Agent authentication is by key: every grant switches to the other of two keys, and a request signed with the key the mandate no longer names is never approved (`NotAuthorized` once the mandate checks that rank above it pass), and `dry_run` agrees | | yes | | yes | |

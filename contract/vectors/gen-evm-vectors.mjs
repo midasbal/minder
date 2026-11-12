@@ -9,11 +9,19 @@
 // integer trimming of r and s.
 import { createRequire } from 'node:module';
 
-const { serializeTransaction, keccak256 } = createRequire(process.cwd() + '/')('viem');
+const { serializeTransaction, keccak256, encodeFunctionData, erc20Abi } = createRequire(process.cwd() + '/')('viem');
 
 const TO = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 const U64_MAX = 2n ** 64n - 1n;
 const U128_MAX = 2n ** 128n - 1n;
+
+// An ERC-20 token (USDC on Sepolia) and a recipient, for the transfer vectors.
+const TOKEN = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
+// The calldata is viem's ABI encoding of transfer(recipient, amount), an
+// implementation independent of the contract's hand-built bytes.
+const transferData = (to, amount) => encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] });
+const ARBITRARY_SIG = { r: '0x00000000000000000000000000000000000000000000000000000000000000ff', s: '0x0000000000000000000000000000000000000000000000000000000000000100', yParity: 0 };
+const dataOf = (length) => '0x' + Array.from({ length }, (_, i) => ((i * 7 + 1) & 0xff).toString(16).padStart(2, '0')).join('');
 
 const cases = [
   {
@@ -48,10 +56,27 @@ const cases = [
     tx: { chainId: U64_MAX, nonce: U64_MAX, maxPriorityFeePerGas: U128_MAX, maxFeePerGas: U128_MAX, gas: U64_MAX, to: '0xffffffffffffffffffffffffffffffffffffffff', value: U128_MAX },
     sig: { r: '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', s: '0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0', yParity: 1 },
   },
+  // ERC-20 transfers: the shape request_evm_token_payment builds.
+  {
+    name: 'erc20_transfer',
+    tx: { chainId: 11155111n, nonce: 3n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 30_000_000_000n, gas: 100000n, to: TOKEN, value: 0n, data: transferData(TO, 1_000_000n) },
+    sig: ARBITRARY_SIG,
+  },
+  {
+    name: 'erc20_transfer_max_amount',
+    tx: { chainId: 1n, nonce: 0n, maxPriorityFeePerGas: 0n, maxFeePerGas: 7n, gas: 65000n, to: TOKEN, value: 0n, data: transferData('0x0000000000000000000000000000000000000001', U128_MAX) },
+    sig: ARBITRARY_SIG,
+  },
+  // Data lengths at the RLP edges: a single byte below 0x80 is its own
+  // encoding, 0x80 is not, and 55 and 56 bytes are the short and long string forms.
+  { name: 'data_one_byte_below_0x80', tx: { chainId: 1n, nonce: 1n, maxPriorityFeePerGas: 1n, maxFeePerGas: 2n, gas: 30000n, to: TO, value: 5n, data: '0x7f' }, sig: ARBITRARY_SIG },
+  { name: 'data_one_byte_0x80', tx: { chainId: 1n, nonce: 1n, maxPriorityFeePerGas: 1n, maxFeePerGas: 2n, gas: 30000n, to: TO, value: 5n, data: '0x80' }, sig: ARBITRARY_SIG },
+  { name: 'data_55_bytes', tx: { chainId: 1n, nonce: 1n, maxPriorityFeePerGas: 1n, maxFeePerGas: 2n, gas: 30000n, to: TO, value: 5n, data: dataOf(55) }, sig: ARBITRARY_SIG },
+  { name: 'data_56_bytes', tx: { chainId: 1n, nonce: 1n, maxPriorityFeePerGas: 1n, maxFeePerGas: 2n, gas: 30000n, to: TO, value: 5n, data: dataOf(56) }, sig: ARBITRARY_SIG },
 ];
 
 for (const { name, tx, sig } of cases) {
-  const base = { type: 'eip1559', ...tx, data: '0x', accessList: [] };
+  const base = { type: 'eip1559', data: '0x', ...tx, accessList: [] };
   const unsigned = serializeTransaction(base);
   const signed = serializeTransaction(base, sig);
   console.log(JSON.stringify({
