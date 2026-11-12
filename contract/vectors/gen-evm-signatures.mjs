@@ -35,21 +35,35 @@ const keys = {
 const addresses = Object.fromEntries(Object.entries(keys).map(([name, key]) => [name, privateKeyToAccount(key).address.toLowerCase()]));
 
 const TO = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+// An address no test allowlists, for the owner's out-of-policy withdrawals.
+const NOT_ALLOWLISTED = '0x00000000000000000000000000000000000000aa';
 
 // Every transaction shape that reaches a signature in the tests.
 const scenarios = [
   {
     // gate unit tests and the sandbox tests (a Sepolia-shaped configuration)
     name: 'unit-and-sandbox',
-    base: { chainId: 11155111n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2_000_000_000n, gas: 21000n, to: TO },
-    nonces: [0n, 1n, 2n, 3n, 5n],
+    base: { chainId: 11155111n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2_000_000_000n, gas: 21000n },
+    tos: [TO],
+    nonces: [0n, 1n, 2n, 3n, 5n, 6n],
     values: [1000n],
+  },
+  {
+    // owner_evm_withdraw in the gate tests and the sandbox: any recipient (an
+    // address no policy allows, and the sender itself, as a cancellation
+    // would send), any amount (zero, and far over every cap), explicit nonces
+    name: 'owner-withdrawal',
+    base: { chainId: 11155111n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2_000_000_000n, gas: 21000n },
+    tos: [NOT_ALLOWLISTED, 'SENDER'],
+    nonces: [0n, 1n, 2n, 3n, 5n, 7n],
+    values: [0n, 1000n, 5_000_000_000_000_000n],
   },
   {
     // the model-based harness: tiny fees so outlays stay small. Nonces up to
     // 63 cover the longest random sequence (40 actions) and the exhaustive depth.
     name: 'model-harness',
-    base: { chainId: 5n, maxPriorityFeePerGas: 1n, maxFeePerGas: 5n, gas: 2n, to: TO },
+    base: { chainId: 5n, maxPriorityFeePerGas: 1n, maxFeePerGas: 5n, gas: 2n },
+    tos: [TO],
     nonces: Array.from({ length: 64 }, (_, i) => BigInt(i)),
     values: [20n, 40n, 41n],
   },
@@ -57,18 +71,21 @@ const scenarios = [
 
 const signatures = {};
 for (const scenario of scenarios) {
-  for (const nonce of scenario.nonces) {
-    for (const value of scenario.values) {
-      const tx = { type: 'eip1559', ...scenario.base, nonce, value, data: '0x', accessList: [] };
-      const hash = keccak256(serializeTransaction(tx));
-      const entry = {};
-      for (const [name, privateKey] of Object.entries(keys)) {
-        const { r, s, yParity } = await sign({ hash, privateKey });
-        // viem's own serialization of the signed transaction, so tests compare
-        // the contract's emitted bytes against the reference, not against the code under test.
-        entry[name] = { r, s, y_parity: yParity, raw_tx: serializeTransaction(tx, { r, s, yParity }) };
+  for (const recipient of scenario.tos) {
+    const to = recipient === 'SENDER' ? addresses.A : recipient;
+    for (const nonce of scenario.nonces) {
+      for (const value of scenario.values) {
+        const tx = { type: 'eip1559', ...scenario.base, to, nonce, value, data: '0x', accessList: [] };
+        const hash = keccak256(serializeTransaction(tx));
+        const entry = {};
+        for (const [name, privateKey] of Object.entries(keys)) {
+          const { r, s, yParity } = await sign({ hash, privateKey });
+          // viem's own serialization of the signed transaction, so tests compare
+          // the contract's emitted bytes against the reference, not against the code under test.
+          entry[name] = { r, s, y_parity: yParity, raw_tx: serializeTransaction(tx, { r, s, yParity }) };
+        }
+        signatures[hash] = entry;
       }
-      signatures[hash] = entry;
     }
   }
 }
@@ -86,6 +103,7 @@ const header = {
   scenarios: scenarios.map((s) => ({
     name: s.name,
     chain_id: s.base.chainId.toString(),
+    recipients: s.tos.length,
     nonces: `${s.nonces[0]}..=${s.nonces[s.nonces.length - 1]}`,
     values: s.values.map(String),
   })),

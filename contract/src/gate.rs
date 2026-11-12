@@ -17,6 +17,11 @@ use crate::evm::{self, Eip1559Tx, EvmError, Signature};
 use crate::types::{AssetId, Decision, EvmConfig, EvmConfigView};
 use crate::{page, Minder, MinderExt};
 
+/// Event names. An owner withdrawal is told apart from an agent payment, since
+/// it is outside policy.
+const PAYMENT_EVENT: &str = "evm_payment_signed";
+const OWNER_WITHDRAWAL_EVENT: &str = "evm_owner_withdrawal_signed";
+
 /// The signer requires at least 15 Tgas on `sign` and 1 yoctoNEAR.
 const SIGN_GAS: Gas = Gas::from_tgas(30);
 const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -120,6 +125,81 @@ impl Minder {
         self.evm_nonces.insert(chain_id, nonce.0);
     }
 
+    /// Owner recovery for the derived EVM address: signs a transfer of `value`
+    /// wei to `recipient` at the explicit `nonce`, for any recipient and amount.
+    ///
+    /// Like `owner_withdraw` on the NEAR side it is owner-only, works in any
+    /// status including `Frozen`, and is entirely outside policy: no cap,
+    /// allowlist or window check, and it neither reserves nor books anything.
+    /// Minder contains the agent, not the owner.
+    ///
+    /// The nonce is the owner's, because the second job is cancellation: a
+    /// transaction at an already-issued nonce replaces a signed-but-unbroadcast
+    /// or stuck agent transaction. For that, raise the fees with
+    /// `set_evm_config` first; the transaction takes its fees from the
+    /// configuration, and a replacement must pay more than what it replaces.
+    /// This method is therefore deliberately outside the agent path's
+    /// unique-nonce rule. To keep the *agent* from colliding with a nonce used
+    /// here, the counter moves to `max(counter, nonce + 1)`: a fresh or future
+    /// nonce advances it, a replacement of an issued nonce leaves it alone.
+    ///
+    /// The contract builds the transaction itself from the recipient, value,
+    /// nonce and configured chain and fees, and computes the hash itself (no
+    /// blind signing). `on_owner_sign_complete` applies the same authenticity
+    /// check as the agent path before anything is emitted.
+    pub fn owner_evm_withdraw(&mut self, recipient: String, value: U128, nonce: U64) -> Promise {
+        self.assert_owner();
+        let config = self.require_evm_config();
+        let to = parse_address(&recipient);
+        let after = nonce
+            .0
+            .checked_add(1)
+            .unwrap_or_else(|| env::panic_str("The nonce space is exhausted"));
+        if after > self.next_nonce(config.chain_id) {
+            self.evm_nonces.insert(config.chain_id, after);
+        }
+
+        let tx = config.build_tx(nonce.0, to, value.0);
+        let hash = evm::signing_hash(&tx);
+
+        Promise::new(config.signer_id.clone())
+            .function_call(
+                "sign".to_string(),
+                signing_request_args(&config, &hash),
+                SIGN_DEPOSIT,
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(SIGN_CALLBACK_GAS)
+                    .on_owner_sign_complete(tx),
+            )
+    }
+
+    /// Finishes `owner_evm_withdraw`. There is nothing to release or book, so
+    /// it changes no state; it only decides whether to emit. The transaction is
+    /// emitted for an off-chain relayer iff the signature assembles and
+    /// recovers to the configured `sender`; otherwise the reason is logged and
+    /// nothing is emitted. Must never panic.
+    #[private]
+    pub fn on_owner_sign_complete(&self, #[serializer(borsh)] tx: Eip1559Tx) {
+        let response = match env::promise_result_checked(0, MAX_SIGNATURE_RESPONSE_BYTES) {
+            Ok(bytes) => Some(bytes),
+            Err(PromiseError::Failed) => {
+                env::log_str("owner evm withdrawal not signed: the signer call failed");
+                return;
+            }
+            Err(_) => None,
+        };
+        match self.authenticate(&tx, response.as_deref()) {
+            Ok(raw_tx) => env::log_str(&signed_tx_event(OWNER_WITHDRAWAL_EVENT, &tx, &raw_tx)),
+            Err(fault) => env::log_str(&format!(
+                "owner evm withdrawal not emitted: {}",
+                fault.describe()
+            )),
+        }
+    }
+
     // ---- Agent ----
 
     /// Pays `amount` wei of native ETH to `recipient` on the configured chain,
@@ -155,29 +235,13 @@ impl Minder {
         self.reserve(&asset, outlay);
 
         let nonce = self.take_nonce(config.chain_id);
-        let tx = Eip1559Tx {
-            chain_id: config.chain_id,
-            nonce,
-            max_priority_fee_per_gas: config.max_priority_fee_per_gas.0,
-            max_fee_per_gas: config.max_fee_per_gas.0,
-            gas_limit: config.gas_limit,
-            to,
-            value: amount.0,
-        };
+        let tx = config.build_tx(nonce, to, amount.0);
         let hash = evm::signing_hash(&tx);
 
-        Promise::new(config.signer_id)
+        Promise::new(config.signer_id.clone())
             .function_call(
                 "sign".to_string(),
-                json!({
-                    "request": {
-                        "path": config.derivation_path,
-                        "payload_v2": { "Ecdsa": evm::hex_encode(&hash) },
-                        "domain_id": SECP256K1_DOMAIN_ID,
-                    }
-                })
-                .to_string()
-                .into_bytes(),
+                signing_request_args(&config, &hash),
                 SIGN_DEPOSIT,
                 SIGN_GAS,
             )
@@ -242,31 +306,12 @@ impl Minder {
         // Nothing below changes this: ecrecover decides emission, not booking.
         self.record_spend(&asset, outlay);
 
-        let Some(response) = response else {
-            env::log_str("evm payment booked, no transaction emitted: unreadable signer result");
-            return;
-        };
-        let signature = match parse_signature(&response) {
-            Ok(signature) => signature,
-            Err(rejection) => {
-                env::log_str(&format!(
-                    "evm payment booked, no transaction emitted: signature rejected ({rejection:?})"
-                ));
-                return;
-            }
-        };
-
-        // Authenticity: recover the signer of the hash this contract computed
-        // (never a hash from the response) and compare it to the configured
-        // sender. No configured sender cannot happen once a request was
-        // accepted, but it fails closed all the same.
-        let recovered = evm::recover_address(&evm::signing_hash(&tx), &signature);
-        let sender = self.evm_config.as_ref().map(|config| config.sender);
-        if recovered.is_some() && recovered == sender {
-            let raw_tx = evm::encode_signed(&tx, signature.r, signature.s, signature.y_parity);
-            env::log_str(&signed_payment_event(&tx, &raw_tx));
-        } else {
-            env::log_str(&authenticity_failure(recovered, sender));
+        match self.authenticate(&tx, response.as_deref()) {
+            Ok(raw_tx) => env::log_str(&signed_tx_event(PAYMENT_EVENT, &tx, &raw_tx)),
+            Err(fault) => env::log_str(&format!(
+                "evm payment booked, no transaction emitted: {}",
+                fault.describe()
+            )),
         }
     }
 
@@ -314,6 +359,30 @@ impl Minder {
         self.evm_config
             .clone()
             .unwrap_or_else(|| env::panic_str("EVM payments are not configured"))
+    }
+
+    /// From the signer's result to the raw signed transaction, or why not.
+    /// Shared by both callbacks, so the agent path and the owner path apply the
+    /// same authenticity gate: the signature must assemble and `ecrecover` over
+    /// the hash this contract computed (never a hash from the response), with the
+    /// signature exactly as it goes into the transaction, must yield the
+    /// configured `sender`. A missing sender cannot happen once a request was
+    /// accepted, but it fails closed all the same.
+    fn authenticate(&self, tx: &Eip1559Tx, response: Option<&[u8]>) -> Result<Vec<u8>, Fault> {
+        let response = response.ok_or(Fault::Unreadable)?;
+        let signature = parse_signature(response).map_err(Fault::Rejected)?;
+        let recovered = evm::recover_address(&evm::signing_hash(tx), &signature);
+        let sender = self.evm_config.as_ref().map(|config| config.sender);
+        if recovered.is_some() && recovered == sender {
+            Ok(evm::encode_signed(
+                tx,
+                signature.r,
+                signature.s,
+                signature.y_parity,
+            ))
+        } else {
+            Err(Fault::Inauthentic { recovered, sender })
+        }
     }
 
     fn next_nonce(&self, chain_id: u64) -> u64 {
@@ -387,28 +456,66 @@ fn parse_signature(response: &[u8]) -> Result<Signature, Rejection> {
         .map_err(Rejection::Invalid)
 }
 
-/// The log line for a signature that is well formed but does not recover to
-/// the configured sender. The recovered address is shown because it is what
-/// the owner needs to find the fault: a wrong `sender` in the configuration, a
-/// wrong derivation path, or a signer signing with another key.
-fn authenticity_failure(recovered: Option<[u8; 20]>, sender: Option<[u8; 20]>) -> String {
-    let show = |address: Option<[u8; 20]>, absent: &str| {
-        address.map_or(absent.to_string(), |address| evm::format_address(&address))
-    };
-    format!(
-        "evm payment booked, no transaction emitted: authenticity failure, the signature \
-         recovers to {} but the configured sender is {}; this is a signer or configuration fault",
-        show(recovered, "no address"),
-        show(sender, "unset"),
-    )
+/// Why a signer result did not become an emitted transaction.
+#[derive(Debug, PartialEq, Eq)]
+enum Fault {
+    /// The receipt succeeded but its output exceeded the read buffer.
+    Unreadable,
+    Rejected(Rejection),
+    /// A well-formed signature that does not recover to the configured sender.
+    Inauthentic {
+        recovered: Option<[u8; 20]>,
+        sender: Option<[u8; 20]>,
+    },
+}
+
+impl Fault {
+    /// The reason as logged. An authenticity failure shows the recovered
+    /// address because it is what the owner needs to find the fault: a wrong
+    /// `sender` in the configuration, a wrong derivation path, or a signer
+    /// signing with another key.
+    fn describe(&self) -> String {
+        match self {
+            Fault::Unreadable => "unreadable signer result".to_string(),
+            Fault::Rejected(rejection) => format!("signature rejected ({rejection:?})"),
+            Fault::Inauthentic { recovered, sender } => {
+                let show = |address: &Option<[u8; 20]>, absent: &str| {
+                    address
+                        .as_ref()
+                        .map_or(absent.to_string(), evm::format_address)
+                };
+                format!(
+                    "authenticity failure, the signature recovers to {} but the configured \
+                     sender is {}; this is a signer or configuration fault",
+                    show(recovered, "no address"),
+                    show(sender, "unset"),
+                )
+            }
+        }
+    }
+}
+
+/// The body of the call to the signer's `sign`: the key path and the hash the
+/// contract computed. Kept apart from the dispatch itself, which the
+/// signing-confinement test pins to the functions allowed to make it.
+fn signing_request_args(config: &EvmConfig, hash: &[u8; 32]) -> Vec<u8> {
+    json!({
+        "request": {
+            "path": config.derivation_path,
+            "payload_v2": { "Ecdsa": evm::hex_encode(hash) },
+            "domain_id": SECP256K1_DOMAIN_ID,
+        }
+    })
+    .to_string()
+    .into_bytes()
 }
 
 /// NEP-297 event line carrying the raw signed transaction.
-fn signed_payment_event(tx: &Eip1559Tx, raw_tx: &[u8]) -> String {
+fn signed_tx_event(event: &str, tx: &Eip1559Tx, raw_tx: &[u8]) -> String {
     let event = json!({
         "standard": "minder",
         "version": "1.0.0",
-        "event": "evm_payment_signed",
+        "event": event,
         "data": [{
             "chain_id": tx.chain_id,
             "nonce": tx.nonce,
@@ -531,7 +638,7 @@ mod tests {
 
     #[test]
     fn the_event_carries_the_transaction_fields_and_raw_bytes() {
-        let line = signed_payment_event(&tx(), &[0x02, 0xab, 0xcd]);
+        let line = signed_tx_event(PAYMENT_EVENT, &tx(), &[0x02, 0xab, 0xcd]);
         let json: serde_json::Value =
             serde_json::from_str(line.strip_prefix("EVENT_JSON:").unwrap()).unwrap();
         assert_eq!(json["standard"], "minder");

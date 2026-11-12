@@ -16,7 +16,7 @@ built yet.
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 transfer encoding: `Eip1559Tx`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
-| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `on_sign_complete`, EVM views |
+| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
@@ -212,8 +212,9 @@ its account at each token contract. It keeps no ledger of them; the balances are
 ### Threat-model boundary
 
 **Minder contains the untrusted agent, not the owner.** The owner owns the treasury, so
-`owner_withdraw` is intentionally unrestricted. Defending against a compromised owner key is out of
-MVP scope; the Tier 2 policy-change timelock is the eventual mitigation.
+`owner_withdraw` (and its cross-chain counterpart `owner_evm_withdraw`) is intentionally
+unrestricted. Defending against a compromised owner key is out of MVP scope; the Tier 2
+policy-change timelock is the eventual mitigation.
 
 ### `owner_withdraw(asset, amount, to) -> Promise`
 
@@ -425,6 +426,42 @@ with viem's keccak of viem's serialization.
   address, and the nonce counter is only valid for one address per chain. Changing any would leave the
   counter describing a different account (or the authenticity check pointing at a different key). Chain id and fees may change.
 
+### Owner recovery: `owner_evm_withdraw(recipient, value, nonce) -> Promise`
+
+The cross-chain counterpart of `owner_withdraw`, with the same pattern: owner-only, works in any
+status including `Frozen`, entirely outside policy (no cap, allowlist or window check) and **no
+accounting** (nothing is reserved, released or booked). The owner can send the derived address's ETH
+to any recipient in any amount. It has two jobs: recovery, and cancellation.
+
+- **Explicit nonce, deliberately outside the agent path's unique-nonce rule.** To cancel a
+  signed-but-unbroadcast or stuck agent transaction, the owner signs a replacement at the *same*
+  nonce (typically zero value to the sender itself). The fees come from the configuration, and a
+  replacement must outbid what it replaces, so raise them with `set_evm_config` first.
+- **The counter moves to `max(counter, nonce + 1)`**, synchronously, before the promise. A fresh or
+  future nonce advances it past itself, so the agent can never later take a nonce the owner used; a
+  replacement of an issued nonce (`nonce < counter`) leaves it unchanged. `nonce == u64::MAX` is
+  refused (no nonce after it), as is a malformed recipient or a missing EVM configuration.
+- **No blind signing.** The contract builds the `Eip1559Tx` itself (`EvmConfig::build_tx`, the one
+  assembler shared with the agent path) from the owner's recipient and value, the configured chain
+  and fees and the explicit nonce, computes the hash itself, and sends it to the signer with the
+  same call as the agent path (30 Tgas, 1 yoctoNEAR, 25 Tgas reserved for the callback).
+- **`on_owner_sign_complete(tx)`** is a private callback. There is nothing to release or book, so it
+  changes no state (`&self`; the surface snapshot therefore labels it `view [private]`, which only
+  means it does not write). It applies the same authenticity gate as the agent path through the
+  shared `authenticate` function: the signature must assemble and `ecrecover` over the contract's
+  own hash must yield the configured `sender`. Then it emits the NEP-297 event
+  `evm_owner_withdrawal_signed`, with the same data as `evm_payment_signed`; the different name
+  tells an out-of-policy owner transaction from an agent payment. Otherwise it logs
+  `owner evm withdrawal not emitted: <why>` (an authenticity failure names a signer or
+  configuration fault) or `owner evm withdrawal not signed` for a failed receipt, and emits nothing.
+- **Gas.** The callback burnt 2.0 Tgas in the sandbox against 25 reserved (less than the agent
+  callback's 2.4, as it does not touch storage), so the reserve is unchanged. The call needs the
+  same prepaid gas as a request (about 55 Tgas plus its own work; the tests attach 100): the default
+  30 Tgas of a plain call fails with "Exceeded the prepaid gas".
+- **Signing confinement.** `owner_evm_withdraw` is the second, and only other, function allowed to
+  dispatch `sign` (`tests/signing_confinement.rs`). The request-body builder is a separate function
+  that does not dispatch, and both callbacks are not dispatchers.
+
 ### Outlay: fees count against policy
 
 Policy counts the **outlay**, `value + gas_limit * max_fee_per_gas`, not just the value, for the
@@ -438,7 +475,7 @@ value.
 
 ### Nonce gaps and other limits
 
-- **A failed signing leaves a nonce gap.** The nonce was taken at request time. If the signer fails or
+- **A failed signing leaves a nonce gap.** The owner can fill or cancel it with `owner_evm_withdraw` at that nonce. The nonce was taken at request time. If the signer fails or
   times out, or the output is unusable, the reservation is released but that nonce is consumed; on
   the destination chain, later transactions from the address queue behind the missing one until the
   owner fills it (for instance with a self-transfer at that nonce signed outside Minder) or they are
@@ -620,6 +657,14 @@ with its real function-call key.
 | Signer response parsing and the event format | unit `gate::tests::a_well_formed_response_is_assembled`, `invalid_signatures_are_rejected_with_the_reason`, `the_event_carries_the_transaction_fields_and_raw_bytes` |
 | End to end on testnet | the capstone above: real `v1.signer-prod.testnet`, real Sepolia confirmation (not an automated test) |
 | Hex and address helpers | unit `evm::hex_round_trips_and_rejects_bad_input`, `addresses_parse_and_format` |
+| `owner_evm_withdraw` is owner-only (the agent's key is refused by the protocol, a stranger by the owner check) | unit `gate_tests::only_the_owner_can_withdraw_cross_chain`; sandbox `evm_gate::only_the_owner_can_withdraw_cross_chain`, `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` |
+| It works while `Frozen`, with the mandate revoked or no policy, and emits viem's signed transaction | unit `gate_tests::it_works_while_frozen_and_emits_the_signed_transaction`, `it_works_with_the_mandate_revoked_and_no_policy`; sandbox `evm_gate::the_owner_can_withdraw_while_frozen_outside_policy_with_no_accounting` |
+| It is outside policy and touches neither `reserved` nor the window (over the cap, non-allowlisted recipient, in flight and committed spend unchanged through dispatch and every callback outcome) | unit `gate_tests::it_is_outside_policy_and_touches_neither_reserved_nor_the_window`; sandbox `evm_gate::the_owner_can_withdraw_while_frozen_outside_policy_with_no_accounting`, `a_failed_signer_call_changes_nothing_for_the_owner` |
+| The explicit nonce is used; the counter becomes `max(counter, nonce + 1)`; a replacement leaves it; the agent never takes a used nonce | unit `gate_tests::the_explicit_nonce_is_used_and_the_counter_moves_to_max_of_counter_and_nonce_plus_one`, `a_cancellation_is_a_zero_value_transfer_to_the_sender_itself`, `it_rejects_a_malformed_recipient_and_an_exhausted_nonce`; sandbox `evm_gate::the_counter_follows_max_of_counter_and_nonce_plus_one_and_the_agent_never_collides` |
+| Hash integrity: the signer is sent the hash of the transaction the contract built, and the callback carries it | unit `gate_tests::the_signer_is_sent_the_hash_of_the_transaction_the_contract_built`; sandbox `evm_gate::the_owner_can_withdraw_while_frozen_outside_policy_with_no_accounting` (viem's hash) |
+| Owner path authenticity: a signature by another key, or a mismatched `sender`, emits nothing and is logged; unusable results emit nothing and book nothing | unit `gate_tests::a_signature_by_another_key_is_not_emitted_for_the_owner_either`, `a_mismatched_sender_configuration_emits_nothing_for_the_owner`, `unusable_signer_results_emit_nothing_and_book_nothing_for_the_owner`; sandbox `evm_gate::a_signature_by_another_key_is_not_emitted_for_the_owner`, `a_mismatched_sender_configuration_emits_nothing_for_the_owner` |
+| The owner callback has gas to spare | sandbox `evm_gate::the_owner_callback_has_gas_to_spare` (about 2.0 of 25 Tgas) |
+| Signing is confined to `request_evm_payment` and `owner_evm_withdraw`; the public surface is the committed snapshot | `tests/signing_confinement.rs`; `tests/method_surface.rs` against `tests/snapshots/method-surface.txt` |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
@@ -702,7 +747,7 @@ every step. Every step of every harness driver runs every check.
 | Settlement still happens, and books correctly, after freeze, revoke or expiry while in flight | | yes | | yes | |
 | Mandate (epoch, revoked, expiry) and frozen state equal the oracle | | yes | | yes | |
 | Agent authentication is by key: every grant switches to the other of two keys, and a request signed with the key the mandate no longer names is never approved (`NotAuthorized` once the mandate checks that rank above it pass), and `dry_run` agrees | | yes | | yes | |
-| EVM nonce: the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
+| EVM nonce (agent path; `owner_evm_withdraw` is deliberately outside this rule and is not in the harness's alphabet): the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
 | Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |
 | G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `OtherSigner` | all | |
 | The signed-transaction event is emitted if and only if the signature assembles and recovers to the configured sender (`OtherSigner` is genuine but by another key), and an unusable or inauthentic result is logged as booked with nothing emitted | yes | yes | yes | yes | |

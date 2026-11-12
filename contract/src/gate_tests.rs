@@ -898,3 +898,371 @@ fn settlement_is_independent_of_changes_made_in_flight() {
 fn hex_array(text: &str) -> [u8; 32] {
     evm::hex_decode(text).unwrap().try_into().unwrap()
 }
+
+// ---- Owner recovery: owner_evm_withdraw ----
+
+/// An address no policy allows.
+const NOT_ALLOWLISTED: &str = "0x00000000000000000000000000000000000000aa";
+/// Far over every cap and the window limit.
+const HUGE: u128 = 5_000_000_000_000_000;
+
+fn owner_tx(nonce: u64, to: &str, value: u128) -> Eip1559Tx {
+    Eip1559Tx {
+        to: evm::parse_address(to).unwrap(),
+        ..expected_tx(nonce, value)
+    }
+}
+
+fn signer_response_for(tx: &Eip1559Tx, signer: Signer) -> Vec<u8> {
+    signer_response(&fixture_signature(&evm::signing_hash(tx), signer))
+}
+
+fn owner_withdraw(minder: &mut Minder, to: &str, value: u128, nonce: u64) {
+    as_owner();
+    let _ = minder.owner_evm_withdraw(to.to_string(), U128(value), U64(nonce));
+}
+
+/// Runs the owner callback as the contract with the signer's result and
+/// returns what it logged.
+fn settle_owner(minder: &Minder, tx: Eip1559Tx, result: PromiseResult) -> Vec<String> {
+    testing_env!(
+        context("minder.near").build(),
+        near_sdk::test_vm_config(),
+        RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result]
+    );
+    minder.on_owner_sign_complete(tx);
+    let logs = get_logs();
+    testing_env!(agent_context().build());
+    logs
+}
+
+fn owner_events(logs: &[String]) -> Vec<Value> {
+    event_lines(logs)
+        .into_iter()
+        .inspect(|event| assert_eq!(event["event"], "evm_owner_withdrawal_signed"))
+        .collect()
+}
+
+#[test]
+fn only_the_owner_can_withdraw_cross_chain() {
+    let mut minder = armed_evm();
+    // The agent's own key, the contract's account and a stranger.
+    for context in [
+        agent_context(),
+        super::test_support::context("minder.near"),
+        super::test_support::context("bob.near"),
+    ] {
+        testing_env!(context.build());
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = minder.owner_evm_withdraw(RECIPIENT.to_string(), U128(1), U64(0));
+        }));
+        assert!(panic_message(result).contains("Only the owner can call this method"));
+    }
+    assert!(
+        get_created_receipts().is_empty(),
+        "nothing reached the signer"
+    );
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(0));
+}
+
+#[test]
+fn it_needs_the_evm_configuration() {
+    testing_env!(context("owner.near").build());
+    let mut minder = Minder::init(account("owner.near"), U64(400), 4);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.owner_evm_withdraw(RECIPIENT.to_string(), U128(1), U64(0));
+    }));
+    assert!(panic_message(result).contains("not configured"));
+}
+
+#[test]
+fn it_rejects_a_malformed_recipient_and_an_exhausted_nonce() {
+    let mut minder = armed_evm();
+    as_owner();
+    for (recipient, nonce) in [("0x1234", 0), (RECIPIENT, u64::MAX)] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = minder.owner_evm_withdraw(recipient.to_string(), U128(1), U64(nonce));
+        }));
+        assert!(result.is_err(), "{recipient} at {nonce}");
+    }
+    assert!(get_created_receipts().is_empty());
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(0));
+}
+
+#[test]
+fn it_works_while_frozen_and_emits_the_signed_transaction() {
+    let mut minder = armed_evm();
+    as_owner();
+    minder.freeze();
+    // The agent is stopped...
+    testing_env!(agent_context().build());
+    assert_eq!(
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1)),
+        Decision::Deny(DenyReason::Frozen)
+    );
+
+    // ...the owner is not.
+    owner_withdraw(&mut minder, RECIPIENT, 1000, 0);
+    let tx = owner_tx(0, RECIPIENT, 1000);
+    let logs = settle_owner(
+        &minder,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Sender)),
+    );
+
+    let events = owner_events(&logs);
+    assert_eq!(events.len(), 1);
+    let data = &events[0]["data"][0];
+    let reference = fixture_signature(&evm::signing_hash(&tx), Signer::Sender).raw_tx;
+    assert_eq!(data["raw_tx"], format!("0x{}", evm::hex_encode(&reference)));
+    assert_eq!(
+        (data["nonce"].as_u64(), data["value"].as_str()),
+        (Some(0), Some("1000"))
+    );
+}
+
+#[test]
+fn it_works_with_the_mandate_revoked_and_no_policy() {
+    let mut minder = armed_evm();
+    as_owner();
+    minder.revoke_mandate();
+    minder.remove_asset_policy(evm_asset());
+    owner_withdraw(&mut minder, RECIPIENT, 1000, 0);
+    assert_eq!(
+        get_created_receipts()
+            .iter()
+            .filter(|r| r.receiver_id == account("signer.near"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn it_is_outside_policy_and_touches_neither_reserved_nor_the_window() {
+    let mut minder = armed_evm();
+    // Something in flight and something committed, so unchanged is not just zero.
+    request(&mut minder, 1000);
+    settle(
+        &mut minder,
+        1000 + FEE_COST,
+        0,
+        1000,
+        PromiseResult::Successful(valid_signature()),
+    );
+    request(&mut minder, 2000);
+    let before = (
+        reserved(&minder, evm_asset()),
+        committed(&minder, evm_asset()),
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000)),
+    );
+    assert!(before.0 > 0 && before.1 > 0);
+
+    // Far over the per-transaction cap and the window limit, to an address that
+    // is on no allowlist.
+    owner_withdraw(&mut minder, NOT_ALLOWLISTED, HUGE, 3);
+    let tx = owner_tx(3, NOT_ALLOWLISTED, HUGE);
+    let sign = function_call(&get_created_receipts(), "signer.near", "sign");
+    assert_eq!(
+        sign.args["request"]["payload_v2"]["Ecdsa"],
+        evm::hex_encode(&evm::signing_hash(&tx))
+    );
+    const { assert!(HUGE > EVM_PER_TX_CAP && HUGE > EVM_WINDOW_LIMIT) };
+
+    let during = (
+        reserved(&minder, evm_asset()),
+        committed(&minder, evm_asset()),
+    );
+    assert_eq!(
+        (during.0, during.1),
+        (before.0, before.1),
+        "dispatch changed accounting"
+    );
+
+    // And the callback books nothing either, whether it emits or not.
+    for result in [
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Sender)),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Other)),
+        PromiseResult::Failed,
+    ] {
+        settle_owner(&minder, tx.clone(), result);
+        assert_eq!(
+            (
+                reserved(&minder, evm_asset()),
+                committed(&minder, evm_asset()),
+                minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000)),
+            ),
+            before
+        );
+    }
+}
+
+#[test]
+fn the_explicit_nonce_is_used_and_the_counter_moves_to_max_of_counter_and_nonce_plus_one() {
+    let mut minder = armed_evm();
+    let sent_nonce = |expected: u64| {
+        let receipts = get_created_receipts();
+        let callback = function_call(&receipts, "minder.near", "on_owner_sign_complete");
+        let sign = function_call(&receipts, "signer.near", "sign");
+        let tx = owner_tx(expected, RECIPIENT, 1);
+        assert_eq!(callback.raw_args, near_sdk::borsh::to_vec(&tx).unwrap());
+        assert_eq!(
+            sign.args["request"]["payload_v2"]["Ecdsa"],
+            evm::hex_encode(&evm::signing_hash(&tx))
+        );
+    };
+
+    // A future nonce advances the counter past it.
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(0));
+    owner_withdraw(&mut minder, RECIPIENT, 1, 5);
+    sent_nonce(5);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(6));
+
+    // A replacement of an issued nonce leaves it alone.
+    owner_withdraw(&mut minder, RECIPIENT, 1, 2);
+    sent_nonce(2);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(6));
+    owner_withdraw(&mut minder, RECIPIENT, 1, 0);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(6));
+
+    // The nonce the agent would take next advances it by one; beyond it, further.
+    owner_withdraw(&mut minder, RECIPIENT, 1, 6);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(7));
+    owner_withdraw(&mut minder, RECIPIENT, 1, 7);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(8));
+
+    // The agent then takes the next free nonce, never one the owner used.
+    testing_env!(agent_context().build());
+    request(&mut minder, 1000);
+    assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(9));
+    let receipts = get_created_receipts();
+    let hash = evm::hex_encode(&evm::signing_hash(&expected_tx(8, 1000)));
+    assert_eq!(
+        function_call(&receipts, "signer.near", "sign").args["request"]["payload_v2"]["Ecdsa"],
+        hash
+    );
+}
+
+#[test]
+fn the_signer_is_sent_the_hash_of_the_transaction_the_contract_built() {
+    let mut minder = armed_evm();
+    owner_withdraw(&mut minder, NOT_ALLOWLISTED, 777, 4);
+    let receipts = get_created_receipts();
+    let tx = owner_tx(4, NOT_ALLOWLISTED, 777);
+
+    let sign = function_call(&receipts, "signer.near", "sign");
+    assert_eq!(
+        sign.args,
+        json!({
+            "request": {
+                "path": "minder-evm-1",
+                "payload_v2": { "Ecdsa": evm::hex_encode(&evm::signing_hash(&tx)) },
+                "domain_id": 0,
+            }
+        })
+    );
+    assert_eq!(sign.deposit, NearToken::from_yoctonear(1));
+    assert!(sign.gas >= Gas::from_tgas(15), "the signer demands 15 Tgas");
+    // The transaction carries the configured chain and fees, the owner's
+    // recipient, value and nonce, and nothing else.
+    assert_eq!(tx.max_fee_per_gas, MAX_FEE);
+    assert_eq!(tx.chain_id, CHAIN_ID);
+
+    let callback = function_call(&receipts, "minder.near", "on_owner_sign_complete");
+    assert!(callback.gas >= Gas::from_tgas(25));
+    assert_eq!(callback.raw_args, near_sdk::borsh::to_vec(&tx).unwrap());
+}
+
+#[test]
+fn a_cancellation_is_a_zero_value_transfer_to_the_sender_itself() {
+    let mut minder = armed_evm();
+    request(&mut minder, 1000); // the agent's transaction at nonce 0, say it is stuck
+    owner_withdraw(&mut minder, &test_sender_hex(), 0, 0);
+    assert_eq!(
+        minder.get_evm_nonce(CHAIN_ID),
+        U64(1),
+        "a replacement leaves the counter"
+    );
+    let tx = owner_tx(0, &test_sender_hex(), 0);
+    let logs = settle_owner(
+        &minder,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Sender)),
+    );
+    assert_eq!(owner_events(&logs).len(), 1);
+}
+
+#[test]
+fn a_signature_by_another_key_is_not_emitted_for_the_owner_either() {
+    let mut minder = armed_evm();
+    owner_withdraw(&mut minder, RECIPIENT, 1000, 0);
+    let tx = owner_tx(0, RECIPIENT, 1000);
+    let logs = settle_owner(
+        &minder,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Other)),
+    );
+    assert!(event_lines(&logs).is_empty());
+    let line = logs
+        .iter()
+        .find(|line| line.contains("authenticity failure"))
+        .expect("an authenticity failure is logged");
+    assert!(line.contains("signer or configuration fault"));
+    assert!(line.starts_with("owner evm withdrawal not emitted"));
+}
+
+#[test]
+fn a_mismatched_sender_configuration_emits_nothing_for_the_owner() {
+    let mut minder = armed_as_agent();
+    testing_env!(context("owner.near").build());
+    minder.set_evm_config(
+        account("signer.near"),
+        "minder-evm-1".to_string(),
+        NOT_ALLOWLISTED.to_string(), // not the key's address
+        CHAIN_ID,
+        U128(MAX_FEE),
+        U128(MAX_PRIORITY_FEE),
+        None,
+    );
+    let _ = minder.owner_evm_withdraw(RECIPIENT.to_string(), U128(1000), U64(0));
+    let tx = owner_tx(0, RECIPIENT, 1000);
+    let logs = settle_owner(
+        &minder,
+        tx.clone(),
+        PromiseResult::Successful(signer_response_for(&tx, Signer::Sender)),
+    );
+    assert!(event_lines(&logs).is_empty());
+    assert!(logs.iter().any(|l| l.contains("authenticity failure")));
+}
+
+#[test]
+fn unusable_signer_results_emit_nothing_and_book_nothing_for_the_owner() {
+    let mut minder = armed_evm();
+    owner_withdraw(&mut minder, RECIPIENT, 1000, 0);
+    let tx = owner_tx(0, RECIPIENT, 1000);
+    let cases = [
+        (PromiseResult::Failed, "not signed"),
+        (
+            PromiseResult::Successful(b"garbage".to_vec()),
+            "signature rejected",
+        ),
+        (
+            PromiseResult::Successful(signature(&format!("02{R}"), S, 2)),
+            "signature rejected",
+        ),
+        (
+            PromiseResult::Successful(vec![b'x'; 5000]),
+            "unreadable signer result",
+        ),
+    ];
+    for (result, expected) in cases {
+        let logs = settle_owner(&minder, tx.clone(), result);
+        assert!(event_lines(&logs).is_empty(), "{expected}");
+        assert!(
+            logs.iter().any(|line| line.contains(expected)),
+            "{expected}: {logs:?}"
+        );
+        assert_eq!(committed(&minder, evm_asset()), 0);
+    }
+}

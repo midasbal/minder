@@ -31,6 +31,18 @@ const EVM_WINDOW_LIMIT: u128 = 120_000_000_000_000;
 // mock signer returns signatures that genuinely recover for these hashes.
 const HASH_NONCE_0: &str = "1a75e78121e9d9ed1cf712c1ddf771430881926816812e670a29c94e84d8d138";
 const HASH_NONCE_1: &str = "4af5cb1e337b3b9b7242504bc4122134331a7bddade33cf6c67adf609b3497cc";
+// viem's signing hashes for the owner's withdrawals (see `vectors/gen-evm-signatures.mjs`):
+// to an address no policy allows, far over every cap, at nonce 3 ...
+const HASH_OWNER_OVER_CAP: &str =
+    "d251a2d9e07335a0679670f35f0e4c7266f09985e33960e4bfd6895519cc2506";
+// ... a zero-value transfer to the sender itself at nonce 0 (a cancellation) ...
+const HASH_OWNER_CANCEL: &str = "7760e5f1f2353e980ecdf78f8821709fdc3347262f5dd2f8112a611ab05fcdfb";
+// ... 1000 wei to the unallowed address at nonce 5, and the agent's payment at nonce 6.
+const HASH_OWNER_NONCE_5: &str = "8775d42074fe48ab63c545d123b85ad7d9eabbde1ce276be49b9414658f6f8b8";
+const HASH_AGENT_NONCE_6: &str = "8d45cd7aa9407c4649ac3163ca9519d674448dca44bd2efe0b38aa50f3085761";
+const NOT_ALLOWLISTED: &str = "0x00000000000000000000000000000000000000aa";
+/// Far over the per-transaction cap and the window limit.
+const HUGE: u128 = 5_000_000_000_000_000;
 const HASH_NONCE_5: &str = "6bbc3bfb4a0955cccc4e0009eb44aa1dfc02975e9ba2127d70829651c2e32dc4";
 
 /// viem's serialization of the sender-signed transaction for a signing hash.
@@ -45,10 +57,26 @@ fn evm() -> Value {
 /// The fixture armed for NEAR, plus an EVM policy, an allowed EVM recipient
 /// and an EVM config pointing at a mock signer.
 async fn armed_evm() -> (Fixture, Contract) {
+    armed_evm_with_sender(&fixture_sender()).await
+}
+
+/// As `armed_evm`, with `sender` configured as the contract's EVM address.
+async fn armed_evm_with_sender(sender: &str) -> (Fixture, Contract) {
     let f = Fixture::armed().await;
     let signer = f.deploy_signer().await;
-    f.register_signatures(&signer, &[HASH_NONCE_0, HASH_NONCE_1, HASH_NONCE_5])
-        .await;
+    f.register_signatures(
+        &signer,
+        &[
+            HASH_NONCE_0,
+            HASH_NONCE_1,
+            HASH_NONCE_5,
+            HASH_OWNER_OVER_CAP,
+            HASH_OWNER_CANCEL,
+            HASH_OWNER_NONCE_5,
+            HASH_AGENT_NONCE_6,
+        ],
+    )
+    .await;
     f.set_policy(evm(), EVM_PER_TX_CAP, EVM_WINDOW_LIMIT).await;
     f.owner_ok(
         "set_evm_recipient",
@@ -60,7 +88,7 @@ async fn armed_evm() -> (Fixture, Contract) {
         json!({
             "signer_id": signer.id(),
             "derivation_path": PATH,
-            "sender": fixture_sender(),
+            "sender": sender,
             "chain_id": CHAIN_ID,
             "max_fee_per_gas": "2000000000",
             "max_priority_fee_per_gas": "1000000000",
@@ -563,4 +591,190 @@ async fn only_the_contract_itself_can_call_the_signing_callback() {
             .unwrap();
         assert_reverts(result, "Method on_sign_complete is private");
     }
+}
+
+// ---- Owner recovery: owner_evm_withdraw ----
+
+async fn owner_withdraw(
+    f: &Fixture,
+    recipient: &str,
+    value: u128,
+    nonce: u64,
+) -> ExecutionFinalResult {
+    owner_withdraw_as(f, &f.owner, recipient, value, nonce).await
+}
+
+/// The event an owner withdrawal emits.
+fn owner_events(result: &ExecutionFinalResult) -> Vec<Value> {
+    let events = events(result);
+    for event in &events {
+        assert_eq!(event["event"], "evm_owner_withdrawal_signed");
+    }
+    events
+}
+
+#[tokio::test]
+async fn only_the_owner_can_withdraw_cross_chain() {
+    let (f, signer) = armed_evm().await;
+    // A stranger reaches the contract and is refused by the owner check. The
+    // agent's own key does not even get that far: the protocol refuses it
+    // (see tests/agent_key.rs, which tries every method).
+    assert_reverts(
+        owner_withdraw_as(&f, &f.outsider, RECIPIENT, 1, 0).await,
+        "Only the owner can call this method",
+    );
+    assert!(signer_requests(&signer).await.is_empty());
+    assert_eq!(nonce(&f).await, "0");
+}
+
+/// Like the agent's request it dispatches the signer (30 Tgas) and reserves
+/// 25 Tgas for the callback, so it needs the gas for both on top of its own.
+async fn owner_withdraw_as(
+    f: &Fixture,
+    who: &near_workspaces::Account,
+    recipient: &str,
+    value: u128,
+    nonce: u64,
+) -> ExecutionFinalResult {
+    who.call(f.contract.id(), "owner_evm_withdraw")
+        .args_json(json!({
+            "recipient": recipient, "value": value.to_string(), "nonce": nonce.to_string(),
+        }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_owner_can_withdraw_while_frozen_outside_policy_with_no_accounting() {
+    let (f, signer) = armed_evm().await;
+    f.record_spend(evm(), 5).await;
+    f.owner_ok("freeze", json!({})).await;
+    assert_reverts(pay(&f, &f.agent, RECIPIENT, VALUE).await, "Denied: Frozen");
+    let before = (f.reserved(evm()).await, f.live_spend(evm()).await);
+
+    // Far over every cap, to an address on no allowlist, while frozen.
+    const { assert!(HUGE > EVM_PER_TX_CAP && HUGE > EVM_WINDOW_LIMIT) };
+    let result = owner_withdraw(&f, NOT_ALLOWLISTED, HUGE, 3).await;
+    assert!(result.is_success(), "{result:?}");
+
+    // viem's hash and viem's signed transaction, emitted once.
+    let requests = signer_requests(&signer).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["hash"], HASH_OWNER_OVER_CAP);
+    assert_eq!(requests[0]["predecessor"], f.contract.id().to_string());
+    let events = owner_events(&result);
+    assert_eq!(events.len(), 1);
+    let data = &events[0]["data"][0];
+    assert_eq!(data["raw_tx"], raw_tx(HASH_OWNER_OVER_CAP));
+    assert_eq!(data["nonce"], 3);
+    assert_eq!(data["to"], NOT_ALLOWLISTED);
+    assert_eq!(data["value"], HUGE.to_string());
+
+    // No reservation, no booking.
+    assert_eq!((f.reserved(evm()).await, f.live_spend(evm()).await), before);
+    // The explicit nonce moved the counter past itself.
+    assert_eq!(nonce(&f).await, "4");
+}
+
+#[tokio::test]
+async fn the_counter_follows_max_of_counter_and_nonce_plus_one_and_the_agent_never_collides() {
+    let (f, signer) = armed_evm().await;
+    // The agent's transaction at nonce 0.
+    let first = pay(&f, &f.agent, RECIPIENT, VALUE).await;
+    assert!(first.is_success(), "{first:?}");
+    assert_eq!(nonce(&f).await, "1");
+
+    // A cancellation of it: the same nonce, so the counter is untouched.
+    let cancel = owner_withdraw(&f, &fixture_sender(), 0, 0).await;
+    assert!(cancel.is_success(), "{cancel:?}");
+    assert_eq!(
+        owner_events(&cancel)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_OWNER_CANCEL)
+    );
+    assert_eq!(nonce(&f).await, "1", "a replacement leaves the counter");
+
+    // A future nonce advances it past that nonce.
+    let ahead = owner_withdraw(&f, NOT_ALLOWLISTED, 1000, 5).await;
+    assert_eq!(
+        owner_events(&ahead)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_OWNER_NONCE_5)
+    );
+    assert_eq!(nonce(&f).await, "6");
+
+    // The agent's next transaction takes nonce 6, never one the owner used.
+    let next = pay(&f, &f.agent, RECIPIENT, VALUE).await;
+    assert!(next.is_success(), "{next:?}");
+    let requests = signer_requests(&signer).await;
+    assert_eq!(requests.last().unwrap()["hash"], HASH_AGENT_NONCE_6);
+    assert_eq!(
+        events(&next)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_AGENT_NONCE_6)
+    );
+    assert_eq!(nonce(&f).await, "7");
+}
+
+#[tokio::test]
+async fn a_signature_by_another_key_is_not_emitted_for_the_owner() {
+    let (f, signer) = armed_evm().await;
+    set_mode(&signer, "OtherSigner").await;
+    let result = owner_withdraw(&f, NOT_ALLOWLISTED, HUGE, 3).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty(), "nothing is emitted");
+    assert!(logs_contain(
+        &result,
+        "owner evm withdrawal not emitted: authenticity failure"
+    ));
+    assert!(logs_contain(&result, "signer or configuration fault"));
+    assert_eq!(f.reserved(evm()).await, 0);
+    assert_eq!(f.live_spend(evm()).await, 0, "the owner path books nothing");
+}
+
+#[tokio::test]
+async fn a_mismatched_sender_configuration_emits_nothing_for_the_owner() {
+    let (f, _signer) = armed_evm_with_sender(RECIPIENT).await;
+    // A cancellation at nonce 0, which leaves the agent nonce 1 (a registered one).
+    let result = owner_withdraw(&f, &fixture_sender(), 0, 0).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(&result, "authenticity failure"));
+    // The agent path agrees: the same configuration emits nothing for it either.
+    let payment = pay(&f, &f.agent, RECIPIENT, VALUE).await;
+    assert!(events(&payment).is_empty());
+    assert!(logs_contain(&payment, "authenticity failure"));
+}
+
+#[tokio::test]
+async fn a_failed_signer_call_changes_nothing_for_the_owner() {
+    let (f, signer) = armed_evm().await;
+    set_mode(&signer, "Fail").await;
+    let result = owner_withdraw(&f, NOT_ALLOWLISTED, HUGE, 3).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(&result, "owner evm withdrawal not signed"));
+    assert_eq!((f.reserved(evm()).await, f.live_spend(evm()).await), (0, 0));
+}
+
+#[tokio::test]
+async fn the_owner_callback_has_gas_to_spare() {
+    let (f, _signer) = armed_evm().await;
+    let result = owner_withdraw(&f, NOT_ALLOWLISTED, HUGE, 3).await;
+    assert_eq!(owner_events(&result).len(), 1);
+    let burnt = result
+        .receipt_outcomes()
+        .iter()
+        .find(|outcome| {
+            outcome
+                .logs
+                .iter()
+                .any(|line| line.starts_with("EVENT_JSON:"))
+        })
+        .map(|outcome| outcome.gas_burnt.as_gas())
+        .expect("the callback receipt emitted the event");
+    println!("on_owner_sign_complete gas burnt: {burnt}");
+    assert!(
+        burnt < 12_500_000_000_000,
+        "under half the 25 Tgas reserve: {burnt}"
+    );
 }

@@ -26,8 +26,10 @@ call grant_mandate
 call init [init]
 view is_evm_recipient_allowed
 view is_recipient_allowed
+view on_owner_sign_complete [private]
 call on_sign_complete [private]
 call on_transfer_complete [private]
+call owner_evm_withdraw
 call owner_withdraw
 call raise_evm_nonce
 call remove_asset_policy

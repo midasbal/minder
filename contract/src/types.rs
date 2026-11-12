@@ -131,6 +131,21 @@ impl From<&EvmConfig> for EvmConfigView {
 }
 
 impl EvmConfig {
+    /// The transaction for a transfer of `value` wei to `to` at `nonce`, on the
+    /// configured chain and at the configured fees. The only place a transaction
+    /// to be signed is assembled, for the agent path and the owner path alike.
+    pub fn build_tx(&self, nonce: u64, to: [u8; 20], value: u128) -> crate::evm::Eip1559Tx {
+        crate::evm::Eip1559Tx {
+            chain_id: self.chain_id,
+            nonce,
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas.0,
+            max_fee_per_gas: self.max_fee_per_gas.0,
+            gas_limit: self.gas_limit,
+            to,
+            value,
+        }
+    }
+
     /// Worst-case wei the transaction can spend on fees. Saturates; `set_evm_config`
     /// rejects configurations where it would.
     pub fn max_fee_cost(&self) -> u128 {

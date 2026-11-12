@@ -24,10 +24,16 @@ use std::path::{Path, PathBuf};
 /// The only functions that may dispatch to the signer's `sign`, as
 /// `(file under the crate root, function name)`.
 ///
-/// To allow another one, add a line here after reviewing it. `owner_evm_withdraw`
-/// joins this list when it lands:
-/// `("src/gate.rs", "owner_evm_withdraw")`.
-const ALLOWED_SIGN_DISPATCH: &[(&str, &str)] = &[("src/gate.rs", "request_evm_payment")];
+/// To allow another one, add a line here after reviewing it.
+///
+/// - `request_evm_payment`: the agent's payment, approved by policy.
+/// - `owner_evm_withdraw`: the owner's recovery and cancellation, outside
+///   policy by design. It builds the transaction itself from the owner's
+///   recipient, value and nonce and the configured chain and fees.
+const ALLOWED_SIGN_DISPATCH: &[(&str, &str)] = &[
+    ("src/gate.rs", "request_evm_payment"),
+    ("src/gate.rs", "owner_evm_withdraw"),
+];
 
 // ---- A small Rust tokenizer ----
 
@@ -645,7 +651,11 @@ fn last() { let _ = \"sign\"; }";
 fn only_the_listed_function_in_the_listed_file_is_allowed() {
     let name = |s: &str| Some(s.to_string());
     assert!(allowed("src/gate.rs", &name("request_evm_payment")));
+    assert!(allowed("src/gate.rs", &name("owner_evm_withdraw")));
     assert!(!allowed("src/gate.rs", &name("freeze")));
+    // The callbacks and the argument builder are not dispatchers.
+    assert!(!allowed("src/gate.rs", &name("on_owner_sign_complete")));
+    assert!(!allowed("src/gate.rs", &name("signing_request_args")));
     assert!(
         !allowed("src/lib.rs", &name("request_evm_payment")),
         "same name, wrong file"
