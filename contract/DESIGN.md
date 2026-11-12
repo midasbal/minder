@@ -1192,7 +1192,7 @@ alongside the differential corpus (the encoder against viem, byte for byte) and 
 corpus and the harness sample.
 
 **Where.** `contract/kani/` is a crate of its own, outside the contract's build. It includes
-`src/window.rs` and `src/evm.rs` by path (the shipped files, not copies) and holds the proofs in
+`src/window.rs`, `src/evm.rs`, `src/policy.rs` and `src/types.rs` by path (the shipped files, not copies) and holds the proofs in
 `contract/kani/src/proofs.rs`, compiled only under `cargo kani`. The contract's manifest, sources,
 tests and wasm do not see it. Its near-sdk dependency is pinned to the same `=5.29.1` with
 `non-contract-usage`, which is what lets near-sdk compile for the host; no host function is reachable
@@ -1203,11 +1203,11 @@ constant in the module cannot hide in its own proof.
 
 ```
 cargo install --locked kani-verifier && cargo kani setup     # once; Kani installs its own nightly
-cd contract/kani && cargo kani                               # all 11 proofs, about 10 minutes
+cd contract/kani && cargo kani                               # all 18 proofs
 cd contract/kani && cargo kani --harness normalize_s_is_total_and_always_low_s   # one proof
 ```
 
-**Proved** (each verified with 0 failed checks on Kani 0.68.0):
+**Proved** (each verified with 0 failed checks on Kani 0.68.0; the `evaluate` proofs are listed in the next subsection):
 
 | Harness | Property | Bounds |
 | --- | --- | --- |
@@ -1228,6 +1228,42 @@ fail-safe in itself (a saturated total exceeds every limit).
 Together the first two proofs close the argument that matters at the signing boundary: whatever the
 signer returns, `normalized_signature` either refuses it or produces exactly the `(r, s, y_parity)` that
 `encode_signed` and the authenticity check assume.
+
+### The firewall decision: `policy::evaluate`
+
+`evaluate` is the one function every request passes through. It is proved here over symbolic
+`status`, `now`, `expiry`, the calling key (none, the mandate's, or another) and every `u128` field:
+`amount`, `per_tx_cap`, `window_limit`, `effective_spend`, `epoch_usage`, the optional budget and the
+scope's optional cap. The source is the shipped `policy.rs`, included by path.
+
+| Harness | Property |
+| --- | --- |
+| `allow_implies_every_limit_holds` (and `_with_a_recipient_scope`) | If `evaluate` returns Allow, the contract is active, the mandate exists, is unrevoked and unexpired, the key is the mandate's, the asset has a policy and the recipient is allowlisted; `amount <= per_tx_cap`; `effective_spend + amount <= window_limit` with no wraparound (asserted as `effective_spend <= limit` and `amount <= limit - effective_spend`, which cannot wrap); the budget holds the same way; and the scope, when set, names the asset and the recipient and its cap holds |
+| `a_scope_never_widens_authority` (and `_with_a_recipient_scope`) | For every request and every scope, if the scoped evaluation allows, the same request under an unscoped mandate also allows |
+| `frozen_revoked_expired_and_wrong_key_always_deny` | Frozen, no mandate, revoked, expired, or a key other than the mandate's (or no key) each yield Deny with exactly that reason, whatever every other field holds |
+| `the_deny_reason_is_the_first_failing_check_in_the_documented_order` (and `_with_a_recipient_scope`) | The decision equals a chain of conditions restated in the proof from the "Evaluation order" section (Frozen, NoMandate, MandateRevoked, MandateExpired, NotAuthorized, AssetNotAllowed, RecipientNotAllowed, PerTxCapExceeded, WindowLimitExceeded, MandateBudgetExceeded, then AssetOutOfScope, RecipientOutOfScope, the scope's PerTxCapExceeded), Allow only when none fails |
+
+**Bounds.** (a) The calling key is one of two fixed concrete keys, or none. (b) The asset is `Near` or
+`Evm(1)`; the `Nep141` variant, which holds an account id, is not exercised, nor is `Evm20`. The scope's
+asset list holds 0 or 1 entries. (c) The recipient is a NEAR account, `bob.near` or `cat.near` (equal
+length, so the comparison is a real byte comparison), and the scope's recipient list holds 0 or 1 entries;
+the plain harnesses leave it `None`, the `_with_a_recipient_scope` ones let it vary. (d) `allowed_evm_recipients`
+is always `None` and no EVM recipient is evaluated: `format_address` builds a string, which exhausted CBMC's
+memory before. The EVM recipient scope is therefore **not** proved here; it is the same `contains` check as
+the NEAR one, and is covered by the unit tests and the stateful harness. (e) Account ids are built without
+validation (parsing is not under proof).
+
+**Stubbed equality, the one trusted step.** `PublicKey`'s derived `==` compares 33 bytes in a loop, which forced
+an unwind of 35 on the whole program and ran CBMC out of memory with a symbolic key. The proofs replace it
+(`#[kani::stub]`, enabled in the proof crate's manifest, `key_equality`) with a comparison of the curve tag
+and the first data byte, which decides equality exactly for the two fixed keys (they differ in that byte). What is
+trusted, not proved, is that the standard derived `==` on a key is a faithful equality. With the key fixed
+instead, the Allow proof verified without the stub (780 s at unwind 35); with the stub and a symbolic key it
+takes about 90 s at unwind 12.
+
+**Checked against a mutation.** Changing the window check in `policy.rs` to `total <= window_limit + 1` makes
+`allow_implies_every_limit_holds` fail on both of its limit assertions; the file was restored byte for byte
+(sha256 checked).
 
 **Not proved, and why.** Panic-freedom of `try_assemble_signed` *end to end*, and of `encode_signed`
 over every `r`, `s` and numeric field, is **not** proved. The RLP integer encoder trims a symbolic number

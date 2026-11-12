@@ -20,3 +20,8 @@ near-sdk = { version = "=5.29.1", features = ["unstable", "non-contract-usage"] 
 [lints.rust.unexpected_cfgs]
 level = "warn"
 check-cfg = ['cfg(kani)']
+
+# Stubbing replaces `PublicKey`'s derived `==` in the `evaluate` proofs (see
+# `key_equality` in src/proofs.rs).
+[package.metadata.kani.unstable]
+stubbing = true
