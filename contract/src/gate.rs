@@ -170,13 +170,7 @@ impl Minder {
         self.assert_owner();
         let config = self.require_evm_config();
         let to = parse_address(&recipient);
-        let after = nonce
-            .0
-            .checked_add(1)
-            .unwrap_or_else(|| env::panic_str("The nonce space is exhausted"));
-        if after > self.next_nonce(config.chain_id) {
-            self.evm_nonces.insert(config.chain_id, after);
-        }
+        self.advance_nonce_past(config.chain_id, nonce.0);
 
         let tx = config.build_tx(nonce.0, to, value.0);
         let hash = evm::signing_hash(&tx);
@@ -195,7 +189,53 @@ impl Minder {
             )
     }
 
-    /// Finishes `owner_evm_withdraw`. There is nothing to release or book, so
+    /// Owner recovery of an ERC-20 balance of the derived address: signs
+    /// `token.transfer(recipient, amount)` at the explicit `nonce`, for any
+    /// token, recipient and amount. The token counterpart of
+    /// `owner_evm_withdraw`, and the owner's way out for what the agent's
+    /// `request_evm_token_payment` can move only within policy.
+    ///
+    /// Everything about `owner_evm_withdraw` holds: owner-only, any status
+    /// including `Frozen`, entirely outside policy (no token or native policy,
+    /// cap, allowlist, window, budget or scope is consulted, and nothing is
+    /// reserved or booked on the token or on the gas), an explicit nonce for
+    /// cancellation, and the counter moved to `max(counter, nonce + 1)`. The
+    /// contract builds the transaction itself with the same builder as the
+    /// agent's token path (`to` the token, zero value, the `transfer` calldata,
+    /// the configured fees and `token_gas_limit`) and computes the hash itself.
+    /// The result goes through `on_owner_sign_complete`, so it is emitted only
+    /// if the signature recovers to `sender`.
+    pub fn owner_evm_token_withdraw(
+        &mut self,
+        token: String,
+        recipient: String,
+        amount: U128,
+        nonce: U64,
+    ) -> Promise {
+        self.assert_owner();
+        let config = self.require_evm_config();
+        let token = parse_address(&token);
+        let to = parse_address(&recipient);
+        self.advance_nonce_past(config.chain_id, nonce.0);
+
+        let tx = config.build_token_tx(nonce.0, token, &to, amount.0);
+        let hash = evm::signing_hash(&tx);
+
+        Promise::new(config.signer_id.clone())
+            .function_call(
+                "sign".to_string(),
+                signing_request_args(&config, &hash),
+                SIGN_DEPOSIT,
+                SIGN_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(SIGN_CALLBACK_GAS)
+                    .on_owner_sign_complete(tx),
+            )
+    }
+
+    /// Finishes `owner_evm_withdraw` and `owner_evm_token_withdraw`. There is nothing to release or book, so
     /// it changes no state; it only decides whether to emit. The transaction is
     /// emitted for an off-chain relayer iff the signature assembles and
     /// recovers to the configured `sender`; otherwise the reason is logged and
@@ -521,6 +561,19 @@ impl Minder {
             ))
         } else {
             Err(Fault::Inauthentic { recovered, sender })
+        }
+    }
+
+    /// Moves the nonce counter to `max(counter, nonce + 1)` for an owner
+    /// transaction at an explicit `nonce`: a fresh or future nonce advances it
+    /// past itself, so the agent can never take a nonce the owner used, and a
+    /// replacement of an issued nonce leaves it alone.
+    fn advance_nonce_past(&mut self, chain_id: u64, nonce: u64) {
+        let after = nonce
+            .checked_add(1)
+            .unwrap_or_else(|| env::panic_str("The nonce space is exhausted"));
+        if after > self.next_nonce(chain_id) {
+            self.evm_nonces.insert(chain_id, after);
         }
     }
 

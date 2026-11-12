@@ -33,10 +33,15 @@ use std::path::{Path, PathBuf};
 /// - `request_evm_token_payment`: the agent's ERC-20 payment. The contract
 ///   builds the `transfer` calldata itself (the selector, the padded recipient
 ///   and the amount, nothing else) and policy approves both its legs first.
+/// - `owner_evm_token_withdraw`: the owner's recovery of an ERC-20 balance, the
+///   counterpart of `owner_evm_withdraw`. It builds the same `transfer`
+///   transaction as the agent's token path from the owner's token, recipient,
+///   amount and nonce, outside policy.
 const ALLOWED_SIGN_DISPATCH: &[(&str, &str)] = &[
     ("src/gate.rs", "request_evm_payment"),
     ("src/gate.rs", "request_evm_token_payment"),
     ("src/gate.rs", "owner_evm_withdraw"),
+    ("src/gate.rs", "owner_evm_token_withdraw"),
 ];
 
 // ---- A small Rust tokenizer ----
@@ -657,6 +662,7 @@ fn only_the_listed_function_in_the_listed_file_is_allowed() {
     assert!(allowed("src/gate.rs", &name("request_evm_payment")));
     assert!(allowed("src/gate.rs", &name("owner_evm_withdraw")));
     assert!(allowed("src/gate.rs", &name("request_evm_token_payment")));
+    assert!(allowed("src/gate.rs", &name("owner_evm_token_withdraw")));
     assert!(!allowed("src/gate.rs", &name("freeze")));
     // The callbacks and the argument builder are not dispatchers.
     assert!(!allowed("src/gate.rs", &name("on_owner_sign_complete")));

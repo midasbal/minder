@@ -85,6 +85,16 @@ const tokenScenarios = [
     nonces: [0n, 1n, 2n, 3n, 4n],
   },
   {
+    // owner_evm_token_withdraw in the gate tests and the sandbox: any recipient (one no
+    // policy allows, and the sender itself), any amount (zero and far over every cap),
+    // explicit nonces, at the default token gas limit
+    name: 'token-owner-withdrawal',
+    base: { chainId: 11155111n, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2_000_000_000n, gas: 100000n },
+    recipients: [EVM_ALLOWED, NOT_ALLOWLISTED, 'SENDER'],
+    amounts: [0n, 1000n, 10n ** 30n],
+    nonces: [0n, 1n, 2n, 3n, 5n, 7n],
+  },
+  {
     // the model harness: tiny fees, a token gas limit of 4, amounts at, below and over the cap
     name: 'token-model-harness',
     base: { chainId: 5n, maxPriorityFeePerGas: 1n, maxFeePerGas: 5n, gas: 4n },
@@ -116,7 +126,8 @@ for (const scenario of scenarios) {
 }
 
 for (const scenario of tokenScenarios) {
-  for (const recipient of scenario.recipients) {
+  for (const listed of scenario.recipients) {
+    const recipient = listed === 'SENDER' ? addresses.A : listed;
     for (const nonce of scenario.nonces) {
       for (const amount of scenario.amounts) {
         const tx = { type: 'eip1559', ...scenario.base, to: TOKEN, nonce, value: 0n, data: transferData(recipient, amount), accessList: [] };

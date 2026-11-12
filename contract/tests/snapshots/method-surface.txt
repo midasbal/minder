@@ -30,6 +30,7 @@ view is_recipient_allowed
 view on_owner_sign_complete [private]
 call on_sign_complete [private]
 call on_transfer_complete [private]
+call owner_evm_token_withdraw
 call owner_evm_withdraw
 call owner_withdraw
 call raise_evm_nonce

@@ -46,6 +46,20 @@ const HASH_AGENT_NONCE_6: &str = "8d45cd7aa9407c4649ac3163ca9519d674448dca44bd2e
 const HASH_TOKEN_NONCE_0: &str = "457bff992d74e59ac0dc6b9fcae10b15efa6272f2a9674ef1fa4193a23631b85";
 const HASH_TOKEN_NONCE_1: &str = "3c15cb8ec54c0e0f027648d8a88cd17d53e5366b6ce2a2281fc58a9a82869b0b";
 const TOKEN: &str = "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
+// viem's signing hashes for the owner's token recoveries: 1e30 tokens (far over
+// any cap) to an address no policy allows at nonce 3; zero tokens to the sender
+// itself at nonce 0 (a cancellation); 1000 to the unallowed address at nonce 5;
+// and the agent's token payment of 1000 at nonce 4, the nonce after the first.
+const HASH_OWNER_TOKEN_OVER_CAP: &str =
+    "1ac5ca85c8eaafee245b26a52c30590065696e4be08f6c94b1e1c7daa8df9432";
+const HASH_OWNER_TOKEN_CANCEL: &str =
+    "659f396f4e4928def1efa7561ee1242dbcf4e1fa67b26efb4aee4f9006e5834f";
+const HASH_OWNER_TOKEN_NONCE_5: &str =
+    "6498e5f07e1a5e747d07090dad2b65091247fe05a6c63c0f07d1e452ef4e19ea";
+const HASH_AGENT_TOKEN_NONCE_4: &str =
+    "dbd232000f859688284e6274b0dea8c7703f8370c47d5861c19d996fe5c05dc6";
+/// 1e30: far over any token cap.
+const HUGE_TOKENS: u128 = 1_000_000_000_000_000_000_000_000_000_000;
 /// 100000 gas at 2 gwei: what a token payment's gas is accounted at.
 const TOKEN_GAS: u128 = 200_000_000_000_000;
 const NOT_ALLOWLISTED: &str = "0x00000000000000000000000000000000000000aa";
@@ -84,6 +98,10 @@ async fn armed_evm_with_sender(sender: &str) -> (Fixture, Contract) {
             HASH_AGENT_NONCE_6,
             HASH_TOKEN_NONCE_0,
             HASH_TOKEN_NONCE_1,
+            HASH_OWNER_TOKEN_OVER_CAP,
+            HASH_OWNER_TOKEN_CANCEL,
+            HASH_OWNER_TOKEN_NONCE_5,
+            HASH_AGENT_TOKEN_NONCE_4,
         ],
     )
     .await;
@@ -1001,6 +1019,164 @@ async fn the_token_callback_has_gas_to_spare() {
         .map(|outcome| outcome.gas_burnt.as_gas())
         .expect("the callback receipt emitted the event");
     println!("token on_sign_complete gas burnt: {burnt}");
+    assert!(
+        burnt < 12_500_000_000_000,
+        "under half the 25 Tgas reserve: {burnt}"
+    );
+}
+
+// ---- Owner recovery of tokens: owner_evm_token_withdraw ----
+
+async fn owner_token_withdraw(
+    f: &Fixture,
+    who: &near_workspaces::Account,
+    recipient: &str,
+    amount: u128,
+    nonce: u64,
+) -> ExecutionFinalResult {
+    who.call(f.contract.id(), "owner_evm_token_withdraw")
+        .args_json(json!({
+            "token": TOKEN, "recipient": recipient, "amount": amount.to_string(),
+            "nonce": nonce.to_string(),
+        }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn only_the_owner_can_recover_tokens_and_the_agent_key_is_refused_by_the_protocol() {
+    let (f, signer) = armed_token().await;
+    assert_reverts(
+        owner_token_withdraw(&f, &f.outsider, RECIPIENT, 1, 0).await,
+        "Only the owner can call this method",
+    );
+    // The agent's key is limited to the agent methods: the runtime refuses the
+    // call before any contract code runs.
+    let refused = f
+        .agent
+        .call(f.contract.id(), "owner_evm_token_withdraw")
+        .args_json(json!({ "token": TOKEN, "recipient": RECIPIENT, "amount": "1", "nonce": "0" }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await;
+    assert!(
+        format!("{refused:?}").contains("MethodNameMismatch"),
+        "{refused:?}"
+    );
+    assert!(signer_requests(&signer).await.is_empty());
+    assert_eq!(nonce(&f).await, "0");
+}
+
+#[tokio::test]
+async fn the_owner_recovers_tokens_while_frozen_outside_policy_with_no_accounting() {
+    // No policy for the token, and the native policy too small for any token
+    // payment's gas: the agent could not move a single token.
+    let (f, signer) = armed_evm().await;
+    f.owner_ok("freeze", json!({})).await;
+    let before = (
+        f.reserved(token_asset()).await,
+        f.live_spend(token_asset()).await,
+        f.reserved(evm()).await,
+        f.live_spend(evm()).await,
+    );
+
+    let result = owner_token_withdraw(&f, &f.owner, NOT_ALLOWLISTED, HUGE_TOKENS, 3).await;
+    assert!(result.is_success(), "{result:?}");
+
+    // viem's hash of the transfer, and viem's signed serialization of it.
+    let requests = signer_requests(&signer).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["hash"], HASH_OWNER_TOKEN_OVER_CAP);
+    let events = owner_events(&result);
+    assert_eq!(events.len(), 1);
+    let data = &events[0]["data"][0];
+    assert_eq!(data["raw_tx"], raw_tx(HASH_OWNER_TOKEN_OVER_CAP));
+    assert_eq!(data["to"], TOKEN);
+    assert_eq!(data["value"], "0");
+    assert_eq!(data["nonce"], 3);
+
+    assert_eq!(
+        (
+            f.reserved(token_asset()).await,
+            f.live_spend(token_asset()).await,
+            f.reserved(evm()).await,
+            f.live_spend(evm()).await,
+        ),
+        before
+    );
+    assert_eq!(nonce(&f).await, "4");
+}
+
+#[tokio::test]
+async fn a_token_cancellation_leaves_the_counter_and_a_future_nonce_moves_it_past_itself() {
+    let (f, signer) = armed_token().await;
+    // The agent's token payment takes nonce 0.
+    let first = pay_token(&f, &f.agent, RECIPIENT, 1000).await;
+    assert!(first.is_success(), "{first:?}");
+    assert_eq!(nonce(&f).await, "1");
+
+    // Cancelling it: the same nonce, zero tokens to the sender itself.
+    let cancel = owner_token_withdraw(&f, &f.owner, &fixture_sender(), 0, 0).await;
+    assert_eq!(
+        owner_events(&cancel)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_OWNER_TOKEN_CANCEL)
+    );
+    assert_eq!(nonce(&f).await, "1");
+
+    // A future nonce moves the counter past it, and the agent then takes the
+    // next free one.
+    let ahead = owner_token_withdraw(&f, &f.owner, NOT_ALLOWLISTED, 1000, 3).await;
+    assert!(ahead.is_success(), "{ahead:?}");
+    assert_eq!(nonce(&f).await, "4");
+    let next = pay_token(&f, &f.agent, RECIPIENT, 1000).await;
+    assert!(next.is_success(), "{next:?}");
+    let requests = signer_requests(&signer).await;
+    assert_eq!(requests.last().unwrap()["hash"], HASH_AGENT_TOKEN_NONCE_4);
+    assert_eq!(
+        events(&next)[0]["data"][0]["raw_tx"],
+        raw_tx(HASH_AGENT_TOKEN_NONCE_4)
+    );
+    assert_eq!(nonce(&f).await, "5");
+}
+
+#[tokio::test]
+async fn a_token_recovery_signed_by_another_key_or_a_mismatched_sender_is_not_emitted() {
+    let (f, signer) = armed_evm().await;
+    set_mode(&signer, "OtherSigner").await;
+    let result = owner_token_withdraw(&f, &f.owner, NOT_ALLOWLISTED, HUGE_TOKENS, 3).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(
+        &result,
+        "owner evm withdrawal not emitted: authenticity failure"
+    ));
+
+    let (f, _signer) = armed_evm_with_sender(RECIPIENT).await;
+    let result = owner_token_withdraw(&f, &f.owner, &fixture_sender(), 0, 0).await;
+    assert!(result.is_success(), "{result:?}");
+    assert!(events(&result).is_empty());
+    assert!(logs_contain(&result, "authenticity failure"));
+}
+
+#[tokio::test]
+async fn the_token_recovery_callback_has_gas_to_spare() {
+    let (f, _signer) = armed_evm().await;
+    let result = owner_token_withdraw(&f, &f.owner, NOT_ALLOWLISTED, HUGE_TOKENS, 3).await;
+    assert_eq!(owner_events(&result).len(), 1);
+    let burnt = result
+        .receipt_outcomes()
+        .iter()
+        .find(|outcome| {
+            outcome
+                .logs
+                .iter()
+                .any(|line| line.starts_with("EVENT_JSON:"))
+        })
+        .map(|outcome| outcome.gas_burnt.as_gas())
+        .expect("the callback receipt emitted the event");
+    println!("on_owner_sign_complete (token) gas burnt: {burnt}");
     assert!(
         burnt < 12_500_000_000_000,
         "under half the 25 Tgas reserve: {burnt}"

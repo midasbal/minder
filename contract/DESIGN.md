@@ -16,7 +16,7 @@ contract's own account (see Agent authority).
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
-| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `on_owner_sign_complete`), EVM views |
+| `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `owner_evm_token_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
@@ -300,7 +300,7 @@ its account at each token contract. It keeps no ledger of them; the balances are
 ### Threat-model boundary
 
 **Minder contains the untrusted agent, not the owner.** The owner owns the treasury, so
-`owner_withdraw` (and its cross-chain counterpart `owner_evm_withdraw`) is intentionally
+`owner_withdraw` (and its cross-chain counterparts `owner_evm_withdraw` and `owner_evm_token_withdraw`) is intentionally
 unrestricted. Defending against a compromised owner key is out of MVP scope; the Tier 2
 policy-change timelock is the eventual mitigation.
 
@@ -571,9 +571,35 @@ to any recipient in any amount. It has two jobs: recovery, and cancellation.
   callback's 2.4, as it does not touch storage), so the reserve is unchanged. The call needs the
   same prepaid gas as a request (about 55 Tgas plus its own work; the tests attach 100): the default
   30 Tgas of a plain call fails with "Exceeded the prepaid gas".
-- **Signing confinement.** `owner_evm_withdraw` is the second, and only other, function allowed to
-  dispatch `sign` (`tests/signing_confinement.rs`). The request-body builder is a separate function
-  that does not dispatch, and both callbacks are not dispatchers.
+- **Signing confinement.** `owner_evm_withdraw` is one of the functions allowed to dispatch `sign`
+  (`tests/signing_confinement.rs`; the others are the agent's two payment methods and
+  `owner_evm_token_withdraw`). The request-body builder is a separate function that does not
+  dispatch, and both callbacks are not dispatchers.
+
+### Owner recovery of tokens: `owner_evm_token_withdraw(token, recipient, amount, nonce) -> Promise`
+
+How `owner_evm_withdraw` recovers ETH: owner-only, any status, outside policy, no accounting, an
+explicit nonce, the transaction built and hashed by the contract and checked by `ecrecover` before it
+is emitted. This is the same for an ERC-20 balance, which the agent can otherwise move only within
+policy, so the derived address's tokens are no longer beyond the owner's reach.
+
+- **Outside policy on every count:** no token policy, native policy, cap, allowlist, window, budget,
+  scope or mandate is consulted, and nothing is reserved, released or booked, on the token or on the
+  gas. The owner can move any amount of any token to any recipient, with the contract frozen or the
+  mandate revoked.
+- **The transaction is built by the agent path's own builder.** `EvmConfig::build_token_tx`: `to` the
+  token, zero value, `erc20_transfer_calldata(recipient, amount)`, the configured fees and
+  `token_gas_limit`. The hash is computed by the contract; no blind signing.
+- **Explicit nonce, same counter rule:** `advance_nonce_past` moves the counter to
+  `max(counter, nonce + 1)` (shared with `owner_evm_withdraw`), so a replacement of an issued nonce
+  leaves it and a fresh or future nonce moves it past itself. Cancelling a stuck agent token payment
+  is a zero-amount transfer to the sender at its nonce, with fees raised first.
+- **Same callback.** `on_owner_sign_complete` is reused unchanged, so the authenticity gate is the
+  same and the event is the same `evm_owner_withdrawal_signed`; the raw transaction carries the
+  transfer (`to` the token, `value` 0, the recipient and amount in the calldata). No new callback, no
+  new stored state.
+- **The agent cannot reach it.** It is owner-only and not in `AGENT_METHODS`, so the runtime refuses
+  the agent's key before any contract code runs (`tests/agent_key.rs` tries every exported method).
 
 ### ERC-20 token payments: `request_evm_token_payment(token, recipient, amount)`
 
@@ -622,10 +648,8 @@ unchanged: the transaction is emitted only if the signature recovers to `sender`
 - **Confinement.** The agent's access key may call `request_evm_token_payment` (it is in
   `AGENT_METHODS`), and the function is the third that may dispatch `sign`
   (`tests/signing_confinement.rs`).
-- **Boundaries this chunk leaves, disclosed.** (a) *Owner recovery of tokens is not built:* the owner
-  can send the derived address's ETH anywhere with `owner_evm_withdraw`, but there is no owner path
-  that moves an ERC-20 balance out; only the agent, within policy, can. That is a gap in the
-  owner-recovery invariant for tokens and the next piece to build. (b) *The outcome is not observed:*
+- **Boundaries, disclosed.** (a) *Owner recovery of tokens* was missing when the firewall landed and
+  is now `owner_evm_token_withdraw` (see Owner recovery of tokens, above). (b) *The outcome is not observed:*
   as for native payments, the contract is outbound-only. It cannot see whether the token call
   succeeds on the destination chain (a token may revert, charge a fee, or return nothing, as USDT
   does); the amount and the worst-case gas are booked on a signed receipt regardless, which can only
@@ -853,6 +877,12 @@ with its real function-call key.
 | The mandate scope applies to the token and the decoded recipient and its cap, not to the gas | unit `gate_tests::the_mandate_scope_applies_to_the_token_and_the_recipient_but_not_to_the_gas`; `policy` gas-leg checks via the harness |
 | Dual reservation is TOCTOU-safe; both legs settle or release exactly once; a failed receipt books neither; authenticity still gates emission (G1 on both legs) | unit `gate_tests::both_reservations_are_made_together_and_the_second_request_sees_them`, `a_successful_receipt_books_both_assets_and_a_failed_one_releases_both_and_books_none`, `a_token_transfer_signed_by_another_key_is_booked_on_both_assets_but_not_emitted`; sandbox `evm_gate::an_in_flight_token_payment_holds_both_reservations_and_releases_both_when_it_fails`, `a_failing_signer_releases_both_legs_and_books_neither` |
 | Native ETH path unchanged; token and native payments share the nonce counter; the token gas limit is configurable | unit `gate_tests::a_native_payment_is_unchanged_by_token_support`, `token_payments_share_the_nonce_counter_with_native_payments`, `the_token_gas_limit_is_configurable_and_must_be_positive`, `the_native_entry_points_refuse_token_assets`; every native test above |
+| `owner_evm_token_withdraw` is owner-only; the agent's key is refused by the protocol | unit `gate_tests::only_the_owner_can_recover_tokens`; sandbox `evm_gate::only_the_owner_can_recover_tokens_and_the_agent_key_is_refused_by_the_protocol`, `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_three_agent_ones` |
+| It works while `Frozen` and is outside policy for any token, amount and recipient (no token or native policy needed), emitting viem's signed transfer | unit `gate_tests::it_works_while_frozen_and_emits_viems_serialization_of_the_transfer`, `it_is_outside_policy_for_any_token_amount_and_recipient`; sandbox `evm_gate::the_owner_recovers_tokens_while_frozen_outside_policy_with_no_accounting` |
+| No accounting: reserved, window and budget of the token and of ETH are unchanged through dispatch and every callback outcome | unit `gate_tests::it_touches_neither_reserved_nor_the_window_nor_the_budget_of_either_asset`; sandbox as above |
+| The signer is sent the hash of the transfer the contract built (calldata checked against viem); the token gas limit is the configured one | unit `gate_tests::the_signer_is_sent_the_hash_of_the_token_transfer_the_contract_built`, `the_owner_token_transfer_uses_the_configured_token_gas_limit`; sandbox (viem's hash `HASH_OWNER_TOKEN_OVER_CAP`) |
+| Explicit nonce used; counter `max(counter, nonce + 1)`; a replacement leaves it; the agent never takes a used nonce | unit `gate_tests::the_explicit_nonce_is_used_and_the_counter_moves_to_max_of_counter_and_nonce_plus_one_for_tokens`, `it_needs_the_evm_configuration_and_valid_addresses_and_a_usable_nonce`; sandbox `evm_gate::a_token_cancellation_leaves_the_counter_and_a_future_nonce_moves_it_past_itself` |
+| Authenticity: a signature by another key, or a mismatched `sender`, emits nothing | unit `gate_tests::a_signature_by_another_key_is_not_emitted_for_a_token_recovery`, `a_mismatched_sender_configuration_emits_nothing_for_a_token_recovery`; sandbox `evm_gate::a_token_recovery_signed_by_another_key_or_a_mismatched_sender_is_not_emitted` |
 | The token callback has gas to spare | sandbox `evm_gate::the_token_callback_has_gas_to_spare` (about 3.2 of 25 Tgas) |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
