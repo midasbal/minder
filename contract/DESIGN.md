@@ -1159,6 +1159,64 @@ successful-but-unusable outcome. This was checked by temporarily reverting the f
 Run it with `cargo test --lib model_tests` (about a minute and a half) and the fuzz with
 `cargo test --lib gate::tests`.
 
+## Formal verification (Kani)
+
+Bounded model checking of the pure modules with [Kani](https://github.com/model-checking/kani) 0.68.0,
+alongside the differential corpus (the encoder against viem, byte for byte) and the stateful harness
+(the contract against a shadow model). Kani proves a property for *every* input within stated bounds; the
+corpus and the harness sample.
+
+**Where.** `contract/kani/` is a crate of its own, outside the contract's build. It includes
+`src/window.rs` and `src/evm.rs` by path (the shipped files, not copies) and holds the proofs in
+`contract/kani/src/proofs.rs`, compiled only under `cargo kani`. The contract's manifest, sources,
+tests and wasm do not see it. Its near-sdk dependency is pinned to the same `=5.29.1` with
+`non-contract-usage`, which is what lets near-sdk compile for the host; no host function is reachable
+from the code under proof. The secp256k1 order is restated in the proofs from the standard, so a wrong
+constant in the module cannot hide in its own proof.
+
+**Run.**
+
+```
+cargo install --locked kani-verifier && cargo kani setup     # once; Kani installs its own nightly
+cd contract/kani && cargo kani                               # all 11 proofs, about 10 minutes
+cd contract/kani && cargo kani --harness normalize_s_is_total_and_always_low_s   # one proof
+```
+
+**Proved** (each verified with 0 failed checks on Kani 0.68.0):
+
+| Harness | Property | Bounds |
+| --- | --- | --- |
+| `normalize_s_is_total_and_always_low_s` | For every `s` in `1..n` and recovery id 0 or 1, `normalize_s` does not panic; the output is `1 <= s' <= n/2` with `y_parity` 0 or 1; a low `s` passes through, otherwise `s' = n - s` (checked as a 256-bit sum) and the parity flips | none: all 2^256 values of `s` |
+| `normalized_signature_is_total_and_yields_only_valid_signatures` | For every affine point of 0 to 34 bytes, scalar of 0 to 34 bytes and recovery id, `normalized_signature` does not panic, and an accepted signature has `1 <= r < n` (`r` is the point's x), `1 <= s <= n/2`, `y_parity` 0 or 1, from a 33-byte point with prefix 02 or 03 and a 32-byte scalar | lengths stop at 34: every longer input takes the same early return as 34; the bytes are fully symbolic |
+| `encoding_any_recipient_never_panics` | Encoding (unsigned and signed) a transaction with any recipient address does not panic | the rest of the transaction is a fixed base transfer |
+| `encoding_any_55_bytes_of_data_never_panics`, `encoding_any_56_bytes_of_data_never_panics` | The same for any calldata of 55 bytes (the longest short RLP string) and of 56 (the shortest long one) | the lengths; every byte symbolic |
+| `the_ring_never_under_counts_with_{1,2,3}_slots` | For arbitrary spends and a query at an arbitrary later time, the sliding window counts at least the true spend inside the window (the fail-safe direction the policy relies on), over windows of 1, 2 and 3 slots | see below |
+| `the_ring_holds_spend_at_most_one_slot_too_long_with_{1,2,3}_slots` | And at most the spend made within one slot beyond the window (it over-enforces by no more than a slot width) | see below |
+
+The window proofs make 3 spends at arbitrary non-decreasing times and amounts (`u8`, so the true sum
+cannot overflow) and a later query; `K` is fixed per proof, the slot length is 1 to 8 ns and times are
+below 1,600 (about 200 slots, far past the ring's span, so every index wrap and every expiry is
+reached). Wider bounds (slot lengths to 2^20, times to 2^32) did not finish in the time allowed, and a
+symbolic `K` or full 64-bit times exhausted memory. Saturation of a sum is a separate argument and a
+fail-safe in itself (a saturated total exceeds every limit).
+
+Together the first two proofs close the argument that matters at the signing boundary: whatever the
+signer returns, `normalized_signature` either refuses it or produces exactly the `(r, s, y_parity)` that
+`encode_signed` and the authenticity check assume.
+
+**Not proved, and why.** Panic-freedom of `try_assemble_signed` *end to end*, and of `encode_signed`
+over every `r`, `s` and numeric field, is **not** proved. The RLP integer encoder trims a symbolic number
+of leading zeros and copies a symbolic-length slice into a `Vec`, and CBMC exhausted memory (11 GB) on
+every harness that made an integer or a signature symbolic (chain id, nonce, gas, fees, value, `r`, `s`,
+a single data byte), at several unwinding depths. Those harnesses were removed rather than left failing.
+For that remaining part the floor is the differential corpus (1,743 cases, byte for byte against viem,
+including the integer widths and RLP edges) and the byte-level fuzz tests (10,000 cases per property,
+`try_assemble_signed_never_panics_and_accepts_exactly_the_acceptable_signatures` among them). The
+sliding window is proved only inside the bounds above; the stateful harness covers the rest.
+
+**Environment note.** `cargo kani setup` installs Kani's own nightly toolchain next to the pinned
+stable 1.94.1; the pinned toolchain is not changed.
+
 ## Running
 
 ```

@@ -1,0 +1,22 @@
+# Kani proofs of the pure modules. A crate of its own, outside the contract's
+# build: it includes the pure source files by path and proves properties of
+# them with `cargo kani`. Nothing here is compiled into the contract, its wasm
+# or its tests. See DESIGN.md, "Formal verification".
+[package]
+name = "minder-kani"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detached from any workspace, so `cargo kani` here builds only this crate.
+[workspace]
+
+[dependencies]
+# The same exact version as the contract. `non-contract-usage` is what lets
+# near-sdk compile for the host, which Kani needs; no host function is reachable
+# from the code under proof (it calls none).
+near-sdk = { version = "=5.29.1", features = ["unstable", "non-contract-usage"] }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(kani)']
