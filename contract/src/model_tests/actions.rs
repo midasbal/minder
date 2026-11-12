@@ -56,6 +56,13 @@ pub enum PolicyVariant {
     Tight,
     Default,
     Loose,
+    /// The default cap and window, plus a lifetime budget of 70 per mandate
+    /// grant: it binds before the window of 100 does.
+    Budget70,
+    /// The default cap and window, plus a lifetime budget of 150: the window
+    /// binds first within a window, the budget once spend has accumulated across
+    /// windows.
+    Budget150,
 }
 
 impl PolicyVariant {
@@ -65,6 +72,16 @@ impl PolicyVariant {
             PolicyVariant::Tight => (30, 60),
             PolicyVariant::Default => (50, 100),
             PolicyVariant::Loose => (80, 160),
+            PolicyVariant::Budget70 | PolicyVariant::Budget150 => (50, 100),
+        }
+    }
+
+    /// The per-grant lifetime budget, if any.
+    pub fn budget(self) -> Option<u128> {
+        match self {
+            PolicyVariant::Budget70 => Some(70),
+            PolicyVariant::Budget150 => Some(150),
+            _ => None,
         }
     }
 }
@@ -237,6 +254,8 @@ pub fn full_alphabet() -> Vec<Action> {
             PolicyVariant::Tight,
             PolicyVariant::Default,
             PolicyVariant::Loose,
+            PolicyVariant::Budget70,
+            PolicyVariant::Budget150,
         ] {
             actions.push(Action::SetPolicy { asset, variant });
         }

@@ -24,12 +24,18 @@ use super::{NUM_BUCKETS, SLOT_LEN};
 pub struct Policy {
     pub cap: u128,
     pub limit: u128,
+    /// Lifetime budget per mandate grant.
+    pub budget: Option<u128>,
 }
 
 impl Policy {
     pub fn of(variant: PolicyVariant) -> Policy {
         let (cap, limit) = variant.limits();
-        Policy { cap, limit }
+        Policy {
+            cap,
+            limit,
+            budget: variant.budget(),
+        }
     }
 }
 
@@ -70,6 +76,13 @@ pub struct Model {
     /// The owner lowered this asset's limit below what was already counted;
     /// until it decays, `effective > limit` is expected for that asset.
     pub lowered: [bool; 2],
+    /// The same for the lifetime budget: the owner set a budget below what the
+    /// current grant has already used. Usage only falls when a new grant resets
+    /// it, so it stays set until then (or until the budget is raised).
+    pub budget_lowered: [bool; 2],
+    /// Committed spend per asset since the current mandate was granted. Unlike
+    /// the window it never ages out; a new grant resets it.
+    pub epoch_committed: [u128; 2],
     pub next_nonce: u64,
     /// Every `(chain, nonce)` the contract has handed out, as observed in the
     /// transactions it built. History only: not part of the fingerprint.
@@ -98,6 +111,8 @@ impl Model {
             committed: [Vec::new(), Vec::new()],
             reserved: [0; 2],
             lowered: [false; 2],
+            budget_lowered: [false; 2],
+            epoch_committed: [0; 2],
             next_nonce: 0,
             issued: BTreeSet::new(),
             queue: Vec::new(),
@@ -127,6 +142,12 @@ impl Model {
     pub fn effective(&self, asset: Asset) -> u128 {
         self.live_committed(asset)
             .saturating_add(self.reserved[asset.index()])
+    }
+
+    /// What the budget is counted against: this grant's committed spend plus
+    /// everything in flight.
+    pub fn epoch_usage(&self, asset: Asset) -> u128 {
+        self.epoch_committed[asset.index()].saturating_add(self.reserved[asset.index()])
     }
 
     /// The expected decision for a request by the mandated agent, in the
@@ -164,6 +185,12 @@ impl Model {
             Some(total) if total <= policy.limit => {}
             _ => return Err(DenyReason::WindowLimitExceeded),
         }
+        if let Some(budget) = policy.budget {
+            match self.epoch_usage(asset).checked_add(outlay) {
+                Some(total) if total <= budget => {}
+                _ => return Err(DenyReason::MandateBudgetExceeded),
+            }
+        }
         // Only a request that passed every global check meets the mandate's
         // scope, so a scope can only subtract from what the policy allows.
         match self.mandate.scope {
@@ -195,6 +222,12 @@ impl Model {
             if self.effective(asset) <= self.policy[i].limit {
                 self.lowered[i] = false;
             }
+            if self.policy[i]
+                .budget
+                .is_none_or(|budget| self.epoch_usage(asset) <= budget)
+            {
+                self.budget_lowered[i] = false;
+            }
         }
         if now >= self.mandate.expiry {
             self.ghost_lapsed_epoch = Some(self.mandate.epoch);
@@ -220,6 +253,8 @@ impl Model {
 
     pub fn grant(&mut self, expiry: u64, scope: Scope) {
         self.last_epoch += 1;
+        // The epoch bump resets every asset's budget.
+        self.epoch_committed = [0; 2];
         self.mandate = ModelMandate {
             expiry,
             epoch: self.last_epoch,
@@ -238,6 +273,9 @@ impl Model {
         let policy = Policy::of(variant);
         self.policy[asset.index()] = policy;
         self.lowered[asset.index()] = self.effective(asset) > policy.limit;
+        self.budget_lowered[asset.index()] = policy
+            .budget
+            .is_some_and(|budget| self.epoch_usage(asset) > budget);
     }
 
     pub fn reserve(&mut self, asset: Asset, outlay: u128) {
@@ -253,6 +291,9 @@ impl Model {
         self.reserved[i] = self.reserved[i].saturating_sub(pending.outlay);
         if outcome.books_spend() {
             self.committed[i].push((self.now, pending.outlay));
+            // Booked under the grant that is current at settlement, which may
+            // be a later one than the request was made under.
+            self.epoch_committed[i] = self.epoch_committed[i].saturating_add(pending.outlay);
         }
         pending
     }
@@ -288,7 +329,7 @@ impl Model {
                 self.policy,
                 &self.committed,
                 self.reserved,
-                self.lowered,
+                (self.lowered, self.budget_lowered, self.epoch_committed),
                 self.next_nonce,
                 &self.queue,
                 self.ghost_frozen,

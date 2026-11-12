@@ -18,8 +18,8 @@ use near_sdk::{
 };
 
 pub use types::{
-    AssetId, AssetPolicy, Config, Decision, DenyReason, EvmConfig, EvmConfigView, Mandate,
-    MandateScope, Status,
+    AssetId, AssetPolicy, Config, Decision, DenyReason, EpochSpend, EvmConfig, EvmConfigView,
+    Mandate, MandateScope, Status,
 };
 
 use policy::{EvalInput, RecipientRef};
@@ -61,6 +61,7 @@ enum StorageKey {
     Reserved,
     EvmRecipients,
     EvmNonces,
+    EpochSpend,
 }
 
 #[near(contract_state)]
@@ -86,6 +87,12 @@ pub struct Minder {
     evm_recipients: IterableSet<[u8; 20]>,
     /// Next nonce to hand out per chain id. Only ever increases.
     evm_nonces: LookupMap<u64, u64>,
+    /// Committed spend per asset under one mandate epoch, for the policy's
+    /// `epoch_budget`. An entry from an older epoch than the current mandate's
+    /// reads as zero (see [`Self::epoch_committed`]). Like `spend`, it is kept
+    /// when a policy is removed, so removing and re-adding a policy cannot
+    /// reset a budget.
+    epoch_spend: LookupMap<AssetId, EpochSpend>,
 }
 
 #[near]
@@ -132,19 +139,31 @@ impl Minder {
             evm_config: None,
             evm_recipients: IterableSet::new(StorageKey::EvmRecipients),
             evm_nonces: LookupMap::new(StorageKey::EvmNonces),
+            epoch_spend: LookupMap::new(StorageKey::EpochSpend),
         }
     }
 
     // ---- Owner-only ----
 
     /// Creates or replaces the policy for `asset`, which also allowlists it.
-    pub fn set_asset_policy(&mut self, asset: AssetId, per_tx_cap: U128, window_limit: U128) {
+    /// `epoch_budget` is an optional lifetime budget per mandate grant (see
+    /// [`AssetPolicy::epoch_budget`]); omit it for the window alone. Spend is
+    /// tracked per epoch whether or not a budget is set, so a budget set
+    /// mid-grant counts what that grant already spent.
+    pub fn set_asset_policy(
+        &mut self,
+        asset: AssetId,
+        per_tx_cap: U128,
+        window_limit: U128,
+        epoch_budget: Option<U128>,
+    ) {
         self.assert_owner();
         self.policies.insert(
             asset,
             AssetPolicy {
                 per_tx_cap,
                 window_limit,
+                epoch_budget,
             },
         );
     }
@@ -526,6 +545,37 @@ impl Minder {
             .entry(asset.clone())
             .or_insert_with(|| SpendRing::new(num_buckets))
             .record(now, slot_len, amount);
+
+        // And into the budget counter of the current mandate epoch. This is a
+        // settlement under whatever grant is current now: spend that was
+        // reserved under an earlier grant and settles after a re-grant is
+        // charged to the new one, where it was already being counted as
+        // in flight. That can only tighten the new grant, never loosen it.
+        let committed = self.epoch_committed(asset).saturating_add(amount);
+        self.epoch_spend.insert(
+            asset.clone(),
+            EpochSpend {
+                epoch: self.current_epoch(),
+                committed,
+            },
+        );
+    }
+
+    /// The epoch of the current mandate. Epochs start at 1, so 0 means no
+    /// mandate was ever granted.
+    fn current_epoch(&self) -> u64 {
+        self.mandate.as_ref().map_or(0, |mandate| mandate.epoch)
+    }
+
+    /// Committed spend of `asset` under the current mandate epoch: the stored
+    /// amount if it belongs to this epoch, otherwise zero. The lazy reset: a
+    /// new grant bumps the epoch, and every older entry then reads as zero
+    /// with nothing written.
+    pub(crate) fn epoch_committed(&self, asset: &AssetId) -> u128 {
+        match self.epoch_spend.get(asset) {
+            Some(spend) if spend.epoch == self.current_epoch() => spend.committed,
+            _ => 0,
+        }
     }
 
     /// Evaluation for the NEAR recipient allowlist. Used by both `dry_run` and
@@ -571,6 +621,10 @@ impl Minder {
                 self.live_spend(asset),
                 self.reserved_of(asset),
             ),
+            epoch_usage: policy::effective_spend(
+                self.epoch_committed(asset),
+                self.reserved_of(asset),
+            ),
         })
     }
 }
@@ -581,6 +635,8 @@ pub(crate) fn page(from_index: Option<u32>, limit: Option<u32>) -> (usize, usize
     (skip, take)
 }
 
+#[cfg(test)]
+mod budget_tests;
 #[cfg(test)]
 mod custody_tests;
 #[cfg(test)]

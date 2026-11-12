@@ -68,7 +68,7 @@ fn as_owner() {
 fn fresh() -> Minder {
     testing_env!(context("owner.near").build());
     let mut minder = Minder::init(account("owner.near"), U64(400), 4);
-    minder.set_asset_policy(AssetId::Near, U128(PER_TX_CAP), U128(WINDOW_LIMIT));
+    minder.set_asset_policy(AssetId::Near, U128(PER_TX_CAP), U128(WINDOW_LIMIT), None);
     minder.set_recipient(account("bob.near"), true);
     minder
 }

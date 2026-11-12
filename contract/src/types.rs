@@ -41,6 +41,22 @@ pub struct Config {
 pub struct AssetPolicy {
     pub per_tx_cap: U128,
     pub window_limit: U128,
+    /// A lifetime budget for one mandate grant: the most that may be spent of
+    /// this asset (committed plus in flight) between a grant and the next. It
+    /// resets on every new grant and does not decay with time, so it bounds the
+    /// loss per grant however many windows elapse. `None` is no budget, only
+    /// the window applies.
+    pub epoch_budget: Option<U128>,
+}
+
+/// What has been committed of one asset under one mandate epoch. Stale (an
+/// older epoch than the current mandate's) reads as zero, so a new grant resets
+/// every asset's budget without touching storage.
+#[near(serializers = [borsh])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpochSpend {
+    pub epoch: u64,
+    pub committed: u128,
 }
 
 /// The agent's authority. A grant always carries a fresh, strictly larger
@@ -132,6 +148,9 @@ pub enum DenyReason {
     AssetOutOfScope,
     /// The mandate's scope does not include this recipient.
     RecipientOutOfScope,
+    /// Committed spend of the asset under this mandate grant plus what is in
+    /// flight plus this request would exceed the policy's `epoch_budget`.
+    MandateBudgetExceeded,
 }
 
 #[near(serializers = [borsh, json])]

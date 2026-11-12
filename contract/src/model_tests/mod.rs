@@ -191,6 +191,49 @@ fn exhaustive_mandate_scopes() {
 }
 
 #[test]
+fn exhaustive_epoch_budgets() {
+    // Lifetime budgets that bind before the window (70 against a window of
+    // 100) and after it (150), on both assets, with spend accumulating across
+    // window ageing, in-flight requests counted against the budget, failed
+    // deliveries giving it back, and a re-grant resetting it, including a
+    // delivery that lands after the re-grant.
+    let alphabet = [
+        request(Asset::Near, Amount::Mid),
+        request(Asset::Near, Amount::AtCap),
+        request(Asset::Evm, Amount::Mid),
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Budget70,
+        },
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Budget150,
+        },
+        Action::SetPolicy {
+            asset: Asset::Evm,
+            variant: PolicyVariant::Budget70,
+        },
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
+        deliver(Pick::Oldest, Outcome::Ok),
+        deliver(Pick::Newest, Outcome::Fail),
+        Action::Advance(Tick::Window),
+    ];
+    let stats = run_exhaustive("budget", &alphabet, DEPTH);
+    assert_covered(
+        &stats.coverage,
+        &[
+            "Allowed(Near)",
+            "Allowed(Evm)",
+            "Denied(Near, MandateBudgetExceeded)",
+            "Denied(Evm, MandateBudgetExceeded)",
+            "Denied(Near, WindowLimitExceeded)",
+            "Delivered(Near, Ok)",
+            "Delivered(Near, Fail)",
+        ],
+    );
+}
+
+#[test]
 fn exhaustive_policy_changes_and_caps() {
     // The owner tightening and loosening limits under in-flight spend, caps,
     // and a recipient that is not allowlisted.
@@ -272,6 +315,8 @@ fn random_long_sequences() {
             "Denied(Evm, NotAuthorized)",
             "Denied(Evm, AssetOutOfScope)",
             "Denied(Near, RecipientOutOfScope)",
+            "Denied(Near, MandateBudgetExceeded)",
+            "Denied(Evm, MandateBudgetExceeded)",
             "Delivered(Near, Ok)",
             "Delivered(Near, Fail)",
             "Delivered(Evm, Ok)",

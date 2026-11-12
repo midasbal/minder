@@ -60,7 +60,7 @@ pub fn armed_as_agent() -> Minder {
     testing_env!(context("owner.near").build());
     let mut minder = Minder::init(account("owner.near"), U64(400), 4);
     for asset in [AssetId::Near, token()] {
-        minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT));
+        minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT), None);
     }
     minder.set_recipient(account("bob.near"), true);
     minder.grant_mandate(agent_key(), U64(u64::MAX), None);

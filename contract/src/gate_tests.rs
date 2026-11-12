@@ -39,7 +39,12 @@ fn recipient_bytes() -> [u8; 20] {
 fn armed_evm() -> Minder {
     let mut minder = armed_as_agent();
     testing_env!(context("owner.near").build());
-    minder.set_asset_policy(evm_asset(), U128(EVM_PER_TX_CAP), U128(EVM_WINDOW_LIMIT));
+    minder.set_asset_policy(
+        evm_asset(),
+        U128(EVM_PER_TX_CAP),
+        U128(EVM_WINDOW_LIMIT),
+        None,
+    );
     minder.set_evm_recipient(RECIPIENT.to_string(), true);
     minder.set_evm_config(
         account("signer.near"),
@@ -661,7 +666,12 @@ fn a_sender_that_differs_from_the_signing_key_blocks_emission() {
     // key derives to, so even the signer's genuine signatures are not emitted.
     let mut minder = armed_as_agent();
     testing_env!(context("owner.near").build());
-    minder.set_asset_policy(evm_asset(), U128(EVM_PER_TX_CAP), U128(EVM_WINDOW_LIMIT));
+    minder.set_asset_policy(
+        evm_asset(),
+        U128(EVM_PER_TX_CAP),
+        U128(EVM_WINDOW_LIMIT),
+        None,
+    );
     minder.set_evm_recipient(RECIPIENT.to_string(), true);
     minder.set_evm_config(
         account("signer.near"),
@@ -1407,4 +1417,44 @@ fn an_unscoped_mandate_leaves_the_evm_surface_as_it_was() {
     assert_eq!(evm_decision(&minder, RECIPIENT, 1000), Decision::Allow);
     assert!(evm_request_denial(&mut minder, RECIPIENT, 1000).is_none());
     assert_eq!(minder.get_evm_nonce(CHAIN_ID), U64(1));
+}
+
+// ---- Lifetime budget on the EVM surface ----
+
+#[test]
+fn the_evm_budget_counts_outlays_in_flight_and_binds_before_the_window() {
+    let mut minder = armed_evm();
+    // Window 1.5e14, per-transaction cap 1e14; budget 1e14. One payment's
+    // outlay is 4.2e13 plus its value, so two fit the budget and three do not.
+    as_owner();
+    minder.set_asset_policy(
+        evm_asset(),
+        U128(EVM_PER_TX_CAP),
+        U128(EVM_WINDOW_LIMIT),
+        Some(U128(100_000_000_000_000)),
+    );
+    testing_env!(agent_context().build());
+
+    assert_eq!(
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000)),
+        Decision::Allow
+    );
+    request(&mut minder, 1000);
+    request(&mut minder, 1000);
+    // Both are still in flight, nothing is committed: the reserved outlays
+    // alone are what the third meets, and the window (1.5e14) would allow it.
+    assert_eq!(committed(&minder, evm_asset()), 0);
+    assert_eq!(
+        minder.dry_run_evm(agent_key(), RECIPIENT.to_string(), U128(1000)),
+        Decision::Deny(DenyReason::MandateBudgetExceeded)
+    );
+    let denied = catch_unwind(AssertUnwindSafe(|| {
+        let _ = minder.request_evm_payment(RECIPIENT.to_string(), U128(1000));
+    }));
+    assert!(panic_message(denied).contains("Denied: MandateBudgetExceeded"));
+    assert_eq!(
+        minder.get_evm_nonce(CHAIN_ID),
+        U64(2),
+        "a denied request takes no nonce"
+    );
 }

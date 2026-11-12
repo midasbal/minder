@@ -31,6 +31,10 @@ pub struct EvalInput<'a> {
     /// Spend counted against the window limit: committed spend plus in-flight
     /// reservations. See [`effective_spend`].
     pub effective_spend: u128,
+    /// Committed spend of the asset under the current mandate epoch plus what
+    /// is in flight, counted against the policy's `epoch_budget` exactly as
+    /// `effective_spend` is counted against the window. See [`effective_spend`].
+    pub epoch_usage: u128,
 }
 
 /// What the window limit is checked against: spend already committed inside
@@ -84,12 +88,23 @@ fn deny_reason(input: &EvalInput) -> Option<DenyReason> {
     }
     // An overflowing total is over any limit.
     match input.effective_spend.checked_add(input.amount) {
-        Some(total) if total <= policy.window_limit.0 => scope_denial(input, mandate),
-        _ => Some(DenyReason::WindowLimitExceeded),
+        Some(total) if total <= policy.window_limit.0 => {}
+        _ => return Some(DenyReason::WindowLimitExceeded),
     }
+    // The lifetime budget of this grant. It is part of the asset's global
+    // policy, so it is checked with the global checks, after the window: where
+    // both would deny, the window is the reason, as it always was.
+    if let Some(budget) = policy.epoch_budget {
+        match input.epoch_usage.checked_add(input.amount) {
+            Some(total) if total <= budget.0 => {}
+            _ => return Some(DenyReason::MandateBudgetExceeded),
+        }
+    }
+    scope_denial(input, mandate)
 }
 
-/// The mandate's scope, applied to a request that passed every global check.
+/// The mandate's scope, applied to a request that passed every global check
+/// (including the budget).
 /// `None` fields restrict nothing.
 fn scope_denial(input: &EvalInput, mandate: &Mandate) -> Option<DenyReason> {
     let scope = &mandate.scope;
@@ -146,6 +161,7 @@ mod tests {
     const POLICY: AssetPolicy = AssetPolicy {
         per_tx_cap: U128(10),
         window_limit: U128(25),
+        epoch_budget: None,
     };
 
     fn run(adjust: impl FnOnce(&mut EvalInput)) -> Decision {
@@ -195,6 +211,7 @@ mod tests {
             recipient_allowed: true,
             amount: 5,
             effective_spend: 0,
+            epoch_usage: 0,
         };
         adjust(&mut input);
         evaluate(&input)
@@ -465,5 +482,76 @@ mod tests {
             ),
             Decision::Deny(DenyReason::WindowLimitExceeded)
         );
+    }
+
+    // ---- Lifetime budget ----
+
+    const BUDGETED: AssetPolicy = AssetPolicy {
+        epoch_budget: Some(U128(40)),
+        ..POLICY
+    };
+
+    #[test]
+    fn the_budget_counts_epoch_usage_plus_the_request_and_is_inclusive() {
+        let with = |usage: u128, amount: u128| {
+            run(|i| {
+                i.policy = Some(&BUDGETED);
+                i.epoch_usage = usage;
+                i.amount = amount;
+            })
+        };
+        assert_eq!(with(35, 5), Decision::Allow);
+        assert_eq!(
+            with(36, 5),
+            Decision::Deny(DenyReason::MandateBudgetExceeded)
+        );
+        assert_eq!(
+            with(u128::MAX, 1),
+            Decision::Deny(DenyReason::MandateBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn no_budget_means_the_window_alone_however_much_was_spent() {
+        assert_eq!(run(|i| i.epoch_usage = u128::MAX / 2), Decision::Allow);
+    }
+
+    #[test]
+    fn the_window_is_the_reason_when_both_would_deny_and_the_budget_decides_otherwise() {
+        let denied = |effective_spend: u128, epoch_usage: u128| {
+            run(|i| {
+                i.policy = Some(&BUDGETED);
+                i.effective_spend = effective_spend;
+                i.epoch_usage = epoch_usage;
+            })
+        };
+        // Window 25, budget 40, request 5: only the window denies.
+        assert_eq!(
+            denied(21, 0),
+            Decision::Deny(DenyReason::WindowLimitExceeded)
+        );
+        // Only the budget denies.
+        assert_eq!(
+            denied(0, 36),
+            Decision::Deny(DenyReason::MandateBudgetExceeded)
+        );
+        // Both: the window, as before budgets existed.
+        assert_eq!(
+            denied(21, 36),
+            Decision::Deny(DenyReason::WindowLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn the_budget_is_a_global_check_so_it_comes_before_the_scope() {
+        let scope = MandateScope {
+            allowed_assets: Some(Vec::new()),
+            ..MandateScope::default()
+        };
+        let denied = run_with(scoped(scope), Some(key(1)), |i| {
+            i.policy = Some(&BUDGETED);
+            i.epoch_usage = 40;
+        });
+        assert_eq!(denied, Decision::Deny(DenyReason::MandateBudgetExceeded));
     }
 }

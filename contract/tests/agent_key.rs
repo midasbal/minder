@@ -605,3 +605,63 @@ async fn a_scoped_mandate_confines_the_real_key_to_less_than_the_global_policy()
 fn key_of(agent: &Account) -> String {
     agent.secret_key().public_key().to_string()
 }
+
+// ---- The per-grant lifetime budget ----
+
+#[tokio::test]
+async fn a_budget_bounds_what_one_grant_can_spend_and_a_new_grant_starts_afresh() {
+    let f = Fixture::armed().await;
+    // A window that never binds here, so the budget alone is on test.
+    f.owner_ok(
+        "set_asset_policy",
+        json!({
+            "asset": near(), "per_tx_cap": "50", "window_limit": "1000", "epoch_budget": "70",
+        }),
+    )
+    .await;
+    let policy: Value = f.view("get_asset_policy", json!({ "asset": near() })).await;
+    assert_eq!(policy["epoch_budget"], "70");
+
+    // 40 + 30 uses the whole budget; one more is refused, though the window has room.
+    for amount in [40, 30] {
+        let result = request_amount(&f, &f.agent, amount).await;
+        assert!(result.is_success(), "{result:?}");
+    }
+    assert_eq!(f.live_spend(near()).await, 70);
+    assert_eq!(
+        f.dry_run(near(), 1).await,
+        deny(minder::DenyReason::MandateBudgetExceeded)
+    );
+    assert_reverts(
+        request_amount(&f, &f.agent, 1).await,
+        "Denied: MandateBudgetExceeded",
+    );
+
+    // A new grant (revoke, then a new key) is a new epoch: a fresh budget,
+    // with nothing written to reset it, while the window still holds the 70.
+    f.owner_ok("revoke_mandate", json!({})).await;
+    let new_key = SecretKey::from_random(KeyType::ED25519);
+    let expiry = f.now().await + 3_600 * SECOND;
+    f.grant(&new_key.public_key().to_string(), expiry).await;
+    assert_eq!(f.live_spend(near()).await, 70);
+    let new_agent = Account::from_secret_key(f.contract.id().clone(), new_key, &f.worker);
+    for amount in [40, 30] {
+        let result = request_amount(&f, &new_agent, amount).await;
+        assert!(result.is_success(), "{result:?}");
+    }
+    assert_reverts(
+        request_amount(&f, &new_agent, 1).await,
+        "Denied: MandateBudgetExceeded",
+    );
+}
+
+async fn request_amount(f: &Fixture, who: &Account, amount: u128) -> ExecutionFinalResult {
+    who.call(f.contract.id(), "request_local_transfer")
+        .args_json(json!({
+            "asset": near(), "amount": amount.to_string(), "recipient": f.recipient.id(),
+        }))
+        .gas(near_workspaces::types::Gas::from_tgas(AGENT_TGAS))
+        .transact()
+        .await
+        .unwrap()
+}

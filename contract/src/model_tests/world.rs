@@ -93,7 +93,12 @@ impl World {
         let mut minder = Minder::init(account(OWNER), U64(WINDOW_LEN), NUM_BUCKETS);
         for asset in ASSETS {
             let policy = super::model::Policy::of(super::actions::PolicyVariant::Default);
-            minder.set_asset_policy(asset_id(asset), U128(policy.cap), U128(policy.limit));
+            minder.set_asset_policy(
+                asset_id(asset),
+                U128(policy.cap),
+                U128(policy.limit),
+                policy.budget.map(U128),
+            );
         }
         minder.set_recipient(account(NEAR_ALLOWED), true);
         minder.set_evm_recipient(EVM_ALLOWED.to_string(), true);
@@ -209,7 +214,10 @@ impl World {
             },
             Action::SetPolicy { asset, variant } => {
                 let (cap, limit) = variant.limits();
-                owner_call(|| minder.set_asset_policy(asset_id(asset), U128(cap), U128(limit)))?;
+                let budget = variant.budget().map(U128);
+                owner_call(|| {
+                    minder.set_asset_policy(asset_id(asset), U128(cap), U128(limit), budget)
+                })?;
                 model.set_policy(asset, variant);
                 Observed::Other
             }
@@ -542,6 +550,25 @@ fn check_invariants(
             "{asset:?}: effective spend {effective} passed the limit {}",
             model.policy[i].limit
         );
+
+        // The lifetime budget. The contract's per-epoch counter (read through
+        // its own lazy-reset accessor, so a stale entry from an earlier grant
+        // must read as zero) equals the model's, and usage, which counts what
+        // is in flight, never passes the budget except while the owner has
+        // lowered it below what the grant already used.
+        let epoch_committed = minder.epoch_committed(&asset_id(asset));
+        ensure!(
+            epoch_committed == model.epoch_committed[i],
+            "{asset:?}: this grant's committed spend is {epoch_committed}, the model has {}",
+            model.epoch_committed[i]
+        );
+        if let Some(budget) = model.policy[i].budget {
+            ensure!(
+                model.epoch_usage(asset) <= budget || model.budget_lowered[i],
+                "{asset:?}: budget usage {} passed the budget {budget}",
+                model.epoch_usage(asset)
+            );
+        }
 
         // Spend appears only when a callback is delivered, and then by exactly
         // the delivered outlay. The clock is fixed within a step (an `Advance`
