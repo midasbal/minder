@@ -19,7 +19,7 @@ use crate::policy::RecipientRef;
 use crate::types::OwnerChange;
 use crate::types::{
     AssetId, Decision, DenyReason, EvmConfig, EvmConfigView, TokenPaymentDecision,
-    DEFAULT_TOKEN_GAS_LIMIT,
+    DEFAULT_GAS_LIMIT, DEFAULT_TOKEN_GAS_LIMIT,
 };
 use crate::{page, Minder, MinderExt};
 
@@ -39,7 +39,6 @@ const SECP256K1_DOMAIN_ID: u64 = 0;
 /// A signature response is a few hundred bytes of JSON; anything far larger
 /// is not one.
 const MAX_SIGNATURE_RESPONSE_BYTES: usize = 4096;
-pub(crate) const DEFAULT_GAS_LIMIT: u64 = 21_000;
 
 #[near]
 impl Minder {

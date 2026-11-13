@@ -215,6 +215,9 @@ pub struct EvmConfig {
     pub token_gas_limit: u64,
 }
 
+/// Default for [`EvmConfig`]'s `gas_limit`: a plain ETH transfer.
+pub const DEFAULT_GAS_LIMIT: u64 = 21_000;
+
 /// Default for [`EvmConfig::token_gas_limit`]: above what a plain or proxied
 /// token (USDC, USDT) spends on a `transfer`, which is about 50,000 to 65,000.
 pub const DEFAULT_TOKEN_GAS_LIMIT: u64 = 100_000;

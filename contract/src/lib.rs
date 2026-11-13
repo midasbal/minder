@@ -6,6 +6,7 @@
 mod decision;
 pub mod evm;
 mod gate;
+pub mod loosening;
 pub mod policy;
 mod timelock;
 pub mod types;

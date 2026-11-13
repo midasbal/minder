@@ -9,6 +9,9 @@
 #[path = "../../src/types.rs"]
 pub mod types;
 
+#[path = "../../src/loosening.rs"]
+pub mod loosening;
+
 #[path = "../../src/policy.rs"]
 pub mod policy;
 
@@ -18,5 +21,7 @@ pub mod window;
 #[path = "../../src/evm.rs"]
 pub mod evm;
 
+#[cfg(kani)]
+mod loosening_proofs;
 #[cfg(kani)]
 mod proofs;

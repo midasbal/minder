@@ -14,9 +14,10 @@ contract's own account (see Agent authority).
 | --- | --- |
 | `src/types.rs` | `AssetId`, `Status`, `Config`, `AssetPolicy`, `Mandate`, `DenyReason`, `Decision` |
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
+| `src/loosening.rs` | `loosens(&OwnerChange, &impl LooseningState) -> bool`: the tighten-versus-loosen classification of an owner change, pure. It asks its state for what it needs through the `LooseningState` trait, which the contract implements over its storage and the Kani proofs over symbolic data. The only place the timelock's classification lives |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
-| `src/timelock.rs` | The asymmetric owner timelock and the guardian role: classification, `propose_change`, `execute_change`, `cancel_change`, `set_timelock_delay`, `set_treasury`, `set_guardian` |
+| `src/timelock.rs` | The asymmetric owner timelock and the guardian role: the `LooseningState` implementation for `Minder` (the lookups the classifier asks for), `propose_change`, `execute_change`, `cancel_change`, `set_timelock_delay`, `set_treasury`, `set_guardian` |
 | `src/decision.rs` | The decision log: the `decision` NEP-297 event every agent request emits, allowed or denied |
 | `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `owner_evm_token_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
@@ -341,7 +342,7 @@ armed (adding assets and recipients is loosening), after which `set_timelock_del
 timelock.
 
 **Classification** (applied by the contract to the same methods as before, not by separate methods;
-`timelock.rs::is_loosening`):
+`loosening::loosens`, reached through `timelock.rs::is_loosening`):
 
 | Change | Instant when | Timelocked when |
 | --- | --- | --- |
@@ -356,6 +357,18 @@ timelock.
 | `set_guardian` | adding one (none to some), or setting the same one again | removing one (some to none) or replacing it with another account |
 | `owner_withdraw` | `to` is the NEAR treasury | any other destination |
 | `owner_evm_withdraw`, `owner_evm_token_withdraw` | the recipient is the EVM treasury or the contract's own derived address | any other recipient |
+
+**Where the rule lives.** The classification is `loosening::loosens(change, state)` in `src/loosening.rs`, a pure
+function like `policy::evaluate`: every comparison and boundary is in it, and it reads no contract state itself. It
+asks a `LooseningState` for what it needs (the stored policy of an asset, whether a recipient is allowed, the live
+mandate's expiry and whether it is revoked, the stored EVM bounds, the delay, the guardian, the treasuries), one
+lazy lookup per question, so a classification costs no more storage reads than before the extraction. `Minder`
+implements the trait in `timelock.rs` with the same lookups the classification made inline; the Kani proofs
+implement it over plain symbolic data, so what is proved is the shipped file. The extraction moved code and
+changed one representation: the EVM destination checks (the treasury and the contract's own address) compare the
+20 address bytes where they compared the lowercase address text. They agree because the text of an address is a
+one-to-one function of its bytes and the stored treasury is always in that normalized form (`init` and
+`set_treasury` store `normalized_treasury`); see "The timelock classifier" under Formal verification.
 
 Instant grants rest on the policy: an agent holding a malicious grant is still bounded by the current,
 un-loosened caps, windows, allowlists and budgets, which the owner key cannot raise instantly. A
@@ -1343,8 +1356,8 @@ alongside the differential corpus (the encoder against viem, byte for byte) and 
 corpus and the harness sample.
 
 **Where.** `contract/kani/` is a crate of its own, outside the contract's build. It includes
-`src/window.rs`, `src/evm.rs`, `src/policy.rs` and `src/types.rs` by path (the shipped files, not copies) and holds the proofs in
-`contract/kani/src/proofs.rs`, compiled only under `cargo kani`. The contract's manifest, sources,
+`src/window.rs`, `src/evm.rs`, `src/policy.rs`, `src/loosening.rs` and `src/types.rs` by path (the shipped files, not copies) and holds the proofs in
+`contract/kani/src/proofs.rs` and `contract/kani/src/loosening_proofs.rs`, compiled only under `cargo kani`. The contract's manifest, sources,
 tests and wasm do not see it. Its near-sdk dependency is pinned to the same `=5.29.1` with
 `non-contract-usage`, which is what lets near-sdk compile for the host; no host function is reachable
 from the code under proof. The secp256k1 order is restated in the proofs from the standard, so a wrong
@@ -1354,7 +1367,7 @@ constant in the module cannot hide in its own proof.
 
 ```
 cargo install --locked kani-verifier && cargo kani setup     # once; Kani installs its own nightly
-cd contract/kani && cargo kani                               # all 18 proofs
+cd contract/kani && cargo kani                               # every proof (the 18 above, then the 25 of the classifier)
 cd contract/kani && cargo kani --harness normalize_s_is_total_and_always_low_s   # one proof
 ```
 
@@ -1429,6 +1442,122 @@ sliding window is proved only inside the bounds above; the stateful harness cove
 **Environment note.** `cargo kani setup` installs Kani's own nightly toolchain next to the pinned
 stable 1.94.1; the pinned toolchain is not changed.
 
+### The timelock classifier: `loosening::loosens`
+
+`loosens` decides whether an owner change takes effect at once or waits out the timelock. The dangerous failure
+is a real loosening classified as not loosening: it would execute instantly and bypass the timelock. Proved
+here over the shipped `src/loosening.rs` (included by path), in `contract/kani/src/loosening_proofs.rs`. Each
+`OwnerChange` variant has two harnesses over one symbolic case:
+
+- **Soundness** (the one that matters): if the loosening spec holds, `loosens` returns true. No loosening is
+  ever instant.
+- **Completeness**: if `loosens` returns true, the spec holds. With soundness it makes `loosens` equal the spec
+  for that variant. It is stated against the spec below, **not** against "tightening is never loosening": the
+  code is deliberately conservative in places (see the list below).
+
+The specs are written in terms of what a change does to authority, not by copying the comparisons. Kani 0.68.0,
+25 harnesses, all verified with 0 failed checks, about 218 s of solver time in total; every `kani::cover!` is
+satisfied, so no soundness proof is vacuous (the harnesses reach both answers of `loosens`).
+
+| Variant | Loosening spec | Soundness harness (s) | Completeness harness (s) |
+| --- | --- | --- | --- |
+| `SetRecipient` | the address is admitted after the change and was not before | `adding_a_near_recipient_is_never_instant` (3.1) | `near_recipient_classification_is_exactly_the_spec` (2.9) |
+| `SetEvmRecipient` | the same, for the EVM allowlist | `adding_an_evm_recipient_is_never_instant` (3.2) | `evm_recipient_classification_is_exactly_the_spec` (2.9) |
+| `SetAssetPolicy` | **the real `policy::evaluate` is the oracle**: some request (amount, window spend, budget usage, all `u128`) is allowed by the new policy and denied by the old one (no old policy at all included). Completeness: a change classified as instant admits nothing the old policy denied | `a_policy_that_admits_more_is_never_instant` (14.8) | `a_policy_that_is_not_loosening_admits_nothing_new` (22.7) |
+| `GrantMandate` | a live mandate (exists, not revoked, `now < expiry`) is extended, so that the agent is authorized at some time `t >= now` it was not (a symbolic witness `t`); or a fresh budget period is asked for while budget is spent | `extending_a_live_mandate_or_refunding_budget_is_never_instant` (43.0) | `a_grant_is_loosening_only_if_it_extends_a_live_mandate_or_refunds_budget` (28.5) |
+| `Unfreeze` | the contract is active after and was not before | `unfreezing_a_frozen_contract_is_never_instant` (3.5) | `unfreeze_classification_is_exactly_the_spec` (2.2) |
+| `SetEvmConfig` | no configuration yet, or another chain, or any of the four bounds (max fee, max priority fee, gas limit, token gas limit; an omitted limit is its default) strictly raised; every field over its full width | `raising_an_evm_bound_or_moving_the_chain_is_never_instant` (8.1) | `evm_config_classification_is_exactly_the_spec` (8.2) |
+| `SetTimelockDelay` | the new delay is strictly shorter than the current one (zero included) | `a_shorter_delay_is_never_instant` (2.9) | `delay_classification_is_exactly_the_spec` (2.5) |
+| `SetTreasury` | either recovery destination differs from the stored one | `changing_a_treasury_is_never_instant` (12.1) | `treasury_classification_is_exactly_the_spec` (9.3) |
+| `SetGuardian` | the set of accounts that can veto loses a member: a guardian exists and is not the guardian after | `removing_or_replacing_the_guardian_is_never_instant` (6.3) | `guardian_classification_is_exactly_the_spec` (6.6) |
+| `OwnerWithdraw` | the destination is not the registered NEAR treasury | `paying_out_to_a_non_treasury_account_is_never_instant` (5.3) | `near_withdrawal_classification_is_exactly_the_spec` (4.4) |
+| `OwnerEvmWithdraw` | the destination is neither the EVM treasury nor the contract's own address, as 20 bytes | `paying_out_to_an_unsafe_evm_address_is_never_instant` (5.0) | `evm_withdrawal_classification_is_exactly_the_spec` (4.6) |
+| `OwnerEvmTokenWithdraw` | the same | `a_token_payout_to_an_unsafe_evm_address_is_never_instant` (8.0) | `evm_token_withdrawal_classification_is_exactly_the_spec` (6.6) |
+
+Also `a_destination_is_safe_only_if_it_is_the_treasury_or_the_sender` (1.5): `is_safe_destination` over every
+20-byte address. For `SetAssetPolicy` the oracle (the real `evaluate`) was tractable, so the fallback of restated
+arithmetic was not needed.
+
+**What the symbolic state is, exactly.** The classifier asks its state only for numbers, flags, membership of one
+element, equality of optional accounts and equality of 20-byte addresses. Numbers, flags and bytes have full
+symbolic range (`u64`, `u128`, `[u8; 20]`). A membership is one symbolic bool, which is every answer a set could
+give for that one element, so the set-valued dimensions (both recipient allowlists) are proved with **no bound**.
+An optional account (the guardian, a treasury, a payout target) is drawn from `{none, a.near, b.near}`: the
+classifier only compares accounts for equality, and two names of equal length make that a real byte comparison.
+The `unwind` bounds in the harnesses (12, and 24 for the 20-byte comparisons) are the loop bounds of those
+comparisons, not bounds on a value.
+
+**Trusted, not proved.** (a) *Parsing*: the state returns a symbolic 20 bytes for any address text, so the proofs
+are about the classification given what parsing returns. Parsing is host-panicking code (`gate::parse_address`,
+`treasury_address`) covered by the unit tests, and `Minder` does it exactly as the inline code did. (b) *The EVM
+destination is compared as 20 bytes*, where the contract compared the lowercase text of the addresses before the
+extraction. The proof relies on two facts, both test-covered: the text of an address is a one-to-one function of
+its bytes (`evm::tests::addresses_parse_and_format` round-trips both ways and checks the lowercase form), and the
+stored treasury is always normalized (`init` and `set_treasury` store `normalized_treasury`; the timelock tests
+`recovery_to_the_treasury_and_to_the_derived_address_is_instant` and
+`recovery_to_any_other_destination_is_delayed` run both sides). A stored treasury that failed to parse reads as no
+treasury, which classifies a withdrawal as loosening, so it fails closed. (c) *The lookups of the `Minder`
+implementation* (a storage read, a stored value) are not under proof; they are exercised by the unit tests, the
+model harness and the sandbox tests, and by mutation testing.
+
+**Deliberately conservative: classified as loosening although a strict reading would not.** Completeness is stated
+against a spec that includes these, so the proof does not claim "tightening is never loosening":
+raising only the max priority fee (the contract accounts fees at the max fee alone); any change of a treasury,
+including clearing it (clearing only slows recovery); replacing the guardian with another account; a policy
+change that raises one field while lowering another; a budget period reset when any asset's budget has been spent
+(one global flag, not a per-asset scan).
+
+**Deliberately not loosening: instant by design.** A grant when there is no live mandate (none, revoked, expired)
+or one that does not extend the live expiry, and a grant that changes the key or the scope alone. See the next
+subsection and "Owner timelock", limit (a) (revoke and re-grant are instant, so the extension rule can be walked
+around at the cost of visibly dropping the agent's authority).
+
+**Not proved, and why.** A semantic form of the fee rule (the accounted fee, max fee times the gas limit, cannot
+rise without a bound rising) was tried and **removed**: it multiplies a fee by a gas limit four times in one
+harness and CBMC did not finish with 64-bit or with 32-bit operands (each attempt ran 15 to 20 minutes before it was
+stopped; the full 128-bit form is wider still). The property that
+is proved is what the code checks, the per-field strict comparison of the four bounds over their full widths
+(`raising_an_evm_bound_or_moving_the_chain_is_never_instant`); that a higher product needs a higher factor is
+arithmetic, not something the classifier computes.
+
+**Checked against the six mutants mutation testing found under-pinned.** Each was applied by hand to
+`src/loosening.rs`, the harnesses of its variant run, then the file restored (compared against a saved copy). The
+mapping, and which direction of the iff catches each: an over-classification (more loosening than the spec) is
+caught by the completeness harness while soundness still holds, an under-classification by soundness.
+
+| Mutant in `loosens` | Failing harnesses | Failing unit test |
+| --- | --- | --- |
+| `SetEvmRecipient`: `&&` to `\|\|` | `evm_recipient_classification_is_exactly_the_spec` | `an_evm_recipient_change_loosens_only_when_it_adds_a_new_address` |
+| `GrantMandate`: `now < expiry` to `<=` | `a_grant_is_loosening_only_if_it_extends_a_live_mandate_or_refunds_budget` | `a_grant_extends_a_live_mandate_up_to_but_not_at_its_expiry_instant` |
+| `SetEvmConfig`: max fee `>` to `>=` | `evm_config_classification_is_exactly_the_spec` | `each_evm_fee_and_gas_bound_loosens_only_when_strictly_raised` |
+| `SetEvmConfig`: max priority fee `>` to `<` | `raising_an_evm_bound_or_moving_the_chain_is_never_instant` and `evm_config_classification_is_exactly_the_spec` | the same |
+| `SetEvmConfig`: token gas limit `>` to `<` | the same two | the same |
+| `SetTimelockDelay`: `<` to `<=` | `delay_classification_is_exactly_the_spec` | `the_timelock_delay_loosens_only_when_strictly_lowered` |
+
+Each of these harnesses verifies clean on the restored source.
+
+### Effective authority is bounded by the timelock-protected policy
+
+The authority a mandate grants is the intersection of the global policy and its scope, and so a subset of the
+global policy: **effective authority = policy ∩ scope ⊆ policy**. A scope can only subtract. Grounding, in the
+`evaluate` proofs above:
+
+- `allow_implies_every_limit_holds` and `allow_implies_every_limit_holds_with_a_recipient_scope`: whatever the scope
+  (symbolic: unscoped, an asset list, a recipient list, a cap), if `evaluate` returns Allow then every global
+  limit holds (the asset has a policy, the recipient is allowlisted, `amount <= per_tx_cap`, the window and the
+  budget, none wrapping). A request that violates the policy is therefore denied **regardless of scope**.
+- `a_scope_never_widens_authority` (and its recipient-scope twin): if the scoped evaluation allows, the same
+  request under an unscoped mandate allows too.
+- `the_deny_reason_is_the_first_failing_check_in_the_documented_order`: the global checks all run before the
+  scope's, so a scope is never consulted to override one.
+
+Those proofs are inside the bounds documented for them (a scope list of 0 or 1 entries; the EVM recipient scope
+is not proved, only unit-tested). The loosening proofs above close the other side: the global policy itself
+(caps, windows, budgets, the allowed assets, the allowlisted recipients) cannot be raised or extended without
+the delay. Together: a grant of **any** scope, which is instant by design, can never give the agent more than the
+global policy as it stands, and the global policy cannot be widened without the timelock. That is why scope
+widening by a re-grant is deliberately not timelocked.
+
 ## Mutation testing (`cargo-mutants`)
 
 A mutation score over the deterministic logic, so that every surviving mutant is either killed by a test or
@@ -1436,7 +1565,8 @@ a documented equivalent. It complements the ad-hoc check of reintroducing a know
 
 - **Tool:** `cargo-mutants` 27.1.0, on rustc 1.94.1 (the pinned toolchain; no workaround was needed).
   Configuration is `contract/.cargo/mutants.toml`.
-- **Scope:** 259 mutants in `src/policy.rs` (30), `src/window.rs` (17), `src/timelock.rs` (73: the
+- **Scope** (as measured, before the classifier moved to `src/loosening.rs`; see "Since the run"): 259 mutants in
+  `src/policy.rs` (30), `src/window.rs` (17), `src/timelock.rs` (73: the
   tighten-versus-loosen classification `is_loosening`, `policy_loosens`, `is_timelocked`,
   `is_evm_safe_destination`, `validate_change`, `normalized_treasury`), `src/gate.rs` (26: nonce accounting,
   `authenticate`, `parse_signature`, `parse_address`, `build_evm_config` and the other helpers) and
@@ -1465,12 +1595,24 @@ a documented equivalent. It complements the ad-hoc check of reintroducing a know
 
   | Mutant | Killed by |
   | --- | --- |
-  | `timelock.rs:298` `&&` to `\|\|` (`SetEvmRecipient`) | `an_evm_recipient_change_loosens_only_when_it_adds_a_new_address` |
-  | `timelock.rs:314` `<` to `<=` (a mandate is live strictly before its expiry) | `a_grant_extends_a_live_mandate_up_to_but_not_at_its_expiry_instant` |
-  | `timelock.rs:334` `>` to `>=` (`max_fee_per_gas`) | `each_evm_fee_and_gas_bound_loosens_only_when_strictly_raised` |
-  | `timelock.rs:335` `>` to `<` (`max_priority_fee_per_gas`) | the same |
-  | `timelock.rs:337` `>` to `<` (`token_gas_limit`) | the same |
-  | `timelock.rs:346` `<` to `<=` (`SetTimelockDelay`) | `the_timelock_delay_loosens_only_when_strictly_lowered` |
+  | `is_loosening`: `&&` to `\|\|` (`SetEvmRecipient`) | `an_evm_recipient_change_loosens_only_when_it_adds_a_new_address` |
+  | `is_loosening`: `<` to `<=` (a mandate is live strictly before its expiry) | `a_grant_extends_a_live_mandate_up_to_but_not_at_its_expiry_instant` |
+  | `is_loosening`: `>` to `>=` (`max_fee_per_gas`) | `each_evm_fee_and_gas_bound_loosens_only_when_strictly_raised` |
+  | `is_loosening`: `>` to `<` (`max_priority_fee_per_gas`) | the same |
+  | `is_loosening`: `>` to `<` (`token_gas_limit`) | the same |
+  | `is_loosening`: `<` to `<=` (`SetTimelockDelay`) | `the_timelock_delay_loosens_only_when_strictly_lowered` |
+
+- **Since the run: the classifier moved.** The run above was made before `is_loosening` was extracted to
+  `src/loosening.rs` (see "Owner timelock"); the table's mutants are in `loosens` now, and its line numbers no
+  longer apply. `contract/.cargo/mutants.toml` now scopes `src/loosening.rs` (all of it: `loosens`,
+  `policy_loosens`, `is_safe_destination`) and, in `src/timelock.rs`, the `LooseningState` implementation,
+  `is_loosening`, `is_timelocked`, `validate_change` and the treasury helpers: 294 mutants with the same filters
+  (64 in `loosening.rs`, 44 in `timelock.rs`). That scope has **not** been re-run; the score above is the one
+  measured. The six mutants were re-proved against the new file, by the same unit tests and by the Kani proofs
+  (see the table under the classifier proofs).
+  **The classification logic is now covered by the Kani proofs** ("The timelock classifier: `loosening::loosens`"),
+  **which supersede the mutation score for it**: soundness and completeness over every input, not a sample. What the
+  proofs do not reach, the lookups in the `LooseningState` implementation for `Minder`, stays in the mutation scope.
 
 - **Equivalent mutants** (cannot change observable behaviour):
 
@@ -1479,7 +1621,7 @@ a documented equivalent. It complements the ad-hoc check of reintroducing a know
   | `evm.rs:61` (three, the two `+` in `ERC20_TRANSFER_CALLDATA_LEN`) | The constant's only use is `Vec::with_capacity` in `erc20_transfer_calldata`; capacity is an allocation hint and the vector's contents are unchanged. |
   | `evm.rs:237` `\|` to `^` in `hex_decode` | The high nibble is shifted left four bits and the low nibble is at most 15 (`hex_digit` returns 0 to 15), so the operands share no set bits and `\|`, `^` and `+` agree. |
   | `evm.rs:291` `+=` to `-=` in `sub_be` | The adjusted `digit` is read only through `digit as u8`, which keeps the low eight bits, and 256 is zero modulo 256: `digit + 256` and `digit - 256` give the same byte for every digit (checked over the whole range). The borrow is set separately. |
-  | `gate.rs:716` `>` to `>=` in `advance_nonce_past` | Only the case `after == next_nonce` differs, and it re-inserts the value already stored, so the state is identical. |
+  | `gate.rs` `>` to `>=` in `advance_nonce_past` | Only the case `after == next_nonce` differs, and it re-inserts the value already stored, so the state is identical. |
 
 - **Not covered by this score:** the 28 mutants of the accounting helpers in `src/lib.rs` (`reserve`, `release`,
   `record_spend`, `epoch_committed`, `eval_input`, `evaluate_*` and the like), whose real coverage is the model

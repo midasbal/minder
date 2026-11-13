@@ -3,12 +3,14 @@
 #
 # Run from `contract/`, one job so there is one target dir and no oversubscription:
 #   cargo mutants -j 1 --timeout 120 --build-timeout 900 \
-#       --file src/policy.rs --file src/window.rs --file src/timelock.rs \
-#       --file src/gate.rs --file src/evm.rs -- --lib -- --skip model_tests
+#       --file src/policy.rs --file src/window.rs --file src/loosening.rs \
+#       --file src/timelock.rs --file src/gate.rs --file src/evm.rs \
+#       -- --lib -- --skip model_tests
 
 examine_globs = [
     "src/policy.rs",
     "src/window.rs",
+    "src/loosening.rs",
     "src/timelock.rs",
     "src/gate.rs",
     "src/evm.rs",
@@ -18,12 +20,13 @@ examine_globs = [
 # out the near-sdk entry points, the promise-building sign dispatch and the
 # storage-only views, which only the sandbox tests reach.
 examine_re = [
-    # policy.rs, window.rs, evm.rs: everything.
-    '^src/(policy|window|evm)\.rs:',
-    # timelock.rs: the tighten-versus-loosen classification and its helpers.
-    '^src/timelock\.rs:.* in (Minder::)?(is_loosening|policy_loosens|is_timelocked|is_evm_safe_destination|validate_change)$',
-    '^src/timelock\.rs:.* replace normalized_treasury ',
-    '^src/timelock\.rs:.* replace (Minder::)?(is_loosening|policy_loosens|is_timelocked|is_evm_safe_destination|validate_change) ',
+    # policy.rs, window.rs, loosening.rs (the classification), evm.rs: everything.
+    '^src/(policy|window|loosening|evm)\.rs:',
+    # timelock.rs: what supplies the classifier's state, and the helpers around it.
+    '^src/timelock\.rs:.* in (Minder::)?(is_loosening|is_timelocked|validate_change)$',
+    '^src/timelock\.rs:.* replace (normalized_treasury|treasury_address) ',
+    '^src/timelock\.rs:.* <impl LooseningState for Minder>',
+    '^src/timelock\.rs:.* replace (Minder::)?(is_loosening|is_timelocked|validate_change) ',
     # gate.rs: nonce accounting and the signature checks, not the dispatch.
     '^src/gate\.rs:.*(authenticate|advance_nonce_past|next_nonce|take_nonce|parse_address|parse_signature|describe|signing_request_args|signed_tx_event|build_evm_config|require_evm_config)',
 ]

@@ -311,12 +311,12 @@ use near_sdk::{AccountId, CurveType, PublicKey};
 /// that differ in their first data byte, so comparing the curve tag and that
 /// byte decides equality exactly for them. What is trusted instead of proved is
 /// that the standard library's derived `==` on a key is a faithful equality.
-fn key_equality(left: &PublicKey, right: &PublicKey) -> bool {
+pub(crate) fn key_equality(left: &PublicKey, right: &PublicKey) -> bool {
     let (left, right) = (left.as_bytes(), right.as_bytes());
     left[0] == right[0] && left[1] == right[1]
 }
 
-fn key(byte: u8) -> PublicKey {
+pub(crate) fn key(byte: u8) -> PublicKey {
     PublicKey::from_parts(CurveType::ED25519, vec![byte; 32]).unwrap()
 }
 
