@@ -259,3 +259,205 @@ async fn init_takes_the_delay_and_the_treasuries() {
         "stored lowercase"
     );
 }
+
+// ---- The guardian ----
+
+#[tokio::test]
+async fn init_takes_a_guardian() {
+    let f = Fixture::deploy().await;
+    let mut args = f.init_args();
+    args["guardian"] = json!(f.outsider.id());
+    f.contract
+        .call("init")
+        .args_json(args)
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    let config: Value = f.view("get_config", json!({})).await;
+    assert_eq!(config["guardian"], json!(f.outsider.id()));
+}
+
+/// The guardian is the account `outsider`. It freezes, revokes and cancels a
+/// pending change through the real runtime, and every other owner method, called
+/// with its key, reverts without moving funds or changing the configuration.
+#[tokio::test]
+async fn a_compromised_guardian_can_only_stop_never_move_or_widen() {
+    let f = timelocked().await;
+    f.owner_ok("set_guardian", json!({ "guardian": f.outsider.id() }))
+        .await;
+    let guardian = &f.outsider;
+
+    // A change the owner queued, for the guardian to cancel.
+    let queued = json!({ "SetAssetPolicy": { "asset": near(), "per_tx_cap": "1000000", "window_limit": "1000000", "epoch_budget": null } });
+    let id: String = f
+        .call(&f.owner, "propose_change", json!({ "change": queued }))
+        .await
+        .into_result()
+        .unwrap()
+        .json()
+        .unwrap();
+
+    // Everything but the three stop-powers is refused to the guardian.
+    let before: Value = f.view("get_config", json!({})).await;
+    let attacker = guardian.id();
+    let balance_before = balance(guardian).await;
+    let contract_before = balance(f.contract.as_account()).await;
+    let attempts = [
+        (
+            "set_asset_policy",
+            json!({ "asset": near(), "per_tx_cap": "1", "window_limit": "1" }),
+        ),
+        (
+            "set_recipient",
+            json!({ "recipient": attacker, "allowed": true }),
+        ),
+        (
+            "grant_mandate",
+            json!({ "agent_key": fresh_key(), "expiry": "99999999999999999" }),
+        ),
+        ("unfreeze", json!({})),
+        (
+            "owner_withdraw",
+            json!({ "asset": near(), "amount": "1000000000000000000000000", "to": attacker }),
+        ),
+        ("set_treasury", json!({ "near": attacker, "evm": null })),
+        ("set_timelock_delay", json!({ "delay": "0" })),
+        ("set_guardian", json!({ "guardian": null })),
+        ("propose_change", json!({ "change": "Unfreeze" })),
+        ("execute_change", json!({ "id": id })),
+    ];
+    for (method, args) in attempts {
+        assert_reverts(
+            f.call(guardian, method, args).await,
+            "Only the owner can call this method",
+        );
+    }
+    assert_eq!(f.view::<Value>("get_config", json!({})).await, before);
+    // Refused calls pay the contract a share of their gas, so its balance can
+    // only have risen: nothing left it.
+    assert!(
+        balance(f.contract.as_account()).await >= contract_before,
+        "the contract's funds did not move"
+    );
+    assert!(balance(guardian).await <= balance_before, "only gas spent");
+
+    // The stop-powers work.
+    f.call(guardian, "cancel_change", json!({ "id": id }))
+        .await
+        .into_result()
+        .unwrap();
+    assert!(pending(&f).await.is_empty());
+    f.call(guardian, "freeze", json!({}))
+        .await
+        .into_result()
+        .unwrap();
+    assert_eq!(f.dry_run(near(), 1).await, deny(minder::DenyReason::Frozen));
+    f.call(guardian, "revoke_mandate", json!({}))
+        .await
+        .into_result()
+        .unwrap();
+    let mandate: Value = f.view("get_mandate", json!({})).await;
+    assert_eq!(mandate["revoked"], true);
+
+    // A stranger gets none of the three.
+    for method in ["freeze", "revoke_mandate"] {
+        assert_reverts(
+            f.call(&f.recipient, method, json!({})).await,
+            "Only the owner or the guardian",
+        );
+    }
+}
+
+/// Adding a guardian is instant; removing it is held for the delay, and the
+/// guardian cannot cancel its own removal, however it tries. The owner can.
+#[tokio::test]
+async fn a_guardian_removal_waits_out_the_delay_and_the_guardian_cannot_stop_it() {
+    let f = timelocked().await;
+    f.owner_ok("set_guardian", json!({ "guardian": f.outsider.id() }))
+        .await;
+    let config: Value = f.view("get_config", json!({})).await;
+    assert_eq!(config["guardian"], json!(f.outsider.id()));
+
+    assert_reverts(
+        f.call(&f.owner, "set_guardian", json!({ "guardian": null }))
+            .await,
+        "Timelocked",
+    );
+    let removal = json!({ "SetGuardian": { "guardian": null } });
+    let id: String = f
+        .call(&f.owner, "propose_change", json!({ "change": removal }))
+        .await
+        .into_result()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_reverts(
+        f.call(&f.outsider, "cancel_change", json!({ "id": id }))
+            .await,
+        "The guardian cannot cancel a change to the guardian",
+    );
+    // The guardian does what it can in the meantime.
+    f.call(&f.outsider, "freeze", json!({}))
+        .await
+        .into_result()
+        .unwrap();
+    assert_reverts(
+        f.call(&f.owner, "execute_change", json!({ "id": id }))
+            .await,
+        "Not ready",
+    );
+    let ready_at: u64 = pending(&f).await[0]["ready_at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    f.advance_to(ready_at).await;
+    f.call(&f.owner, "execute_change", json!({ "id": id }))
+        .await
+        .into_result()
+        .unwrap();
+    let config: Value = f.view("get_config", json!({})).await;
+    assert_eq!(config["guardian"], Value::Null);
+    assert_reverts(
+        f.call(&f.outsider, "freeze", json!({})).await,
+        "Only the owner or the guardian",
+    );
+}
+
+/// A standoff cannot lose funds: with the guardian having frozen and revoked,
+/// the owner still cannot send anywhere but the treasury at once, and can
+/// always send there.
+#[tokio::test]
+async fn a_standoff_between_owner_and_guardian_cannot_lose_funds() {
+    let f = timelocked().await;
+    f.owner_ok("set_guardian", json!({ "guardian": f.outsider.id() }))
+        .await;
+    for method in ["freeze", "revoke_mandate"] {
+        f.call(&f.outsider, method, json!({}))
+            .await
+            .into_result()
+            .unwrap();
+    }
+    let stranger = f.worker.dev_create_account().await.unwrap();
+    let before = balance(&stranger).await;
+    assert_reverts(
+        f.call(
+            &f.owner,
+            "owner_withdraw",
+            json!({ "asset": near(), "amount": "1000", "to": stranger.id() }),
+        )
+        .await,
+        "Timelocked",
+    );
+    assert_eq!(balance(&stranger).await, before);
+
+    let treasury_before = balance(&f.recipient).await;
+    f.owner_ok(
+        "owner_withdraw",
+        json!({ "asset": near(), "amount": "1000", "to": f.recipient.id() }),
+    )
+    .await;
+    assert_eq!(balance(&f.recipient).await, treasury_before + 1000);
+}

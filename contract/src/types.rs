@@ -58,6 +58,12 @@ pub struct Config {
     /// The same for the EVM surface: a lowercase `0x` address that
     /// `owner_evm_withdraw` and `owner_evm_token_withdraw` may send to at once.
     pub evm_treasury: Option<String>,
+    /// The guardian: a second account that may stop the contract but never
+    /// widen it. It may call exactly `freeze`, `revoke_mandate` and
+    /// `cancel_change` (not a change that concerns the guardian itself), and
+    /// nothing else. Adding one is instant; removing or replacing one is a
+    /// timelocked change. See `timelock.rs`.
+    pub guardian: Option<AccountId>,
 }
 
 /// Limits for one asset. Having an entry is what allowlists the asset.
@@ -375,6 +381,10 @@ pub enum OwnerChange {
         recipient: String,
         amount: U128,
         nonce: U64,
+    },
+    /// Appended, not inserted: enum tags are part of the borsh form.
+    SetGuardian {
+        guardian: Option<AccountId>,
     },
 }
 

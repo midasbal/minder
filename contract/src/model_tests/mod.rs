@@ -22,8 +22,8 @@ mod world;
 pub(crate) use random::seeded_runner;
 
 use actions::{
-    deliver, request, Action, Amount, Asset, Grant, Outcome, Pick, PolicyVariant, Recipient, Scope,
-    Tick,
+    deliver, request, Action, Amount, Asset, Forbidden, Grant, Guardian, GuardianCall, Outcome,
+    Pick, PolicyVariant, Recipient, Scope, Tick,
 };
 use world::World;
 
@@ -331,6 +331,70 @@ fn exhaustive_timelock() {
 }
 
 #[test]
+fn exhaustive_guardian() {
+    // A guardian beside the owner, in a timelocked world. Account 0 is the
+    // guardian at the start and account 1 a stranger until it is made the
+    // guardian; the owner adds, replaces and removes the guardian directly (the
+    // model says which are held back) and by proposal. Across every interleaving
+    // the guardian may freeze, revoke and cancel a change that is not about the
+    // guardian, and nothing else: it never cancels a guardian change, a
+    // non-guardian never does any of the three, and a refused call changes no
+    // byte of stored state.
+    let alphabet = [
+        Action::Guardian {
+            who: 0,
+            call: GuardianCall::Freeze,
+        },
+        Action::Guardian {
+            who: 0,
+            call: GuardianCall::Revoke,
+        },
+        Action::Guardian {
+            who: 0,
+            call: GuardianCall::Cancel(Pick::Oldest),
+        },
+        Action::Guardian {
+            who: 1,
+            call: GuardianCall::Cancel(Pick::Newest),
+        },
+        Action::Guardian {
+            who: 1,
+            call: GuardianCall::Freeze,
+        },
+        Action::Guardian {
+            who: 0,
+            call: GuardianCall::Forbidden(Forbidden::LoosenPolicy),
+        },
+        Action::Guardian {
+            who: 0,
+            call: GuardianCall::Forbidden(Forbidden::Withdraw),
+        },
+        Action::SetGuardian(Guardian::B),
+        Action::SetGuardian(Guardian::Nobody),
+        Action::ProposeGuardian(Guardian::Nobody),
+        Action::ProposeGuardian(Guardian::B),
+        Action::ProposeUnfreeze,
+        Action::ExecutePending(Pick::Oldest),
+        Action::CancelPending(Pick::Newest),
+        Action::Freeze,
+        Action::Advance(Tick::Slot),
+    ];
+    let stats = run_exhaustive_from(&World::boot_timelocked(), "guardian", &alphabet, DEPTH);
+    assert_covered(
+        &stats.coverage,
+        &[
+            "Guardian(Freeze)",
+            "Guardian(Revoke)",
+            "Guardian(Cancel)",
+            "Guardian(Refused(CancelOfGuardianChange))",
+            "Guardian(Refused(Cancel))",
+            "Guardian(Refused(Freeze))",
+            "Guardian(Refused(Forbidden))",
+        ],
+    );
+}
+
+#[test]
 fn exhaustive_policy_changes_and_caps() {
     // The owner tightening and loosening limits under in-flight spend, caps,
     // and a recipient that is not allowlisted.
@@ -428,6 +492,11 @@ fn random_long_sequences() {
             "Delivered(Evm, Garbage)",
             "Delivered(Evm, Oversized)",
             "Delivered(Evm, OtherSigner)",
+            "Guardian(Freeze)",
+            "Guardian(Revoke)",
+            "Guardian(Cancel)",
+            "Guardian(Refused(CancelOfGuardianChange))",
+            "Guardian(Refused(Forbidden))",
         ],
     );
     println!(

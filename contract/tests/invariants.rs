@@ -139,9 +139,14 @@ async fn owner_only_methods_revert_for_everyone_else() {
             "grant_mandate",
             json!({ "agent_key": fresh_key(), "expiry": u64::MAX.to_string() }),
         ),
+        ("unfreeze", json!({})),
+    ];
+    // The three stop-powers are also open to the guardian, so their refusal
+    // names both.
+    let shared = [
         ("revoke_mandate", json!({})),
         ("freeze", json!({})),
-        ("unfreeze", json!({})),
+        ("cancel_change", json!({ "id": "1" })),
     ];
     // The agent's own key cannot even submit these: see tests/agent_key.rs.
     for who in [&f.outsider] {
@@ -152,11 +157,17 @@ async fn owner_only_methods_revert_for_everyone_else() {
             );
         }
     }
+    for (method, args) in &shared {
+        assert_reverts(
+            f.call(&f.outsider, method, args.clone()).await,
+            "Only the owner or the guardian can call this method",
+        );
+    }
     // The contract account is not the owner either.
     assert_reverts(
         f.call(&f.contract.as_account().clone(), "freeze", json!({}))
             .await,
-        "Only the owner can call this method",
+        "Only the owner or the guardian can call this method",
     );
     // None of the attempts changed anything.
     assert_eq!(f.dry_run(near(), 1).await, Decision::Allow);

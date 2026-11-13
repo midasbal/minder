@@ -17,7 +17,9 @@ use std::collections::BTreeSet;
 use crate::evm::Eip1559Tx;
 use crate::types::DenyReason;
 
-use super::actions::{Action, Asset, Outcome, PolicyVariant, Recipient, Scope, Tick, ASSET_COUNT};
+use super::actions::{
+    Action, Asset, GuardianCall, Outcome, PolicyVariant, Recipient, Scope, Tick, ASSET_COUNT,
+};
 use super::{NUM_BUCKETS, SLOT_LEN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct ModelMandate {
 pub enum Held {
     Policy(Asset, PolicyVariant),
     Unfreeze,
+    /// Set the guardian to this account slot, or to nobody.
+    Guardian(Option<u8>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +110,8 @@ pub struct Model {
     /// Loosening changes waiting out the delay, by id.
     pub pending: Vec<PendingEntry>,
     pub next_change_id: u64,
+    /// The guardian's account slot, if there is one.
+    pub guardian: Option<u8>,
     /// The owner lowered this asset's limit below what was already counted;
     /// until it decays, `effective > limit` is expected for that asset.
     pub lowered: [bool; ASSET_COUNT],
@@ -146,6 +152,7 @@ impl Model {
             delay: 0,
             pending: Vec::new(),
             next_change_id: 1,
+            guardian: None,
             lowered: [false; ASSET_COUNT],
             budget_lowered: [false; ASSET_COUNT],
             epoch_committed: [0; ASSET_COUNT],
@@ -359,6 +366,13 @@ impl Model {
             && expiry > self.mandate.expiry
     }
 
+    /// Adding a guardian tightens, so it is instant. Removing or replacing one
+    /// removes the reaction mechanism, so it is held back (while the timelock
+    /// is on). Setting the same one again changes nothing.
+    pub fn guardian_timelocked(&self, new: Option<u8>) -> bool {
+        self.delay > 0 && self.guardian.is_some() && new != self.guardian
+    }
+
     pub fn propose(&mut self, change: Held) {
         let entry = PendingEntry {
             id: self.next_change_id,
@@ -434,6 +448,13 @@ impl Model {
             }
             Action::RevokeMandate => self.mandate.revoked,
             Action::ExecutePending(_) | Action::CancelPending(_) => self.pending.is_empty(),
+            Action::SetGuardian(guardian) => guardian.slot() == self.guardian,
+            Action::Guardian { who, call } if self.guardian == Some(who) => match call {
+                GuardianCall::Freeze => self.frozen,
+                GuardianCall::Revoke => self.mandate.revoked,
+                GuardianCall::Cancel(_) => self.pending.is_empty(),
+                GuardianCall::Forbidden(_) => false,
+            },
             _ => false,
         }
     }
@@ -452,7 +473,12 @@ impl Model {
                 self.reserved,
                 (self.lowered, self.budget_lowered, self.epoch_committed),
                 self.next_nonce,
-                (self.delay, &self.pending, self.next_change_id),
+                (
+                    self.delay,
+                    &self.pending,
+                    self.next_change_id,
+                    self.guardian
+                ),
                 &self.queue,
                 (self.ghost_frozen, self.ghost_lapsed_epoch),
             )

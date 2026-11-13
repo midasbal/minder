@@ -114,7 +114,10 @@ impl Minder {
     /// `timelock_delay` (ns; omitted or zero disables the timelock) and the
     /// treasuries (`near_treasury`, `evm_treasury`, the destinations of instant
     /// owner recovery) are the asymmetric-timelock settings; see `timelock.rs`.
+    /// `guardian` is the optional stop-only second account (see
+    /// [`Config::guardian`]); it must be neither the owner nor this contract.
     #[init]
+    #[allow(clippy::too_many_arguments)]
     pub fn init(
         owner: AccountId,
         window_len: U64,
@@ -122,6 +125,7 @@ impl Minder {
         timelock_delay: Option<U64>,
         near_treasury: Option<AccountId>,
         evm_treasury: Option<String>,
+        guardian: Option<AccountId>,
     ) -> Self {
         let caller = env::predecessor_account_id();
         require!(
@@ -135,6 +139,9 @@ impl Minder {
             owner != env::current_account_id(),
             "The owner must be a separate account from the contract account"
         );
+        if let Some(guardian) = &guardian {
+            Self::require_valid_guardian(guardian, &owner);
+        }
         require!(
             (1..=MAX_NUM_BUCKETS).contains(&num_buckets),
             "num_buckets must be between 1 and 64"
@@ -152,6 +159,7 @@ impl Minder {
                 timelock_delay: timelock_delay.unwrap_or(U64(0)),
                 near_treasury,
                 evm_treasury: evm_treasury.as_deref().map(timelock::normalized_treasury),
+                guardian,
             },
             mandate: None,
             last_mandate_epoch: 0,
@@ -242,12 +250,12 @@ impl Minder {
     /// already gone it fails without effect, and this call has already
     /// succeeded, so it cannot panic.
     pub fn revoke_mandate(&mut self) {
-        self.assert_owner();
+        self.assert_owner_or_guardian();
         self.apply_revoke_mandate();
     }
 
     pub fn freeze(&mut self) {
-        self.assert_owner();
+        self.assert_owner_or_guardian();
         self.apply_freeze();
     }
 
@@ -606,6 +614,29 @@ impl Minder {
         );
     }
 
+    /// The three stop-powers (`freeze`, `revoke_mandate`, `cancel_change`) are
+    /// open to the guardian as well as the owner. Nothing else is.
+    pub(crate) fn assert_owner_or_guardian(&self) {
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.config.owner || self.config.guardian.as_ref() == Some(&caller),
+            "Only the owner or the guardian can call this method"
+        );
+    }
+
+    /// A guardian is a separate account from the owner (otherwise it adds
+    /// nothing) and from this contract (whose own calls carry the agent's key).
+    pub(crate) fn require_valid_guardian(guardian: &AccountId, owner: &AccountId) {
+        require!(
+            guardian != owner,
+            "The guardian must be a different account from the owner"
+        );
+        require!(
+            *guardian != env::current_account_id(),
+            "The guardian must be a different account from the contract account"
+        );
+    }
+
     fn slot_len(&self) -> u64 {
         self.config.window_len.0 / u64::from(self.config.num_buckets)
     }
@@ -763,6 +794,8 @@ mod budget_tests;
 mod custody_tests;
 #[cfg(test)]
 mod gate_tests;
+#[cfg(test)]
+mod guardian_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

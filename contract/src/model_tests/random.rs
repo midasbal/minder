@@ -43,6 +43,8 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             | Action::RevokeMandate | Action::Freeze | Action::Unfreeze)),
         2 => class(|a| matches!(a, Action::ProposePolicy { .. } | Action::ProposeUnfreeze
             | Action::ExecutePending(_) | Action::CancelPending(_))),
+        2 => class(|a| matches!(a, Action::SetGuardian(_) | Action::ProposeGuardian(_)
+            | Action::Guardian { .. })),
         1 => class(|a| matches!(a, Action::Advance(_))),
     ]
 }

@@ -30,7 +30,10 @@ use crate::test_support::{
 use crate::types::{Decision, Status};
 use crate::{AssetId, MandateScope, Minder, OwnerChange};
 
-use super::actions::{Action, Amount, Asset, Outcome, Pick, Recipient, Scope, ASSETS, ASSET_COUNT};
+use super::actions::{
+    Action, Amount, Asset, Forbidden, GuardianCall, Outcome, Pick, Recipient, Scope, ASSETS,
+    ASSET_COUNT,
+};
 use super::model::{Held, Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
@@ -70,6 +73,8 @@ pub enum Observed {
     /// A token payment whose transfer leg passed and whose gas leg was denied.
     GasDenied(crate::DenyReason),
     Delivered(Asset, Outcome),
+    /// A guardian call: what it was and whether it was allowed or refused.
+    Guardian(&'static str),
     Other,
 }
 
@@ -81,6 +86,7 @@ impl Observed {
             Observed::Denied(asset, reason) => format!("Denied({asset:?}, {reason:?})"),
             Observed::GasDenied(reason) => format!("GasDenied({reason:?})"),
             Observed::Delivered(asset, outcome) => format!("Delivered({asset:?}, {outcome:?})"),
+            Observed::Guardian(what) => format!("Guardian({what})"),
             Observed::Other => "Other".to_string(),
         }
     }
@@ -115,6 +121,7 @@ impl World {
             None,
             None,
             None,
+            None,
         );
         for asset in ASSETS {
             let policy = super::model::Policy::of(super::actions::PolicyVariant::Default);
@@ -138,7 +145,10 @@ impl World {
             Some(TOKEN_GAS_LIMIT),
         );
         minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None);
+        // Adding a guardian is instant, so it is in place before the timelock.
+        minder.set_guardian(Some(guardian_account(0)));
         let mut model = Model::new(T0, T0 + LONG_MANDATE);
+        model.guardian = Some(0);
         if delay > 0 {
             minder.set_timelock_delay(U64(delay));
             model.delay = delay;
@@ -203,6 +213,9 @@ impl World {
                 None,
                 vec![promise_result(&model.queue[index], outcome)],
             ),
+            (Action::Guardian { who, .. }, _) => {
+                (GUARDIAN_ACCOUNTS[usize::from(who)], None, Vec::new())
+            }
             _ => (OWNER, None, Vec::new()),
         };
 
@@ -310,6 +323,7 @@ impl World {
                         match entry.change {
                             Held::Policy(asset, variant) => model.set_policy(asset, variant),
                             Held::Unfreeze => model.set_frozen(false),
+                            Held::Guardian(slot) => model.guardian = slot,
                         }
                     } else {
                         let message = attempt.err().ok_or_else(|| {
@@ -333,6 +347,32 @@ impl World {
                 }
                 Observed::Other
             }
+            Action::SetGuardian(guardian) => {
+                let slot = guardian.slot();
+                let new = slot.map(guardian_account);
+                let attempt = guarded(|| minder.set_guardian(new));
+                if model.guardian_timelocked(slot) {
+                    expect_timelocked(attempt, "set_guardian")?;
+                } else {
+                    expect_applied(attempt, "set_guardian")?;
+                    model.guardian = slot;
+                }
+                Observed::Other
+            }
+            Action::ProposeGuardian(guardian) => {
+                let slot = guardian.slot();
+                let change = OwnerChange::SetGuardian {
+                    guardian: slot.map(guardian_account),
+                };
+                let attempt = guarded(|| minder.propose_change(change));
+                if model.guardian_timelocked(slot) {
+                    propose_accepted(attempt, &mut model, Held::Guardian(slot))?;
+                } else {
+                    expect_not_timelocked(attempt, "a guardian proposal")?;
+                }
+                Observed::Other
+            }
+            Action::Guardian { who, call } => guardian_step(&mut minder, &mut model, who, call)?,
             Action::RevokeMandate => {
                 owner_call(|| minder.revoke_mandate())?;
                 model.revoke();
@@ -359,17 +399,138 @@ impl World {
 
         check_invariants(&minder, &model, delivered, live_before)?;
 
-        Ok((
-            World {
-                storage: persist(minder),
-                model,
-            },
-            observed,
-        ))
+        let storage = persist(minder);
+        // A call the guardian may not make, or that is refused to an account
+        // that is not the guardian, changes no byte of stored state.
+        if let Action::Guardian { who, call } = action {
+            let refused = !matches!(
+                call,
+                GuardianCall::Freeze | GuardianCall::Revoke | GuardianCall::Cancel(_)
+            ) || self.model.guardian != Some(who);
+            let refused_cancel =
+                matches!(observed, Observed::Guardian(what) if what.starts_with("Refused"));
+            if refused || refused_cancel {
+                ensure!(
+                    storage == self.storage,
+                    "a refused guardian call {call:?} changed the stored state"
+                );
+            }
+        }
+
+        Ok((World { storage, model }, observed))
     }
 }
 
 // ---- Steps ----
+
+const GUARDIAN_ACCOUNTS: [&str; 2] = ["guardian.near", "guardian2.near"];
+
+fn guardian_account(slot: u8) -> near_sdk::AccountId {
+    account(GUARDIAN_ACCOUNTS[usize::from(slot)])
+}
+
+/// A call refused with a message containing `needle`.
+fn expect_refused(result: Result<(), String>, needle: &str, what: &str) -> Result<(), Violation> {
+    match result {
+        Ok(()) => Err(Violation(format!("{what} was accepted"))),
+        Err(message) if message.contains(needle) => Ok(()),
+        Err(message) => Err(Violation(format!(
+            "{what} was refused for another reason: {message}"
+        ))),
+    }
+}
+
+/// A call by account `who`. The model says, from the rule alone, what the
+/// current guardian may do (freeze, revoke, cancel a change that is not about
+/// the guardian) and that everything else, and anyone else, is refused.
+fn guardian_step(
+    minder: &mut Minder,
+    model: &mut Model,
+    who: u8,
+    call: GuardianCall,
+) -> Result<Observed, Violation> {
+    let is_guardian = model.guardian == Some(who);
+    let stranger = "Only the owner or the guardian";
+    match call {
+        GuardianCall::Freeze => {
+            let attempt = guarded(|| minder.freeze());
+            if is_guardian {
+                expect_applied(attempt, "a guardian freeze")?;
+                model.set_frozen(true);
+                Ok(Observed::Guardian("Freeze"))
+            } else {
+                expect_refused(attempt, stranger, "a freeze by a non-guardian")?;
+                Ok(Observed::Guardian("Refused(Freeze)"))
+            }
+        }
+        GuardianCall::Revoke => {
+            let attempt = guarded(|| minder.revoke_mandate());
+            if is_guardian {
+                expect_applied(attempt, "a guardian revoke")?;
+                model.revoke();
+                Ok(Observed::Guardian("Revoke"))
+            } else {
+                expect_refused(attempt, stranger, "a revoke by a non-guardian")?;
+                Ok(Observed::Guardian("Refused(Revoke)"))
+            }
+        }
+        GuardianCall::Cancel(pick) => {
+            let Some(index) = model.pending_index(pick) else {
+                return Ok(Observed::Other);
+            };
+            let entry = model.pending[index];
+            let attempt = guarded(|| minder.cancel_change(U64(entry.id)));
+            if !is_guardian {
+                expect_refused(attempt, stranger, "a cancel by a non-guardian")?;
+                Ok(Observed::Guardian("Refused(Cancel)"))
+            } else if matches!(entry.change, Held::Guardian(_)) {
+                expect_refused(
+                    attempt,
+                    "cannot cancel a change to the guardian",
+                    "a guardian cancelling a change to the guardian",
+                )?;
+                Ok(Observed::Guardian("Refused(CancelOfGuardianChange)"))
+            } else {
+                expect_applied(attempt, "a guardian cancel")?;
+                model.pending.remove(index);
+                Ok(Observed::Guardian("Cancel"))
+            }
+        }
+        GuardianCall::Forbidden(kind) => {
+            let attempt = guarded(|| forbidden_call(minder, kind));
+            expect_refused(attempt, "Only the owner can call", "a forbidden call")?;
+            ensure!(
+                get_created_receipts().is_empty(),
+                "a forbidden guardian call {kind:?} created a promise"
+            );
+            Ok(Observed::Guardian("Refused(Forbidden)"))
+        }
+    }
+}
+
+/// An owner method with arguments that would be valid for the owner.
+fn forbidden_call(minder: &mut Minder, kind: Forbidden) {
+    match kind {
+        Forbidden::LoosenPolicy => {
+            minder.set_asset_policy(AssetId::Near, U128(80), U128(160), None);
+        }
+        Forbidden::Grant => {
+            minder.grant_mandate(agent_key(1), U64(T0 + LONG_MANDATE), None);
+        }
+        Forbidden::Unfreeze => minder.unfreeze(),
+        Forbidden::Withdraw => {
+            let _ = minder.owner_withdraw(AssetId::Near, U128(1), account(NEAR_ALLOWED));
+        }
+        Forbidden::SetTreasury => minder.set_treasury(Some(account(NEAR_DISALLOWED)), None),
+        Forbidden::Propose => {
+            let _ = minder.propose_change(OwnerChange::Unfreeze);
+        }
+        Forbidden::Execute => {
+            let _ = minder.execute_change(U64(1));
+        }
+        Forbidden::SetGuardian => minder.set_guardian(None),
+    }
+}
 
 /// The owner's call was accepted and applied.
 fn expect_applied(result: Result<(), String>, what: &str) -> Result<(), Violation> {
@@ -964,6 +1125,10 @@ fn check_invariants(
         minder.get_config().timelock_delay.0 == model.delay,
         "the timelock delay differs from the model"
     );
+    ensure!(
+        minder.get_config().guardian == model.guardian.map(guardian_account),
+        "the guardian differs from the model"
+    );
     let pending = minder.get_pending_changes(None, None);
     ensure!(
         pending.len() == model.pending.len(),
@@ -983,6 +1148,9 @@ fn check_invariants(
                 }
             }
             Held::Unfreeze => OwnerChange::Unfreeze,
+            Held::Guardian(slot) => OwnerChange::SetGuardian {
+                guardian: slot.map(guardian_account),
+            },
         };
         ensure!(
             stored.id.0 == held.id

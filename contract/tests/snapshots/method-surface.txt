@@ -47,6 +47,7 @@ call revoke_mandate
 call set_asset_policy
 call set_evm_config
 call set_evm_recipient
+call set_guardian
 call set_recipient
 call set_timelock_delay
 call set_treasury

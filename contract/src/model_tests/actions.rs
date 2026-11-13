@@ -193,6 +193,62 @@ impl Tick {
     }
 }
 
+/// Who the guardian is, or is set to be: nobody, or one of two accounts (so a
+/// replacement is a real change, and a replaced guardian is a real stranger).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guardian {
+    Nobody,
+    A,
+    B,
+}
+
+pub const GUARDIANS: [Guardian; 3] = [Guardian::Nobody, Guardian::A, Guardian::B];
+
+impl Guardian {
+    /// The account slot (0 or 1), or none.
+    pub fn slot(self) -> Option<u8> {
+        match self {
+            Guardian::Nobody => None,
+            Guardian::A => Some(0),
+            Guardian::B => Some(1),
+        }
+    }
+}
+
+/// An owner method the guardian must never be able to use. Each is tried with
+/// arguments that would be valid for the owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forbidden {
+    LoosenPolicy,
+    Grant,
+    Unfreeze,
+    Withdraw,
+    SetTreasury,
+    Propose,
+    Execute,
+    SetGuardian,
+}
+
+pub const FORBIDDEN: [Forbidden; 8] = [
+    Forbidden::LoosenPolicy,
+    Forbidden::Grant,
+    Forbidden::Unfreeze,
+    Forbidden::Withdraw,
+    Forbidden::SetTreasury,
+    Forbidden::Propose,
+    Forbidden::Execute,
+    Forbidden::SetGuardian,
+];
+
+/// What an account holding a guardian's key tries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardianCall {
+    Freeze,
+    Revoke,
+    Cancel(Pick),
+    Forbidden(Forbidden),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// The agent asks to pay. Two-phase: an allowed request goes on the
@@ -233,6 +289,17 @@ pub enum Action {
     ExecutePending(Pick),
     /// Cancel the oldest or newest pending change.
     CancelPending(Pick),
+    /// The owner sets the guardian directly; refused if it removes or replaces
+    /// one while the timelock is on.
+    SetGuardian(Guardian),
+    /// The owner proposes a guardian change through the timelock.
+    ProposeGuardian(Guardian),
+    /// Account `who` (0 or 1) makes a call a guardian might make. Only the
+    /// current guardian's three stop-powers may succeed.
+    Guardian {
+        who: u8,
+        call: GuardianCall,
+    },
 }
 
 pub const fn request(asset: Asset, amount: Amount) -> Action {
@@ -307,6 +374,7 @@ pub fn full_alphabet() -> Vec<Action> {
             actions.push(Action::GrantMandate(grant, scope));
         }
     }
+    actions.extend(guardian_alphabet());
     actions.extend([
         Action::RevokeMandate,
         Action::Freeze,
@@ -315,5 +383,28 @@ pub fn full_alphabet() -> Vec<Action> {
         Action::Advance(Tick::Slot),
         Action::Advance(Tick::Window),
     ]);
+    actions
+}
+
+/// Every guardian action: the owner's governance of the role, and what each of
+/// the two guardian accounts may try.
+pub fn guardian_alphabet() -> Vec<Action> {
+    let mut actions = Vec::new();
+    for guardian in GUARDIANS {
+        actions.push(Action::SetGuardian(guardian));
+        actions.push(Action::ProposeGuardian(guardian));
+    }
+    for who in [0, 1] {
+        let mut calls = vec![
+            GuardianCall::Freeze,
+            GuardianCall::Revoke,
+            GuardianCall::Cancel(Pick::Oldest),
+            GuardianCall::Cancel(Pick::Newest),
+        ];
+        calls.extend(FORBIDDEN.map(GuardianCall::Forbidden));
+        for call in calls {
+            actions.push(Action::Guardian { who, call });
+        }
+    }
     actions
 }

@@ -8,8 +8,10 @@
 //! that only tightens, or leaves authority equal, is applied; one that loosens
 //! anything is refused with a pointer to `propose_change`, which records it with
 //! a ready-at time `delay` after now. `execute_change` applies it once that time
-//! has come, and `cancel_change` drops it. All three are owner-only. A delay of
-//! zero disables the timelock, and every change is then instant.
+//! has come, and `cancel_change` drops it. Proposing and executing are
+//! owner-only; cancelling is also open to the guardian, except for a change to
+//! the guardian itself. A delay of zero disables the timelock, and every change
+//! is then instant.
 //!
 //! What counts as loosening (see `DESIGN.md` for the reasoning):
 //! - a policy change that raises the cap or the window, drops or raises the
@@ -20,6 +22,7 @@
 //! - an EVM configuration that is new, or raises a fee or a gas limit, or moves
 //!   the chain;
 //! - lowering the delay, and changing the treasury;
+//! - removing or replacing the guardian (adding one is instant);
 //! - owner recovery to any destination but the treasury of its surface or, for
 //!   EVM, the contract's own derived address (a self-transfer moves nothing out
 //!   and is how a stuck transaction is cancelled).
@@ -107,14 +110,32 @@ impl Minder {
     }
 
     /// Drops a pending change. Always available to the owner, whatever else
-    /// has happened. Owner only.
+    /// has happened. The guardian may cancel too, except a change that concerns
+    /// the guardian itself (so a compromised guardian cannot hold off its own
+    /// removal).
     pub fn cancel_change(&mut self, id: U64) {
-        self.assert_owner();
+        self.assert_owner_or_guardian();
+        let guardian_call = env::predecessor_account_id() != self.config.owner;
         let pending = self
             .pending_changes
-            .remove(&id.0)
+            .get(&id.0)
+            .cloned()
             .unwrap_or_else(|| env::panic_str("No such pending change"));
+        require!(
+            !(guardian_call && matches!(pending.change, OwnerChange::SetGuardian { .. })),
+            "The guardian cannot cancel a change to the guardian"
+        );
+        self.pending_changes.remove(&id.0);
         log_change("owner_change_cancelled", &pending);
+    }
+
+    /// Sets or clears the guardian. Adding one (none to some) takes effect at
+    /// once, since a guardian can only stop the contract. Removing or replacing
+    /// one is a loosening change, because it takes the reaction mechanism away,
+    /// and is timelocked.
+    pub fn set_guardian(&mut self, guardian: Option<AccountId>) {
+        self.assert_owner();
+        self.owner_change(OwnerChange::SetGuardian { guardian });
     }
 
     /// Sets the delay of the timelock. Raising it takes effect at once;
@@ -225,6 +246,11 @@ impl Minder {
                     normalized_treasury(evm);
                 }
             }
+            OwnerChange::SetGuardian { guardian } => {
+                if let Some(guardian) = guardian {
+                    Self::require_valid_guardian(guardian, &self.config.owner);
+                }
+            }
             OwnerChange::OwnerWithdraw { asset, .. } => Self::require_local(asset),
             OwnerChange::OwnerEvmWithdraw {
                 recipient, nonce, ..
@@ -300,6 +326,12 @@ impl Minder {
                         || token_gas_limit.unwrap_or(DEFAULT_TOKEN_GAS_LIMIT) > old.token_gas_limit
                 }
             },
+            // A guardian is a stop-only role, so adding one enables no drain.
+            // Removing one, or swapping it for another account, takes the
+            // current reaction mechanism away.
+            OwnerChange::SetGuardian { guardian } => {
+                self.config.guardian.is_some() && *guardian != self.config.guardian
+            }
             OwnerChange::SetTimelockDelay { delay } => delay.0 < self.config.timelock_delay.0,
             OwnerChange::SetTreasury { near, evm } => {
                 *near != self.config.near_treasury
@@ -366,6 +398,7 @@ impl Minder {
                 token_gas_limit,
             ),
             OwnerChange::SetTimelockDelay { delay } => self.config.timelock_delay = delay,
+            OwnerChange::SetGuardian { guardian } => self.config.guardian = guardian,
             OwnerChange::SetTreasury { near, evm } => {
                 self.config.near_treasury = near;
                 self.config.evm_treasury = evm.as_deref().map(normalized_treasury);
@@ -434,6 +467,7 @@ fn log_change(event: &str, pending: &PendingChange) {
             "version": "1.0.0",
             "event": event,
             "data": [{
+                "by": env::predecessor_account_id(),
                 "id": pending.id,
                 "ready_at": pending.ready_at,
                 "change": pending.change,

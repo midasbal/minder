@@ -16,11 +16,12 @@ contract's own account (see Agent authority).
 | `src/policy.rs` | `evaluate(&EvalInput) -> Decision`: pure, no state, no I/O. The only place policy rules live |
 | `src/window.rs` | `SpendRing`: the sliding window. Pure; takes `now` and `slot_len` explicitly |
 | `src/evm.rs` | Pure EIP-1559 encoding (native transfers and ERC-20 `transfer` calls): `Eip1559Tx`, `erc20_transfer_calldata`, `encode_unsigned`, `signing_hash`, `normalize_s`, `encode_signed`, and the gate-facing `try_assemble_signed`; hex and address helpers. No state |
-| `src/timelock.rs` | The asymmetric owner timelock: classification, `propose_change`, `execute_change`, `cancel_change`, `set_timelock_delay`, `set_treasury` |
+| `src/timelock.rs` | The asymmetric owner timelock and the guardian role: classification, `propose_change`, `execute_change`, `cancel_change`, `set_timelock_delay`, `set_treasury`, `set_guardian` |
 | `src/decision.rs` | The decision log: the `decision` NEP-297 event every agent request emits, allowed or denied |
 | `src/gate.rs` | The EVM signing gate: owner EVM setters, `request_evm_payment`, `request_evm_token_payment`, `on_sign_complete`, owner recovery (`owner_evm_withdraw`, `owner_evm_token_withdraw`, `on_owner_sign_complete`), EVM views |
 | `vectors/gen-evm-vectors.mjs`, `vectors/gen-gate-vectors.mjs` | Generate the viem reference values that the `src/evm.rs` unit tests and `tests/evm_gate.rs` hard-code |
 | `src/lib.rs` | Contract state, owner-only methods, `owner_withdraw`, `deposit`, `ft_on_transfer`, `request_local_transfer`, `on_transfer_complete`, views. Gathers state into `EvalInput` and calls `evaluate`. `transfer_promise` builds the transfer for both the agent path and owner withdrawal |
+| `src/guardian_tests.rs` | Unit tests of the guardian role |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
 | `../test-contracts/mock-ft` | Test double for a NEP-141 token: records `ft_transfer`, can fail or stretch it over blocks, and `ft_transfer_call` drives a receiver's `ft_on_transfer`. Never deployed |
@@ -30,7 +31,7 @@ contract's own account (see Agent authority).
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `config` | `Config { owner, status, window_len, num_buckets, timelock_delay, near_treasury, evm_treasury }` | Set in `init`; `status`, the delay and the treasuries change later, the last two only under the timelock rule |
+| `config` | `Config { owner, status, window_len, num_buckets, timelock_delay, near_treasury, evm_treasury, guardian }` | Set in `init`; `status`, the delay, the treasuries and the guardian change later, the last three under the timelock rule |
 | `pending_changes`, `next_change_id` | `IterableMap<u64, PendingChange>`, `u64` | Loosening owner changes waiting out the delay; ids start at 1 and are never reused |
 | `mandate` | `Option<Mandate { agent_key: PublicKey, expiry, epoch, revoked, scope: MandateScope }>` | One mandate at a time; `agent_key` is the function-call key provisioned on the contract account |
 | `last_mandate_epoch` | `u64` | Incremented on every grant, never reset, so epochs are never reused |
@@ -323,6 +324,7 @@ timelock.
 | `set_evm_config` | tighter or equal: no higher fee or gas limit, same chain | the first configuration; a higher `max_fee_per_gas`, `max_priority_fee_per_gas`, `gas_limit` or `token_gas_limit`; another chain |
 | `set_timelock_delay` | raising or equal | lowering |
 | `set_treasury` | no change | any change |
+| `set_guardian` | adding one (none to some), or setting the same one again | removing one (some to none) or replacing it with another account |
 | `owner_withdraw` | `to` is the NEAR treasury | any other destination |
 | `owner_evm_withdraw`, `owner_evm_token_withdraw` | the recipient is the EVM treasury or the contract's own derived address | any other recipient |
 
@@ -338,7 +340,7 @@ loosening method), which validates it, records it with `ready_at = now + delay` 
 returns the id (it refuses a change that is not timelocked: call the method). `execute_change(id)`
 applies it once `now >= ready_at` and reverts with `Not ready` before; if applying it fails (a grant
 whose expiry has since passed) the call reverts and the proposal stays, to be cancelled.
-`cancel_change(id)` drops a proposal and is always available. All three are owner-only. Up to 32
+`cancel_change(id)` drops a proposal and is always available. Proposing and executing are owner-only; cancelling is also open to the guardian, except for a change to the guardian itself. Up to 32
 proposals may be pending, and each proposal, execution and cancellation is logged as a NEP-297 event
 (`owner_change_proposed`, `owner_change_executed`, `owner_change_cancelled`) for the control panel.
 `get_pending_change(s)` list what is waiting.
@@ -364,12 +366,90 @@ Known limits: (a) revoke is instant and a grant after a revoke is instant, so th
 dropping the agent's authority visibly; (b) a grant starts a new epoch, which resets each asset's
 lifetime budget, so instant re-grants refresh the budget (the windows still bound the rate); (c) the
 delay is only a reaction window if someone is watching and holds the means to cancel: with one key,
-the attacker holds it too, which is why the external multisig is the primary mitigation.
+the attacker holds it too. The guardian (below) is the second holder: with one in place, a loosening the
+owner key proposes can be cancelled by a key the attacker does not have. The external multisig remains the
+primary mitigation.
 
 **State schema.** `Config` gained the delay and the treasuries and the contract gained the pending
 map and the id counter, so a deployment from before this change needs a fresh account or wiped state.
 `init` takes three more optional arguments (a call without them still works); the existing owner
 methods keep their names, kinds and arguments; five calls and two views are new.
+
+## Guardian (tighten-only second key)
+
+Before the guardian, the timelock's reaction window had no holder: a delay helps only if someone other
+than the attacker can cancel inside it, and with one owner key the attacker holds the cancel too. The
+guardian is that someone.
+
+**How owner authorization works, before and after.** Before: every owner method begins with
+`assert_owner()`, which requires `predecessor_account_id == config.owner`. After: the same, except that
+exactly three methods begin with `assert_owner_or_guardian()`, which accepts the owner or the account in
+`Config.guardian`. Every other method is unchanged and owner-only. The agent's function-call key is
+unaffected: it still reaches only the three request methods, and the guardian is a separate account.
+
+**Exact powers.** The guardian may call:
+
+| Method | What the guardian can do with it |
+| --- | --- |
+| `freeze` | Stop all agent requests at once |
+| `revoke_mandate` | Revoke the mandate and delete the agent's key |
+| `cancel_change(id)` | Drop a pending change, except a change to the guardian itself (`SetGuardian`), which it is refused |
+
+Nothing else: not a grant, a policy change, a recipient, the EVM configuration, the delay, the treasury,
+`unfreeze`, any withdrawal, `propose_change`, `execute_change` or `set_guardian`. Those revert with the owner-only message. The owner keeps all
+of its powers, including cancelling a guardian change, and `cancel_change` now logs who cancelled
+(`"by"`, in every change event).
+
+**Governance, through the timelock's own classification** (`is_loosening`, `OwnerChange::SetGuardian`,
+`set_guardian`):
+
+| Change | Class |
+| --- | --- |
+| none to some (add) | tightening, instant: a guardian can only deny service, so it enables no drain |
+| some to none (remove) | loosening, timelocked: it takes the reaction mechanism away |
+| some to a different account (replace) | loosening, timelocked, for the same reason |
+| the same guardian again | equal, instant, changes nothing |
+
+With the timelock off (delay zero) everything is instant, as everywhere. The guardian must be neither
+the owner (a second key that is the first adds nothing) nor the contract account (whose own calls carry
+the agent's key); `init` and `set_guardian` refuse both. `init` takes the guardian as one more optional
+argument, so an existing call without it still works.
+
+**The guardian cannot protect itself.** A guardian removal or replacement is refused to the guardian's
+`cancel_change`, so a compromised guardian cannot hold off its own removal. The owner proposes the
+removal, waits the delay, and executes it whatever the guardian does meanwhile.
+
+**No new trust.** A compromised guardian can freeze, revoke, and cancel pending changes that are not
+about itself. All of that is denial of service, the same class as a compromised owner's `freeze`, and
+none of it moves or widens anything: it cannot add a recipient, raise a cap, grant, reconfigure, change
+the treasury or withdraw. What it can do is annoy: it can cancel the owner's legitimate loosening
+proposals and the owner's `unfreeze` proposals, so a hostile guardian can keep the contract frozen until
+the owner removes it, which costs the owner two delays (propose and wait out the removal, then propose and
+wait out the unfreeze). Funds are never at stake in that: recovery to the treasury stays instant.
+
+**An in-contract partial multisig.** Loosening now needs the owner to propose and the guardian not to
+cancel inside the delay: two parties, one of which holds a veto and nothing else. This is the in-contract
+version of what the primary mitigation (an external multisig owner) does, for the cost of one extra key,
+and it complements the multisig rather than replacing it. Because the guardian's powers are exactly the
+stop-powers, **the guardian key can be held by an off-chain monitor** that reads the `decision` events
+(denials persist in failed receipts' logs) and the `owner_change_proposed` events, and freezes or
+cancels on an anomaly, without being trusted with funds: the worst a stolen monitor key does is deny
+service.
+
+**Stalemate safety.** Suppose owner and guardian are both hostile, or are simply fighting. Neither can
+drain at once: the owner alone is held to the delay for every loosening and every withdrawal but one to
+the registered treasury (and, on EVM, to the contract's own address); the guardian has no power over
+funds at all. Recovery to the treasury is instant, in any status, and cannot be blocked by the guardian
+(instant calls are not changes it can cancel). So a standoff can freeze the agent and stall changes, but
+cannot lose funds. Stated precisely: two hostile parties acting together can still drain after the delay,
+by the owner proposing and the guardian not cancelling; the guarantee is that neither can do it alone,
+and neither can do it instantly.
+
+**State schema.** `Config` gained a trailing `guardian: Option<AccountId>`, which changes the stored
+layout, so a deployment from before this change needs a fresh account or wiped state (as for every earlier
+schema change). `init` takes one more optional argument; `OwnerChange` gained an appended `SetGuardian`
+variant (earlier tags unchanged); one call is new, `set_guardian`, and there is no new view (`get_config`
+carries the guardian). The three shared methods keep their names and kinds.
 
 ## Fund custody
 
@@ -1049,6 +1129,12 @@ with its real function-call key.
 | A mixed tightening and loosening policy change is loosening | unit `timelock_tests::a_mixed_tightening_and_loosening_policy_change_is_loosening` |
 | The compromised-owner scenario: raising a cap, adding the attacker as a recipient, redirecting the treasury, dropping the delay and withdrawing to the attacker's address are each forced through the delay while a legitimate freeze and a cap-lowering stay instant; tightening works while a loosening is pending | unit `timelock_tests::a_compromised_owner_key_cannot_widen_authority_or_redirect_funds_at_once`, `tightening_works_while_a_loosening_of_the_same_thing_is_pending`; sandbox `timelock::a_compromised_owner_cannot_loosen_or_redirect_at_once_but_can_still_freeze` |
 | Mechanism: unique never-reused ids, id-ordered listing, only loosening and valid changes can be proposed, owner-only, a bounded queue, logged events, timelock off means everything instant | unit `timelock_tests::ids_are_unique_and_pending_changes_are_listed_in_id_order`, `only_a_loosening_change_can_be_proposed_and_only_a_valid_one`, `only_the_owner_can_propose_execute_or_cancel`, `the_number_of_pending_changes_is_bounded`, `proposals_executions_and_cancellations_are_logged`, `with_the_timelock_off_every_change_is_instant_and_nothing_can_be_proposed`, `a_grant_whose_time_has_passed_by_execution_reverts_and_stays_pending`; sandbox `timelock::the_timelock_can_be_enabled_after_arming_and_never_loosened_instantly`, `init_takes_the_delay_and_the_treasuries` |
+| The guardian can freeze, revoke and cancel a change that is not about the guardian | unit `guardian_tests::the_guardian_can_freeze`, `the_guardian_can_revoke_the_mandate`, `the_guardian_can_cancel_a_pending_change_that_is_not_about_the_guardian` (the cancel event names the guardian) |
+| Every other owner method is refused to the guardian, moving nothing and changing nothing; a compromised guardian can only stop | unit `guardian_tests::every_other_owner_method_is_refused_for_the_guardian`, `a_compromised_guardian_can_only_stop_never_move_or_widen`, `a_stranger_still_cannot_use_the_three_shared_methods`, `with_no_guardian_the_shared_methods_are_the_owners_alone`; sandbox `timelock::a_compromised_guardian_can_only_stop_never_move_or_widen` |
+| The guardian cannot cancel its own removal or replacement; the owner can; the removal executes after the delay whatever the guardian does | unit `guardian_tests::the_guardian_cannot_cancel_its_own_removal_or_replacement_but_the_owner_can`, `a_guardian_removal_executes_after_the_delay_whatever_the_guardian_does`; sandbox `timelock::a_guardian_removal_waits_out_the_delay_and_the_guardian_cannot_stop_it` |
+| Adding a guardian is instant; removing or replacing one is timelocked; the same guardian again is equal; the timelock off makes it instant; the guardian is neither the owner nor the contract; `init` takes one | unit `guardian_tests::adding_a_guardian_is_instant_even_under_the_timelock`, `removing_or_replacing_a_guardian_is_timelocked`, `setting_the_same_guardian_again_is_instant_and_changes_nothing`, `with_the_timelock_off_removing_the_guardian_is_instant`, `the_guardian_can_be_neither_the_owner_nor_the_contract`, `init_takes_an_optional_guardian`; sandbox `timelock::init_takes_a_guardian` |
+| The owner keeps every power and the three shared methods | unit `guardian_tests::the_owner_still_has_the_three_shared_methods_and_the_rest` |
+| Stalemate: with the guardian having frozen and revoked, neither party can drain at once and recovery to the treasury stays instant | unit `guardian_tests::a_standoff_between_owner_and_guardian_cannot_lose_funds`; sandbox `timelock::a_standoff_between_owner_and_guardian_cannot_lose_funds` |
 | Callback is private | sandbox `transfers::only_the_contract_itself_can_call_the_settlement_callback` (the `#[private]` guard lives in the generated entry point, so unit tests cannot reach it) |
 
 Sandbox time does not track block counts precisely, so no integration test asserts an exact time
@@ -1126,7 +1212,8 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | budget (`exhaustive_epoch_budgets`) | 10 | 60,702 | 237,500 | 163,103 | 30,220 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
 | token (`exhaustive_token_payments`) | 10 | 21,652 | 91,702 | 70,051 | 9,358 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
 | timelock (`exhaustive_timelock`) | 12 | 38,233 | 128,403 | 89,835 | 18,381 | policy changes that tighten (instant) and loosen (refused when called, held when proposed), unfreeze and grants under the timelock, execution only when due, cancellation, requests, freezes and the clock, in a world booted timelocked |
-| **Total** | | **226,789** | **912,300** | | | |
+| guardian (`exhaustive_guardian`) | 16 | 65,036 | 242,233 | 176,660 | 23,079 | two guardian accounts (one the guardian, one a stranger until it is made the guardian); freeze, revoke and cancel by each; forbidden owner methods tried by the guardian; the owner adding, replacing and removing the guardian directly and by proposal; unfreeze proposals, execution, cancellation, a freeze and the clock, in a world booted timelocked with a guardian |
+| **Total** | | **291,825** | **1,154,533** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -1161,6 +1248,7 @@ every step. Every step of every harness driver runs every check.
 | Dispatch integrity: an allowed request builds exactly the transaction policy approved (owner-set fees, contract nonce, validated `to` and `value`), the callback carries it, and the signer is sent that transaction's hash and the configured path; local callbacks carry the right asset and amount | yes | yes | yes | yes | |
 | G1 booking rule: only a failed receipt books nothing; a successful-but-unusable receipt books the outlay | `WrongShape`, `Oversized`, `Fail` | `Ok`, `Fail` only | `OtherSigner` | all | |
 | The signed-transaction event is emitted if and only if the signature assembles and recovers to the configured sender (`OtherSigner` is genuine but by another key), and an unusable or inauthentic result is logged as booked with nothing emitted | yes | yes | yes | yes | |
+| The guardian: only the current guardian may freeze, revoke or cancel, and only a change that is not about the guardian; a replaced or removed guardian loses all three at once; every other owner method is refused to it with the owner-only message, creates no promise and leaves the stored state byte for byte unchanged; adding a guardian is instant while removing or replacing one is refused when called and held when proposed, exactly as the model's independent restatement says; the stored guardian and pending guardian changes equal the model's (reached by the `guardian` suite and the random driver) | | | | yes | |
 | Callbacks never panic (a panic would strand a reservation) | yes | yes | yes | yes | |
 | No unexpected panic anywhere; every denial carries its exact `Denied: <Reason>` message | yes | yes | yes | yes | |
 | `assemble_from_response` and `try_assemble_signed` never panic on arbitrary, mutated or structured bytes, and always return a `Result` | | | | | yes |
@@ -1171,6 +1259,15 @@ The fuzz tests are in `gate::tests`: `assemble_from_response_never_panics_on_arb
 `assemble_from_response_accepts_exactly_the_acceptable_signatures` and
 `try_assemble_signed_never_panics_and_accepts_exactly_the_acceptable_signatures`. The two "accepts
 exactly" tests assert they reached both accepted and rejected inputs in volume, so they are not vacuous.
+
+### What it caught when the guardian was broken
+
+Three mutations of the production code, each run against the `guardian` suite and each restored byte for
+byte (sha256 checked): letting the guardian call `set_asset_policy` ("a forbidden call was refused for
+another reason", because the call reached the timelock instead of the owner check); removing the rule
+that the guardian cannot cancel a change to the guardian ("a guardian cancelling a change to the guardian
+was accepted"); and classifying a guardian removal as a tightening ("set_guardian: a loosening change took
+effect instantly").
 
 ### What it caught when the fix was reverted
 
@@ -1299,9 +1396,9 @@ nothing wrong in the contract. Both near-sandbox and near-workspaces read `NEAR_
 readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds for every cargo
 invocation under the repository (an environment variable you set yourself still wins). Waiting longer
 costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
-consecutive full runs of `contract/test.sh`, each exit 0 with no start-up failure and the default thread
-count (so no cap on test threads was needed): 243 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38
-`evm_gate`, 15 `invariants`, 4 `method_surface`, 9 `signing_confinement`, 6 `timelock` and 8 `transfers`
-tests passed in every run. Before the setting, runs under load intermittently failed whole binaries
+consecutive full runs of `contract/test.sh` when it was added, each exit 0 with no start-up failure and the
+default thread count (so no cap on test threads was needed). The most recent full run, after the guardian was
+added: 261 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
+`method_surface`, 9 `signing_confinement`, 10 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
 (`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
 part of the suite.
