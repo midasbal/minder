@@ -160,6 +160,32 @@ async fn set_mode(signer: &Contract, mode: &str) {
         .unwrap();
 }
 
+/// Holds (or stops holding) every `sign` request the mock signer receives, until
+/// `release_held`.
+async fn set_hold(signer: &Contract, hold: bool) {
+    signer
+        .call("set_hold")
+        .args_json(json!({ "hold": hold }))
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+}
+
+/// Lets every held request go, and says how many there were.
+async fn release_held(signer: &Contract) -> u64 {
+    signer
+        .call("release_held")
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
 async fn signer_requests(signer: &Contract) -> Vec<Value> {
     signer.view("get_requests").await.unwrap().json().unwrap()
 }
@@ -889,16 +915,12 @@ async fn an_in_flight_token_payment_holds_both_reservations_and_releases_both_wh
     // The native window holds the gas of one token transfer (2e14), not two.
     f.set_policy(evm(), 400_000_000_000_000, 300_000_000_000_000)
         .await;
-    signer
-        .call("set_slow_hops")
-        .args_json(json!({ "hops": 6 }))
-        .transact()
-        .await
-        .unwrap()
-        .into_result()
-        .unwrap();
+    // The signer holds the first request until the test releases it, so it is
+    // in flight for exactly as long as the assertions below need, however long
+    // they take: nothing here depends on timing.
+    set_hold(&signer, true).await;
     // 5000 at nonce 0 has no signature registered with the mock signer, so it
-    // fails when it comes back: its reservations must be released, not booked.
+    // fails when it is released: its reservations must be released, not booked.
     let first = f
         .agent
         .call(f.contract.id(), "request_evm_token_payment")
@@ -935,6 +957,10 @@ async fn an_in_flight_token_payment_holds_both_reservations_and_releases_both_wh
     );
     assert_eq!(nonce(&f).await, "1", "denied requests take no nonce");
 
+    // Only now is the first request let go: held to the end of the denials, it
+    // answers (and fails, for want of a registered signature) when released.
+    set_hold(&signer, false).await;
+    assert_eq!(release_held(&signer).await, 1, "the first request was held");
     let first = first.await.unwrap();
     assert!(first.is_success(), "{first:?}");
     assert!(logs_contain(&first, "not signed"));

@@ -554,3 +554,162 @@ fn spend_in_flight_across_a_reset_is_booked_to_the_new_period() {
     settle(&mut minder, 40, PromiseResult::Successful(Vec::new()), key);
     assert_eq!(minder.epoch_committed(&AssetId::Near), 40);
 }
+
+// ---- Views: budget usage and headroom ----
+//
+// `get_budget_usage` and `get_headroom` are read-only views for the control
+// panel. The headroom is checked against the real firewall: the most it allows
+// in one request is accepted, one more is denied for the reason of the limit
+// that binds, and the view never changes state.
+
+fn headroom_of(minder: &Minder) -> crate::Headroom {
+    minder.get_headroom(AssetId::Near).expect("a policy")
+}
+
+/// The most one request may be according to the headroom: the smallest of its
+/// figures.
+fn most_allowed(minder: &Minder) -> u128 {
+    let room = headroom_of(minder);
+    [room.per_tx_cap.0, room.window_remaining.0]
+        .into_iter()
+        .chain(room.budget_remaining.map(|budget| budget.0))
+        .min()
+        .expect("at least the cap")
+}
+
+/// Asks for one more than the headroom allows, which must be denied for
+/// `binding`, then for exactly what it allows, which must be accepted.
+fn the_headroom_is_the_edge_of_what_the_firewall_allows(minder: &mut Minder, binding: DenyReason) {
+    let most = most_allowed(minder);
+    assert_eq!(ask(minder, most + 1), Decision::Deny(binding));
+    assert_eq!(ask(minder, most), Decision::Allow);
+}
+
+#[test]
+fn with_no_budget_set_the_headroom_has_no_budget_figure_and_the_cap_binds() {
+    let mut minder = armed_with_budget(None);
+    let usage = minder.get_budget_usage(AssetId::Near);
+    assert_eq!(
+        (usage.committed.0, usage.reserved.0, usage.budget_epoch.0),
+        (0, 0, 1)
+    );
+    let room = headroom_of(&minder);
+    assert_eq!(room.per_tx_cap, U128(PER_TX_CAP));
+    assert_eq!(room.window_remaining, U128(WINDOW_LIMIT));
+    assert_eq!(room.budget_remaining, None);
+    // The cap (50) is the smallest of the figures, so it is what says no.
+    the_headroom_is_the_edge_of_what_the_firewall_allows(&mut minder, DenyReason::PerTxCapExceeded);
+}
+
+#[test]
+fn the_per_transaction_cap_binds_when_it_is_the_smallest_figure_even_with_a_budget() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    let room = headroom_of(&minder);
+    assert_eq!(room.budget_remaining, Some(U128(BUDGET)));
+    assert_eq!(most_allowed(&minder), PER_TX_CAP);
+    the_headroom_is_the_edge_of_what_the_firewall_allows(&mut minder, DenyReason::PerTxCapExceeded);
+}
+
+#[test]
+fn a_budget_with_some_usage_shows_what_is_committed_and_what_is_left() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    spend(&mut minder, 30);
+    let usage = minder.get_budget_usage(AssetId::Near);
+    assert_eq!(
+        (usage.committed.0, usage.reserved.0, usage.budget_epoch.0),
+        (30, 0, 1)
+    );
+    let room = headroom_of(&minder);
+    assert_eq!(room.per_tx_cap, U128(50));
+    assert_eq!(room.window_remaining, U128(70)); // 100 - 30
+    assert_eq!(room.budget_remaining, Some(U128(40))); // 70 - 30
+                                                       // The budget (40) is now the smallest figure.
+    the_headroom_is_the_edge_of_what_the_firewall_allows(
+        &mut minder,
+        DenyReason::MandateBudgetExceeded,
+    );
+}
+
+#[test]
+fn an_in_flight_reservation_is_counted_in_the_usage_and_taken_from_the_headroom() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    spend(&mut minder, 30);
+    assert_eq!(ask(&mut minder, 20), Decision::Allow); // reserved, not settled
+    let usage = minder.get_budget_usage(AssetId::Near);
+    assert_eq!(
+        (usage.committed.0, usage.reserved.0, usage.budget_epoch.0),
+        (30, 20, 1)
+    );
+    let room = headroom_of(&minder);
+    assert_eq!(room.window_remaining, U128(50)); // 100 - 30 - 20
+    assert_eq!(room.budget_remaining, Some(U128(20))); // 70 - 30 - 20
+    the_headroom_is_the_edge_of_what_the_firewall_allows(
+        &mut minder,
+        DenyReason::MandateBudgetExceeded,
+    );
+}
+
+#[test]
+fn settling_moves_an_amount_from_reserved_to_committed_without_changing_the_headroom() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    assert_eq!(ask(&mut minder, 20), Decision::Allow);
+    let before = headroom_of(&minder);
+    settle_ok(&mut minder, 20);
+    let usage = minder.get_budget_usage(AssetId::Near);
+    assert_eq!((usage.committed.0, usage.reserved.0), (20, 0));
+    assert_eq!(headroom_of(&minder), before);
+}
+
+#[test]
+fn the_window_binds_when_it_is_the_smallest_figure() {
+    let mut minder = armed_with_budget(None);
+    spend(&mut minder, 50);
+    spend(&mut minder, 40);
+    let room = headroom_of(&minder);
+    assert_eq!(room.window_remaining, U128(10)); // 100 - 90
+    assert_eq!(most_allowed(&minder), 10);
+    the_headroom_is_the_edge_of_what_the_firewall_allows(
+        &mut minder,
+        DenyReason::WindowLimitExceeded,
+    );
+}
+
+#[test]
+fn a_used_up_budget_reads_zero_and_a_reset_period_reports_the_new_epoch() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    spend(&mut minder, 50);
+    spend(&mut minder, 20);
+    assert_eq!(headroom_of(&minder).budget_remaining, Some(U128(0)));
+    assert_eq!(minder.get_budget_usage(AssetId::Near).committed, U128(70));
+
+    as_owner();
+    let key = fresh_agent_key(3);
+    minder.grant_mandate(key.clone(), U64(FAR_FUTURE), None, Some(true));
+    after_the_window(key);
+    let usage = minder.get_budget_usage(AssetId::Near);
+    assert_eq!((usage.committed.0, usage.budget_epoch.0), (0, 2));
+    assert_eq!(headroom_of(&minder).budget_remaining, Some(U128(BUDGET)));
+}
+
+#[test]
+fn an_asset_without_a_policy_has_no_headroom_and_the_views_change_nothing() {
+    let mut minder = armed_with_budget(Some(BUDGET));
+    assert_eq!(minder.get_headroom(AssetId::Evm(1)), None);
+    assert_eq!(
+        minder.get_headroom(AssetId::Nep141(account("none.near"))),
+        None
+    );
+
+    spend(&mut minder, 30);
+    let (committed_before, reserved_before) = (
+        committed(&minder, AssetId::Near),
+        reserved(&minder, AssetId::Near),
+    );
+    let _ = minder.get_headroom(AssetId::Near);
+    let _ = minder.get_budget_usage(AssetId::Near);
+    assert_eq!(committed(&minder, AssetId::Near), committed_before);
+    assert_eq!(reserved(&minder, AssetId::Near), reserved_before);
+    // Usage of an asset that was never spent reads zero, with or without a policy.
+    let untouched = minder.get_budget_usage(AssetId::Evm(1));
+    assert_eq!((untouched.committed.0, untouched.reserved.0), (0, 0));
+}

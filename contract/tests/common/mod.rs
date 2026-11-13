@@ -406,9 +406,14 @@ impl Fixture {
     /// Fast-forwards until block time is at least `target`. Sandbox time does
     /// not track block counts precisely, so callers must tolerate overshoot.
     pub async fn advance_to(&self, target: u64) {
-        while self.now().await < target {
-            let remaining = target - self.now().await;
-            let blocks = (remaining / (SECOND * 2 / 5)).max(1);
+        loop {
+            // One reading per pass: block time moves on its own, so a second
+            // reading could be past `target` and the subtraction would underflow.
+            let now = self.now().await;
+            if now >= target {
+                return;
+            }
+            let blocks = ((target - now) / (SECOND * 2 / 5)).max(1);
             self.worker.fast_forward(blocks).await.unwrap();
         }
     }

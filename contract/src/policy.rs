@@ -2,9 +2,10 @@
 //! path both call [`evaluate`] with state gathered by the contract, so the
 //! rules live in exactly one place. It performs no I/O and reads no state.
 
+use near_sdk::json_types::U128;
 use near_sdk::{AccountId, PublicKey};
 
-use crate::types::{AssetId, AssetPolicy, Decision, DenyReason, Mandate, Status};
+use crate::types::{AssetId, AssetPolicy, Decision, DenyReason, Headroom, Mandate, Status};
 
 /// The recipient of a request, on whichever surface it is paid.
 #[derive(Clone, Copy)]
@@ -58,6 +59,29 @@ pub struct EvalInput<'a> {
 /// Saturates, so an impossible overflow fails closed (over any limit).
 pub fn effective_spend(committed_live: u128, reserved: u128) -> u128 {
     committed_live.saturating_add(reserved)
+}
+
+/// The room a next request has under the policy's own constraints, given what
+/// [`evaluate`] is given: `effective_spend` (see [`effective_spend`]) against the
+/// window, and `epoch_usage` (the same function over the budget period's
+/// committed spend) against the budget. It is the inverse of the checks
+/// `evaluate` makes (`used + amount <= limit`): a request of `amount` passes the
+/// cap, the window and the budget exactly when it is at most the smallest of the
+/// three figures returned here, and when nothing is already over a limit (a
+/// limit already exceeded leaves no room, not even for zero, and reads as 0).
+/// The test `headroom_is_the_boundary_of_what_evaluate_allows` pins this against
+/// `evaluate` itself.
+///
+/// Only the policy's constraints: a mandate's scope can narrow them further and
+/// is not consulted.
+pub fn headroom(policy: &AssetPolicy, effective_spend: u128, epoch_usage: u128) -> Headroom {
+    Headroom {
+        per_tx_cap: policy.per_tx_cap,
+        window_remaining: U128(policy.window_limit.0.saturating_sub(effective_spend)),
+        budget_remaining: policy
+            .epoch_budget
+            .map(|budget| U128(budget.0.saturating_sub(epoch_usage))),
+    }
 }
 
 /// Checks run in a fixed order, from the broadest gate to the narrowest limit,
@@ -513,6 +537,72 @@ mod tests {
             ),
             Decision::Deny(DenyReason::WindowLimitExceeded)
         );
+    }
+
+    // ---- Headroom ----
+
+    #[test]
+    fn headroom_is_the_boundary_of_what_evaluate_allows() {
+        // For a grid of policies and usage, the largest amount `evaluate`
+        // allows is the smallest figure of the headroom, one more is denied, and
+        // where a limit is already exceeded nothing is allowed, not even zero.
+        let budgets = [None, Some(0), Some(7), Some(40)];
+        for cap in [0u128, 1, 10] {
+            for window in [0u128, 5, 25] {
+                for budget in budgets {
+                    for spend in [0u128, 3, 25, 30] {
+                        for usage in [0u128, 7, 39, 45] {
+                            // Leaked so it is `'static` like the consts the other
+                            // tests pass to `run`; a few hundred tiny values.
+                            let policy: &'static AssetPolicy = Box::leak(Box::new(AssetPolicy {
+                                per_tx_cap: U128(cap),
+                                window_limit: U128(window),
+                                epoch_budget: budget.map(U128),
+                            }));
+                            let room = headroom(policy, spend, usage);
+                            let decide = |amount: u128| {
+                                run(|i| {
+                                    i.policy = Some(policy);
+                                    i.effective_spend = spend;
+                                    i.epoch_usage = usage;
+                                    i.amount = amount;
+                                })
+                            };
+                            let over = spend > window || budget.is_some_and(|b| usage > b);
+                            let case = format!("{policy:?} spend {spend} usage {usage}");
+                            if over {
+                                assert_ne!(decide(0), Decision::Allow, "{case}");
+                                continue;
+                            }
+                            let most = [Some(room.per_tx_cap.0), Some(room.window_remaining.0)]
+                                .into_iter()
+                                .chain([room.budget_remaining.map(|b| b.0)])
+                                .flatten()
+                                .min()
+                                .unwrap();
+                            assert_eq!(decide(most), Decision::Allow, "{case}");
+                            assert_ne!(decide(most + 1), Decision::Allow, "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn headroom_reads_zero_when_a_limit_is_used_up_or_over_and_has_no_budget_figure_without_a_budget(
+    ) {
+        let policy = AssetPolicy {
+            per_tx_cap: U128(10),
+            window_limit: U128(25),
+            epoch_budget: None,
+        };
+        let room = headroom(&policy, 30, u128::MAX);
+        assert_eq!(room.window_remaining, U128(0));
+        assert_eq!(room.budget_remaining, None);
+        assert_eq!(room.per_tx_cap, U128(10));
+        let budgeted = headroom(&BUDGETED, 0, 45);
+        assert_eq!(budgeted.budget_remaining, Some(U128(0)));
     }
 
     // ---- Lifetime budget ----

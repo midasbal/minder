@@ -26,7 +26,7 @@ contract's own account (see Agent authority).
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
 | `../test-contracts/mock-ft` | Test double for a NEP-141 token: records `ft_transfer`, can fail or stretch it over blocks, and `ft_transfer_call` drives a receiver's `ft_on_transfer`. Never deployed |
-| `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, and returns a fixed valid signature, a bad one, valid JSON of the wrong shape, a non-JSON blob, a genuine signature padded past 4096 bytes, or fails; can stretch the answer over blocks. Never deployed |
+| `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, and returns a fixed valid signature, a bad one, valid JSON of the wrong shape, a non-JSON blob, a genuine signature padded past 4096 bytes, or fails; can stretch the answer over a fixed number of blocks (`set_slow_hops`) or hold a request, yielded, until the test calls `release_held` (`set_hold`), which is how a test keeps a request in flight without depending on timing. Never deployed |
 
 ## State
 
@@ -148,6 +148,41 @@ read as zero. Now it resets only on a deliberate, classified reset.
 - **Worst-case loss per budget period per asset** is `min(sum of the windows over the period,
   epoch_budget)`, further narrowed by the mandate's scope. A period is not tied to a grant: it can outlast many
   keys, and runs until a reset.
+
+### Budget and headroom views
+
+Two read-only views, for the control panel (they change no state and add no authority). The other views of the
+same counters are `get_live_spend` (window-committed) and `get_reserved`; these do not duplicate them.
+
+- **`get_budget_usage(asset) -> BudgetUsage { committed, reserved, budget_epoch }`**: spend of the asset committed in
+  the **current budget period** (`Minder::epoch_committed`, what its `epoch_budget` counts), the amount reserved
+  for requests still in flight (`reserved_of`, the same counter `get_reserved` reads), and the current
+  `budget_epoch`. All three are read through the existing accessors, with no arithmetic of their own. An asset
+  never spent reads zero, whether or not it has a policy.
+- **`get_headroom(asset) -> Option<Headroom { per_tx_cap, window_remaining, budget_remaining }>`**: the room a next
+  request has under the asset's policy. `None` when the asset has no policy (nothing is allowed). Otherwise the
+  per-transaction cap; what the window has left (`window_limit` less the effective spend); and, if the policy sets a
+  budget, what the budget period has left (`epoch_budget` less the effective usage), each counting in-flight
+  reservations and reading 0 when the limit is already used up or over. The amounts are in the asset's policy
+  units: for native EVM they are the *outlay* (the value plus the worst-case fee), so the largest value a request
+  can carry is the figure less `max_fee_cost`.
+
+**Why it cannot disagree with the firewall.** The figures are not recomputed by the view. `eval_input` and
+`get_headroom` both take the effective window spend and the effective budget usage from two shared helpers
+(`window_effective_spend`, `budget_effective_usage`, each `policy::effective_spend` over the committed figure and
+the reserved counter), so they are the same numbers `evaluate` is given. `policy::headroom` turns them into the
+three figures: it is the inverse of the checks `evaluate` makes (`used + amount <= limit`). It is a separate
+function, not a change to `evaluate` (which is proved, and is untouched). The test
+`policy::tests::headroom_is_the_boundary_of_what_evaluate_allows` pins it to `evaluate` over a grid of policies and
+usage: the largest amount `evaluate` allows is the smallest of the three figures, one more is denied, and where a
+limit is already exceeded nothing is allowed. The unit tests in `budget_tests.rs` ("Views: budget usage and
+headroom") check the views against real requests: with no budget, with a budget and some usage, with usage plus an
+in-flight reservation, and with each of the cap, the window and the budget as the binding limit, the largest
+request the headroom names is accepted and one more is denied for the limit that binds.
+
+**What it is not.** It is the *policy-side* headroom. A mandate's scope can narrow it further (a smaller
+per-transaction cap, fewer assets or recipients) and is not applied here: composing it with the live mandate is the
+panel's job (`get_mandate` carries the scope). It is also not a promise: a request still goes through `evaluate`.
 
 ## Reservation lifecycle
 
@@ -1650,8 +1685,8 @@ readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds
 invocation under the repository (an environment variable you set yourself still wins). Waiting longer
 costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
 consecutive full runs of `contract/test.sh` when it was added, each exit 0 with no start-up failure and the
-default thread count (so no cap on test threads was needed). The most recent full run, after the mutation-testing edge tests were added:
-287 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
+default thread count (so no cap on test threads was needed). The most recent full run, after the budget and headroom views were added:
+297 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
 `method_surface`, 9 `signing_confinement`, 11 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
 (`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
 part of the suite.

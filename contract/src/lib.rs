@@ -21,8 +21,9 @@ use near_sdk::{
 };
 
 pub use types::{
-    AssetId, AssetPolicy, Config, Decision, DenyReason, EpochSpend, EvmConfig, EvmConfigView,
-    Mandate, MandateScope, OwnerChange, PendingChange, Status, TokenPaymentDecision,
+    AssetId, AssetPolicy, BudgetUsage, Config, Decision, DenyReason, EpochSpend, EvmConfig,
+    EvmConfigView, Headroom, Mandate, MandateScope, OwnerChange, PendingChange, Status,
+    TokenPaymentDecision,
 };
 
 use policy::{EvalInput, RecipientRef};
@@ -462,6 +463,36 @@ impl Minder {
     pub fn get_reserved(&self, asset: AssetId) -> U128 {
         U128(self.reserved_of(&asset))
     }
+
+    /// The budget-period figures of `asset`: spend committed in the current
+    /// budget period (what its `epoch_budget` counts), the amount reserved for
+    /// requests still in flight, and the current `budget_epoch`. Read-only.
+    /// `get_live_spend` (window-committed) and `get_reserved` are the other
+    /// views of the same counters.
+    pub fn get_budget_usage(&self, asset: AssetId) -> BudgetUsage {
+        BudgetUsage {
+            committed: U128(self.epoch_committed(&asset)),
+            reserved: U128(self.reserved_of(&asset)),
+            budget_epoch: U64(self.budget_epoch),
+        }
+    }
+
+    /// The room a next request for `asset` has under its policy: the per-tx
+    /// cap, what the window has left and what the budget period has left (if
+    /// the policy sets a budget), counting in-flight reservations. `None` when
+    /// the asset has no policy, so nothing is allowed. Computed by
+    /// `policy::headroom` from the same figures `evaluate` is given, so it
+    /// cannot disagree with the firewall. Policy-side only: the live mandate's
+    /// scope can narrow it further and is not applied here. Read-only.
+    pub fn get_headroom(&self, asset: AssetId) -> Option<Headroom> {
+        self.policies.get(&asset).map(|policy| {
+            policy::headroom(
+                policy,
+                self.window_effective_spend(&asset),
+                self.budget_effective_usage(&asset),
+            )
+        })
+    }
 }
 
 /// Test support, compiled only with the `test-helpers` feature.
@@ -744,6 +775,20 @@ impl Minder {
         }
     }
 
+    /// What the window limit is checked against for `asset`: committed spend in
+    /// the live window plus in-flight reservations. The one place it is
+    /// computed, for `evaluate` and for `get_headroom`.
+    fn window_effective_spend(&self, asset: &AssetId) -> u128 {
+        policy::effective_spend(self.live_spend(asset), self.reserved_of(asset))
+    }
+
+    /// What the budget is checked against for `asset`: spend committed in the
+    /// current budget period plus in-flight reservations. The one place it is
+    /// computed, for `evaluate` and for `get_headroom`.
+    fn budget_effective_usage(&self, asset: &AssetId) -> u128 {
+        policy::effective_spend(self.epoch_committed(asset), self.reserved_of(asset))
+    }
+
     /// Evaluation for the NEAR recipient allowlist. Used by both `dry_run` and
     /// `request_local_transfer`.
     fn evaluate_request(
@@ -806,14 +851,8 @@ impl Minder {
             recipient,
             recipient_allowed,
             amount,
-            effective_spend: policy::effective_spend(
-                self.live_spend(asset),
-                self.reserved_of(asset),
-            ),
-            epoch_usage: policy::effective_spend(
-                self.epoch_committed(asset),
-                self.reserved_of(asset),
-            ),
+            effective_spend: self.window_effective_spend(asset),
+            epoch_usage: self.budget_effective_usage(asset),
         }
     }
 }

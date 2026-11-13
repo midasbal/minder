@@ -222,6 +222,36 @@ pub const DEFAULT_GAS_LIMIT: u64 = 21_000;
 /// token (USDC, USDT) spends on a `transfer`, which is about 50,000 to 65,000.
 pub const DEFAULT_TOKEN_GAS_LIMIT: u64 = 100_000;
 
+/// What `get_budget_usage` says about one asset in the current budget period.
+#[near(serializers = [json])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BudgetUsage {
+    /// Spend of the asset committed in the current budget period
+    /// (`Minder::epoch_committed`): what its `epoch_budget` counts.
+    pub committed: U128,
+    /// Amount of the asset reserved for requests still in flight. It counts
+    /// against the window and the budget as well, until each request settles.
+    pub reserved: U128,
+    /// The current budget period. It changes only on a reset of the period.
+    pub budget_epoch: U64,
+}
+
+/// What `get_headroom` says: the room a next request for one asset has under
+/// each constraint of its policy. The amounts are in the asset's policy units
+/// (for native EVM, the outlay: the value plus the worst-case fee).
+#[near(serializers = [json])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Headroom {
+    /// The most one request may be: the policy's per-transaction cap.
+    pub per_tx_cap: U128,
+    /// What the window has left once committed spend and in-flight
+    /// reservations are counted. Zero when it is already used up or over.
+    pub window_remaining: U128,
+    /// What the budget period has left, the same way; `None` when the policy
+    /// sets no budget.
+    pub budget_remaining: Option<U128>,
+}
+
 /// What `dry_run_evm_token` says about a token payment: the decision for each
 /// of its two legs, so a denial names the leg that caused it. The payment is
 /// allowed only if both are `Allow`.

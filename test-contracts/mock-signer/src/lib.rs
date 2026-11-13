@@ -8,8 +8,12 @@
 
 use near_sdk::serde_json::{json, Value};
 use near_sdk::{
-    assert_one_yocto, env, near, require, AccountId, Gas, PanicOnDefault, PromiseOrValue,
+    assert_one_yocto, env, near, require, AccountId, Gas, GasWeight, PanicOnDefault, Promise,
+    PromiseError, PromiseOrValue, YieldId,
 };
+
+/// Gas given to the callback of a held request, which only builds the answer.
+const HELD_ANSWER_GAS: Gas = Gas::from_tgas(10);
 
 /// Padding that pushes an otherwise valid response past 4096 bytes.
 const OVERSIZED_PADDING: usize = 5000;
@@ -71,6 +75,12 @@ pub struct MockSigner {
     /// Extra cross-contract hops before answering, so a request stays in
     /// flight for several blocks.
     slow_hops: u32,
+    /// While set, `sign` records the request and then waits, yielded, until
+    /// `release_held` resumes it. The wait has no clock of its own, so a test
+    /// that holds a request controls exactly how long it stays in flight.
+    hold: bool,
+    /// The requests waiting on `release_held`, by payload hash.
+    held: Vec<(String, YieldId)>,
     requests: Vec<Request>,
     signatures: Vec<Registered>,
 }
@@ -82,6 +92,8 @@ impl MockSigner {
         Self {
             mode: Mode::Sign,
             slow_hops: 0,
+            hold: false,
+            held: Vec::new(),
             requests: Vec::new(),
             signatures: Vec::new(),
         }
@@ -106,6 +118,29 @@ impl MockSigner {
         self.slow_hops = hops;
     }
 
+    /// Holds every `sign` request that arrives while it is set, until
+    /// `release_held`. Unlike `set_slow_hops`, which stretches an answer over a
+    /// fixed number of blocks, this does not depend on timing: the request is
+    /// in flight exactly until the test releases it (or the runtime's yield
+    /// timeout, about 200 blocks, fails it). Turn it off before releasing, so
+    /// later requests are answered at once.
+    pub fn set_hold(&mut self, hold: bool) {
+        self.hold = hold;
+    }
+
+    /// Resumes every held request, which then answers as it would have
+    /// without the hold (including failing, for a payload with no signature
+    /// registered). Returns how many were waiting.
+    pub fn release_held(&mut self) -> u32 {
+        let held = std::mem::take(&mut self.held);
+        let waiting = held.len() as u32;
+        for (_, yield_id) in held {
+            // A request that already timed out is gone; nothing to resume.
+            let _ = yield_id.resume(b"released");
+        }
+        waiting
+    }
+
     #[payable]
     pub fn sign(&mut self, request: Value) -> PromiseOrValue<Value> {
         assert_one_yocto();
@@ -128,6 +163,29 @@ impl MockSigner {
             hash: hash.clone(),
             domain_id,
         });
+        if self.hold {
+            let (promise, yield_id) = Promise::new_yield(
+                "answer_held",
+                json!({ "hash": hash }).to_string().into_bytes(),
+                HELD_ANSWER_GAS,
+                GasWeight(1),
+            );
+            self.held.push((hash, yield_id));
+            return PromiseOrValue::Promise(promise);
+        }
+        self.answer(self.slow_hops, &hash)
+    }
+
+    /// The callback of a held request: runs when `release_held` resumes it, or
+    /// fails if the runtime timed the yield out first.
+    #[private]
+    pub fn answer_held(&self, hash: String) -> PromiseOrValue<Value> {
+        if matches!(
+            env::promise_result_checked(0, 64),
+            Err(PromiseError::Failed)
+        ) {
+            env::panic_str("mock signer: the held request timed out");
+        }
         self.answer(self.slow_hops, &hash)
     }
 

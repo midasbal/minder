@@ -16,10 +16,12 @@ call freeze
 view ft_on_transfer
 view get_asset_policies
 view get_asset_policy
+view get_budget_usage
 view get_config
 view get_evm_config
 view get_evm_nonce
 view get_evm_recipients
+view get_headroom
 view get_live_spend
 view get_mandate
 view get_pending_change
