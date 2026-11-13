@@ -461,3 +461,91 @@ async fn a_standoff_between_owner_and_guardian_cannot_lose_funds() {
     .await;
     assert_eq!(balance(&f.recipient).await, treasury_before + 1000);
 }
+
+// ---- The budget period ----
+
+/// The bypass this closes. With the budget used up, a compromised owner key
+/// revokes and grants again, hoping for a fresh budget. The re-grant is instant
+/// and does not refresh it; asking for the reset is refused as timelocked, and
+/// takes the delay when proposed.
+#[tokio::test]
+async fn a_compromised_owner_cannot_reset_a_used_budget_at_once() {
+    // Armed with the budget first (raising a window later would itself be
+    // timelocked), and only then the timelock switched on.
+    let f = Fixture::armed().await;
+    f.owner_ok(
+        "set_asset_policy",
+        json!({
+            "asset": near(), "per_tx_cap": "50", "window_limit": "1000", "epoch_budget": "70",
+        }),
+    )
+    .await;
+    f.owner_ok("set_timelock_delay", json!({ "delay": DELAY.to_string() }))
+        .await;
+    for amount in [40, 30] {
+        let result = f.request_transfer(near(), amount, f.recipient.id()).await;
+        assert!(result.is_success(), "{result:?}");
+    }
+    assert_eq!(
+        f.dry_run(near(), 1).await,
+        deny(minder::DenyReason::MandateBudgetExceeded)
+    );
+
+    // The instant route: revoke, and a new key for the same budget period.
+    f.owner_ok("revoke_mandate", json!({})).await;
+    let rotated = fresh_key();
+    let expiry = f.now().await + 3_600 * SECOND;
+    f.grant(&rotated, expiry).await;
+    assert_eq!(
+        f.dry_run_key(&rotated, near(), 1).await,
+        deny(minder::DenyReason::MandateBudgetExceeded),
+        "an instant re-grant did not refresh the budget"
+    );
+
+    // Asking for the reset is a loosening: refused when called ...
+    let reset_key = fresh_key();
+    assert_reverts(
+        f.call(
+            &f.owner,
+            "grant_mandate",
+            json!({ "agent_key": reset_key, "expiry": expiry.to_string(), "reset_budget": true }),
+        )
+        .await,
+        "Timelocked",
+    );
+    assert_eq!(
+        f.dry_run_key(&rotated, near(), 1).await,
+        deny(minder::DenyReason::MandateBudgetExceeded)
+    );
+
+    // ... and held for the delay when proposed.
+    let change = json!({ "GrantMandate": {
+        "agent_key": reset_key, "expiry": expiry.to_string(), "scope": null, "reset_budget": true,
+    } });
+    let id: String = f
+        .call(&f.owner, "propose_change", json!({ "change": change }))
+        .await
+        .into_result()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_reverts(
+        f.call(&f.owner, "execute_change", json!({ "id": id }))
+            .await,
+        "Not ready",
+    );
+    let ready_at: u64 = pending(&f).await[0]["ready_at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    f.advance_to(ready_at).await;
+    f.call(&f.owner, "execute_change", json!({ "id": id }))
+        .await
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        f.dry_run_key(&reset_key, near(), 50).await,
+        minder::Decision::Allow
+    );
+}

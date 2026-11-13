@@ -62,6 +62,13 @@ pub enum Held {
     Unfreeze,
     /// Set the guardian to this account slot, or to nobody.
     Guardian(Option<u8>),
+    /// A grant, with a fresh budget period, proposed through the timelock: the
+    /// absolute expiry, the scope, and which of the two agent keys it names.
+    GrantReset {
+        expiry: u64,
+        scope: Scope,
+        key: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +134,13 @@ pub struct Model {
     /// Committed spend per asset since the current mandate was granted. Unlike
     /// the window it never ages out; a new grant resets it.
     pub epoch_committed: [u128; ASSET_COUNT],
+    /// The budget period, apart from the key epoch (`mandate.epoch`): a grant
+    /// takes a new key epoch and leaves this alone; only a reset of a used
+    /// period changes it. The model counts it for its own bookkeeping; the
+    /// contract's counter is read through its accessor.
+    pub budget_period: u64,
+    /// Whether any spend has been booked in the current budget period.
+    pub period_used: bool,
     pub next_nonce: u64,
     /// Every `(chain, nonce)` the contract has handed out, as observed in the
     /// transactions it built. History only: not part of the fingerprint.
@@ -163,6 +177,8 @@ impl Model {
             lowered: [false; ASSET_COUNT],
             budget_lowered: [false; ASSET_COUNT],
             epoch_committed: [0; ASSET_COUNT],
+            budget_period: 1,
+            period_used: false,
             next_nonce: 0,
             issued: BTreeSet::new(),
             queue: Vec::new(),
@@ -323,15 +339,24 @@ impl Model {
         1 - self.mandate.key
     }
 
-    pub fn grant(&mut self, expiry: u64, scope: Scope) {
+    pub fn grant(&mut self, expiry: u64, scope: Scope, reset_budget: bool) {
+        self.grant_with_key(expiry, scope, self.stale_key(), reset_budget);
+    }
+
+    /// A grant naming `key`. The key epoch moves on; the budget does not,
+    /// unless a fresh period is asked for and something was spent in this one.
+    pub fn grant_with_key(&mut self, expiry: u64, scope: Scope, key: u8, reset_budget: bool) {
         self.last_epoch += 1;
-        // The epoch bump resets every asset's budget.
-        self.epoch_committed = [0; ASSET_COUNT];
+        if reset_budget && self.period_used {
+            self.epoch_committed = [0; ASSET_COUNT];
+            self.budget_period += 1;
+            self.period_used = false;
+        }
         self.mandate = ModelMandate {
             expiry,
             epoch: self.last_epoch,
             revoked: false,
-            key: self.stale_key(),
+            key,
             scope,
         };
     }
@@ -366,12 +391,12 @@ impl Model {
         self.delay > 0 && self.frozen
     }
 
-    /// A grant loosens only by extending a mandate that is live.
-    pub fn grant_timelocked(&self, expiry: u64) -> bool {
-        self.delay > 0
-            && !self.mandate.revoked
-            && self.now < self.mandate.expiry
-            && expiry > self.mandate.expiry
+    /// A grant loosens by extending a mandate that is live, or by asking for a
+    /// fresh budget period when some of this one is spent.
+    pub fn grant_timelocked(&self, expiry: u64, reset_budget: bool) -> bool {
+        let extends =
+            !self.mandate.revoked && self.now < self.mandate.expiry && expiry > self.mandate.expiry;
+        self.delay > 0 && (extends || (reset_budget && self.period_used))
     }
 
     /// Adding a guardian tightens, so it is instant. Removing or replacing one
@@ -435,6 +460,7 @@ impl Model {
                 // Booked under the grant that is current at settlement, which may
                 // be a later one than the request was made under.
                 self.epoch_committed[i] = self.epoch_committed[i].saturating_add(amount);
+                self.period_used = true;
             }
         }
         pending
@@ -479,7 +505,13 @@ impl Model {
                 self.policy,
                 &self.committed,
                 self.reserved,
-                (self.lowered, self.budget_lowered, self.epoch_committed),
+                (
+                    self.lowered,
+                    self.budget_lowered,
+                    self.epoch_committed,
+                    self.budget_period,
+                    self.period_used,
+                ),
                 self.next_nonce,
                 (
                     self.delay,

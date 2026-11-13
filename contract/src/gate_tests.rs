@@ -1292,7 +1292,7 @@ use crate::MandateScope;
 /// as that key.
 fn scoped_agent(minder: &mut Minder, scope: MandateScope) {
     as_owner();
-    minder.grant_mandate(other_key(), U64(u64::MAX), Some(scope));
+    minder.grant_mandate(other_key(), U64(u64::MAX), Some(scope), None);
     testing_env!(agent_context_for(other_key()).build());
 }
 
@@ -1748,6 +1748,7 @@ fn the_mandate_scope_applies_to_the_token_and_the_recipient_but_not_to_the_gas()
             per_tx_cap: Some(U128(2000)),
             ..MandateScope::default()
         }),
+        None,
     );
     testing_env!(agent_context_for(other_key()).build());
     let view = |to: &str, amount: u128| {
@@ -1784,6 +1785,7 @@ fn the_mandate_scope_applies_to_the_token_and_the_recipient_but_not_to_the_gas()
             allowed_assets: Some(vec![evm_asset()]),
             ..MandateScope::default()
         }),
+        None,
     );
     testing_env!(agent_context().build());
     assert_eq!(

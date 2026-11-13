@@ -613,7 +613,7 @@ fn key_of(agent: &Account) -> String {
 // ---- The per-grant lifetime budget ----
 
 #[tokio::test]
-async fn a_budget_bounds_what_one_grant_can_spend_and_a_new_grant_starts_afresh() {
+async fn a_budget_bounds_a_budget_period_and_only_a_reset_starts_afresh() {
     let f = Fixture::armed().await;
     // A window that never binds here, so the budget alone is on test.
     f.owner_ok(
@@ -641,20 +641,37 @@ async fn a_budget_bounds_what_one_grant_can_spend_and_a_new_grant_starts_afresh(
         "Denied: MandateBudgetExceeded",
     );
 
-    // A new grant (revoke, then a new key) is a new epoch: a fresh budget,
-    // with nothing written to reset it, while the window still holds the 70.
+    // Rotating the key (revoke, then a new key) is a new key epoch but the same
+    // budget period: the usage carries forward and the new key gets nothing back.
     f.owner_ok("revoke_mandate", json!({})).await;
     let new_key = SecretKey::from_random(KeyType::ED25519);
     let expiry = f.now().await + 3_600 * SECOND;
     f.grant(&new_key.public_key().to_string(), expiry).await;
-    assert_eq!(f.live_spend(near()).await, 70);
     let new_agent = Account::from_secret_key(f.contract.id().clone(), new_key, &f.worker);
+    assert_reverts(
+        request_amount(&f, &new_agent, 1).await,
+        "Denied: MandateBudgetExceeded",
+    );
+
+    // Only a grant that asks for a fresh period starts one (here the timelock is
+    // off, so it is instant).
+    let third_key = SecretKey::from_random(KeyType::ED25519);
+    f.owner_ok(
+        "grant_mandate",
+        json!({
+            "agent_key": third_key.public_key().to_string(),
+            "expiry": expiry.to_string(),
+            "reset_budget": true,
+        }),
+    )
+    .await;
+    let third_agent = Account::from_secret_key(f.contract.id().clone(), third_key, &f.worker);
     for amount in [40, 30] {
-        let result = request_amount(&f, &new_agent, amount).await;
+        let result = request_amount(&f, &third_agent, amount).await;
         assert!(result.is_success(), "{result:?}");
     }
     assert_reverts(
-        request_amount(&f, &new_agent, 1).await,
+        request_amount(&f, &third_agent, 1).await,
         "Denied: MandateBudgetExceeded",
     );
 }

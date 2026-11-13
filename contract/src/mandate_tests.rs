@@ -91,7 +91,7 @@ fn ask(minder: &Minder, key: near_sdk::PublicKey) -> Decision {
 #[test]
 fn a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
 
     assert_eq!(
         key_actions(),
@@ -132,7 +132,7 @@ fn only_the_owner_can_grant_or_revoke() {
     let mut minder = fresh();
     testing_env!(agent_context().build());
     let grant = catch_unwind(AssertUnwindSafe(|| {
-        minder.grant_mandate(agent_key(), U64(u64::MAX), None)
+        minder.grant_mandate(agent_key(), U64(u64::MAX), None, None)
     }));
     assert!(panic_message(grant).contains("Only the owner"));
     assert!(key_actions().is_empty());
@@ -144,7 +144,7 @@ fn only_the_owner_can_grant_or_revoke() {
 fn a_grant_in_the_past_provisions_nothing() {
     let mut minder = fresh();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        minder.grant_mandate(agent_key(), U64(1), None)
+        minder.grant_mandate(agent_key(), U64(1), None, None)
     }));
     assert!(panic_message(result).contains("must be in the future"));
     assert!(key_actions().is_empty());
@@ -156,7 +156,7 @@ fn a_grant_in_the_past_provisions_nothing() {
 #[test]
 fn revoking_flags_the_mandate_and_deletes_the_key() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     as_owner();
     minder.revoke_mandate();
 
@@ -195,7 +195,7 @@ fn a_request_after_revoking_is_denied_by_the_flag_with_no_deletion_landed() {
 #[test]
 fn revoking_twice_is_a_no_op_and_issues_no_second_deletion() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     as_owner();
     minder.revoke_mandate();
     testing_env!(context("owner.near").build());
@@ -216,12 +216,12 @@ fn revoking_without_a_mandate_reverts() {
 #[test]
 fn granting_after_a_revocation_provisions_a_fresh_key_under_a_new_epoch() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     as_owner();
     minder.revoke_mandate();
 
     testing_env!(context("owner.near").build());
-    minder.grant_mandate(other_key(), U64(u64::MAX), None);
+    minder.grant_mandate(other_key(), U64(u64::MAX), None, None);
     // The old key was deleted at revocation; nothing is deleted again.
     assert_eq!(
         key_actions(),
@@ -252,11 +252,11 @@ fn granting_after_a_revocation_provisions_a_fresh_key_under_a_new_epoch() {
 #[test]
 fn the_revoked_key_can_be_granted_again_once_revoked() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     as_owner();
     minder.revoke_mandate();
     testing_env!(context("owner.near").build());
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     assert_eq!(minder.get_mandate().unwrap().epoch, 2);
     assert_eq!(key_actions().len(), 1);
 }
@@ -264,9 +264,9 @@ fn the_revoked_key_can_be_granted_again_once_revoked() {
 #[test]
 fn replacing_a_live_mandate_deletes_the_old_key_and_adds_the_new_one() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     testing_env!(context("owner.near").build());
-    minder.grant_mandate(other_key(), U64(u64::MAX), None);
+    minder.grant_mandate(other_key(), U64(u64::MAX), None, None);
 
     let actions = key_actions();
     // Two separate receipts, the deletion first.
@@ -290,10 +290,10 @@ fn replacing_a_live_mandate_deletes_the_old_key_and_adds_the_new_one() {
 #[test]
 fn the_live_key_cannot_be_granted_again() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     testing_env!(context("owner.near").build());
     let result = catch_unwind(AssertUnwindSafe(|| {
-        minder.grant_mandate(agent_key(), U64(u64::MAX), None)
+        minder.grant_mandate(agent_key(), U64(u64::MAX), None, None)
     }));
     assert!(panic_message(result).contains("current agent key"));
     assert!(key_actions().is_empty());
@@ -357,7 +357,7 @@ fn the_old_account_style_agent_has_no_authority() {
 #[test]
 fn an_expired_mandate_denies_even_for_its_own_key() {
     let mut minder = fresh();
-    minder.grant_mandate(agent_key(), U64(2_000_000), None);
+    minder.grant_mandate(agent_key(), U64(2_000_000), None, None);
     let mut context = agent_context();
     context.block_timestamp(2_000_000);
     testing_env!(context.build());
@@ -406,7 +406,7 @@ fn armed() -> Minder {
 /// as that key. (A live mandate cannot be re-granted to its own key.)
 fn scoped_as_agent(minder: &mut Minder, scope: Option<MandateScope>) {
     as_owner();
-    minder.grant_mandate(other_key(), U64(FAR_FUTURE), scope);
+    minder.grant_mandate(other_key(), U64(FAR_FUTURE), scope, None);
     testing_env!(agent_context_for(other_key()).build());
 }
 
@@ -498,6 +498,7 @@ fn the_effective_cap_is_the_smaller_of_the_global_cap_and_the_mandates() {
         other_key(),
         U64(FAR_FUTURE),
         Some(near_scope(None, None, Some(1_000))),
+        None,
     );
     testing_env!(agent_context_for(other_key()).build());
     assert_eq!(
@@ -593,6 +594,7 @@ fn a_regrant_can_change_the_scope_and_the_new_scope_applies_from_the_new_grant()
             Some(vec!["carol.near"]),
             None,
         )),
+        None,
     );
     testing_env!(agent_context_for(other_key()).build());
     assert_eq!(minder.get_mandate().unwrap().epoch, 3);
@@ -613,7 +615,7 @@ fn a_regrant_can_change_the_scope_and_the_new_scope_applies_from_the_new_grant()
     // And an unscoped re-grant drops the scope entirely.
     as_owner();
     minder.revoke_mandate();
-    minder.grant_mandate(other_key(), U64(FAR_FUTURE), None);
+    minder.grant_mandate(other_key(), U64(FAR_FUTURE), None, None);
     testing_env!(agent_context_for(other_key()).build());
     assert_eq!(
         outcome(&mut minder, AssetId::Near, 10, "bob.near"),
@@ -630,7 +632,7 @@ fn a_scope_is_validated_and_stored_normalized() {
         ..MandateScope::default()
     };
     let result = catch_unwind(AssertUnwindSafe(|| {
-        minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(too_many))
+        minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(too_many), None)
     }));
     assert!(panic_message(result).contains("at most 64"));
 
@@ -639,7 +641,7 @@ fn a_scope_is_validated_and_stored_normalized() {
         ..MandateScope::default()
     };
     let result = catch_unwind(AssertUnwindSafe(|| {
-        minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(bad_address))
+        minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(bad_address), None)
     }));
     assert!(panic_message(result).contains("Invalid EVM address"));
     assert_eq!(
@@ -654,7 +656,7 @@ fn a_scope_is_validated_and_stored_normalized() {
         ]),
         ..MandateScope::default()
     };
-    minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(mixed_case));
+    minder.grant_mandate(other_key(), U64(FAR_FUTURE), Some(mixed_case), None);
     assert_eq!(
         minder.get_mandate().unwrap().scope.allowed_evm_recipients,
         Some(vec![
@@ -672,6 +674,7 @@ fn only_the_owner_sets_a_scope_and_the_scope_is_visible() {
             other_key(),
             U64(FAR_FUTURE),
             Some(near_scope(None, None, Some(1_000_000))),
+            None,
         )
     }));
     assert!(panic_message(result).contains("Only the owner"));
@@ -681,6 +684,7 @@ fn only_the_owner_sets_a_scope_and_the_scope_is_visible() {
         other_key(),
         U64(FAR_FUTURE),
         Some(near_scope(None, Some(vec!["bob.near"]), Some(7))),
+        None,
     );
     let view = near_sdk::serde_json::to_value(minder.get_mandate().unwrap()).unwrap();
     assert_eq!(

@@ -40,8 +40,10 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         4 => class(|a| matches!(a, Action::Request { .. } | Action::StaleKeyRequest(_))),
         4 => class(|a| matches!(a, Action::Deliver { .. })),
         2 => class(|a| matches!(a, Action::SetPolicy { .. } | Action::GrantMandate(..)
-            | Action::RevokeMandate | Action::Freeze | Action::Unfreeze)),
+            | Action::GrantReset(..) | Action::RevokeMandate | Action::Freeze
+            | Action::Unfreeze)),
         2 => class(|a| matches!(a, Action::ProposePolicy { .. } | Action::ProposeUnfreeze
+            | Action::ProposeGrantReset(..)
             | Action::ExecutePending(_) | Action::CancelPending(_))),
         2 => class(|a| matches!(a, Action::SetGuardian(_) | Action::ProposeGuardian(_)
             | Action::Guardian { .. })),

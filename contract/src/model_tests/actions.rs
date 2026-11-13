@@ -268,6 +268,12 @@ pub enum Action {
         variant: PolicyVariant,
     },
     GrantMandate(Grant, Scope),
+    /// A grant that also asks for a fresh budget period. Applied at once if
+    /// nothing is spent in the period (or the timelock is off), refused as
+    /// timelocked otherwise.
+    GrantReset(Grant, Scope),
+    /// The same through the timelock: proposed, executed when due.
+    ProposeGrantReset(Grant, Scope),
     /// A request signed with the key of the mandate granted before the current
     /// one (or, before any rotation, a key never granted): the agent's old key
     /// after a re-grant. It must be refused as `NotAuthorized` once the mandate
@@ -372,6 +378,8 @@ pub fn full_alphabet() -> Vec<Action> {
     for scope in SCOPES {
         for grant in [Grant::Short, Grant::Long] {
             actions.push(Action::GrantMandate(grant, scope));
+            actions.push(Action::GrantReset(grant, scope));
+            actions.push(Action::ProposeGrantReset(grant, scope));
         }
     }
     actions.extend(guardian_alphabet());

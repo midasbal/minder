@@ -213,8 +213,8 @@ fn exhaustive_epoch_budgets() {
     // Lifetime budgets that bind before the window (70 against a window of
     // 100) and after it (150), on both assets, with spend accumulating across
     // window ageing, in-flight requests counted against the budget, failed
-    // deliveries giving it back, and a re-grant resetting it, including a
-    // delivery that lands after the re-grant.
+    // deliveries giving it back, and a re-grant carrying the usage forward
+    // (the reset has its own suite, below).
     let alphabet = [
         request(Asset::Near, Amount::Mid),
         request(Asset::Near, Amount::AtCap),
@@ -249,6 +249,63 @@ fn exhaustive_epoch_budgets() {
             "Delivered(Near, Fail)",
         ],
     );
+}
+
+#[test]
+fn exhaustive_budget_reset() {
+    // The budget period apart from the key epoch. A budget of 70 binds; a plain
+    // re-grant or a revoke and re-grant carries the usage forward (an instant
+    // re-grant never refreshes it); a grant that asks for a fresh period is
+    // instant while nothing is spent and, once something is, is refused when
+    // called and held when proposed, executed only when due (and failing, to
+    // stay pending, if its expiry has passed or its key became the live one).
+    // Run with the timelock on and with it off, where the reset is always instant.
+    let alphabet = [
+        request(Asset::Near, Amount::AtCap),
+        Action::SetPolicy {
+            asset: Asset::Near,
+            variant: PolicyVariant::Budget70,
+        },
+        Action::GrantMandate(Grant::Long, Scope::Unscoped),
+        Action::GrantReset(Grant::Long, Scope::Unscoped),
+        Action::ProposeGrantReset(Grant::Long, Scope::Unscoped),
+        Action::ExecutePending(Pick::Oldest),
+        Action::CancelPending(Pick::Newest),
+        Action::RevokeMandate,
+        deliver(Pick::Oldest, Outcome::Ok),
+        deliver(Pick::Oldest, Outcome::Fail),
+        Action::Advance(Tick::Slot),
+        Action::Advance(Tick::Window),
+    ];
+    for (name, root) in [
+        ("budget-reset", World::boot_timelocked()),
+        ("budget-reset-untimelocked", World::boot()),
+    ] {
+        let stats = run_exhaustive_from(&root, name, &alphabet, DEPTH);
+        assert_covered(
+            &stats.coverage,
+            &[
+                "Allowed(Near)",
+                "Denied(Near, MandateBudgetExceeded)",
+                "Delivered(Near, Ok)",
+                "Budget(ResetNoop)",
+            ],
+        );
+        // With the timelock on, a reset of a used period is refused, proposed,
+        // executed when due, and (its expiry gone or its key now the live one)
+        // can fail to apply; with it off, it is applied at once.
+        let on_path: &[&str] = if name == "budget-reset" {
+            &[
+                "Budget(ResetRefused)",
+                "Budget(ResetProposed)",
+                "Budget(ResetExecuted)",
+                "Budget(ResetExecutionFailed)",
+            ]
+        } else {
+            &["Budget(ResetApplied)"]
+        };
+        assert_covered(&stats.coverage, on_path);
+    }
 }
 
 #[test]

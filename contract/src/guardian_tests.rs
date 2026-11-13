@@ -158,7 +158,7 @@ fn every_other_owner_method_is_refused_for_the_guardian() {
         ),
         (
             "grant_mandate",
-            panic_text(|| minder.grant_mandate(other_key(), U64(u64::MAX), None)),
+            panic_text(|| minder.grant_mandate(other_key(), U64(u64::MAX), None, None)),
         ),
         ("unfreeze", panic_text(|| minder.unfreeze())),
         (
@@ -268,7 +268,7 @@ fn a_compromised_guardian_can_only_stop_never_move_or_widen() {
             minder.set_asset_policy(AssetId::Near, U128(9_999), U128(9_999), None);
         }),
         panic_text(|| minder.set_recipient(account("eve.near"), true)),
-        panic_text(|| minder.grant_mandate(other_key(), U64(u64::MAX), None)),
+        panic_text(|| minder.grant_mandate(other_key(), U64(u64::MAX), None, None)),
         panic_text(|| minder.unfreeze()),
         panic_text(|| {
             let _ = minder.owner_withdraw(AssetId::Near, U128(1), account("eve.near"));

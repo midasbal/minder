@@ -38,7 +38,8 @@ contract's own account (see Agent authority).
 | `policies` | `IterableMap<AssetId, AssetPolicy { per_tx_cap, window_limit, epoch_budget }>` | Having an entry allowlists the asset; `epoch_budget` is optional |
 | `recipients` | `IterableSet<AccountId>` | Allowed recipients |
 | `spend` | `LookupMap<AssetId, SpendRing>` | Per-asset committed window accounting |
-| `epoch_spend` | `LookupMap<AssetId, EpochSpend { epoch, committed }>` | Per-asset committed spend under one mandate epoch, for the lifetime budget. A stale epoch reads as zero. Kept when a policy is removed |
+| `epoch_spend` | `LookupMap<AssetId, EpochSpend { epoch, committed }>` | Per-asset committed spend in one budget period (`epoch` is the budget epoch), for the lifetime budget. A stale epoch reads as zero. Kept when a policy is removed |
+| `budget_epoch`, `budget_period_used` | `u64`, `bool` | The current budget period (starts at 1), apart from the mandate (key) epoch, and whether any spend has been booked in it. See Lifetime budget |
 | `reserved` | `LookupMap<AssetId, u128>` | Per-asset amount reserved for transfers still in flight. Absent means zero |
 | `evm_config` | `Option<EvmConfig { signer_id, derivation_path, sender, chain_id, max_fee_per_gas, max_priority_fee_per_gas, gas_limit, token_gas_limit }>` | Owner-set; `signer_id`, `derivation_path` and `sender` fixed once set |
 | `evm_recipients` | `IterableSet<[u8; 20]>` | Allowed EVM recipients, separate from `recipients` |
@@ -82,25 +83,50 @@ It is kept apart from the window ring, which holds only committed spend.
 real path, in-flight reservations included. `get_live_spend` still reports committed spend only;
 `get_reserved` reports the reservation.
 
-### Lifetime budget per mandate grant
+### Lifetime budget per budget period
 
-A per-asset budget that bounds one grant however many windows elapse. How a spend is bounded
+A per-asset budget that bounds a **budget period** however many windows elapse. How a spend is bounded
 without it: the per-transaction cap, and the sliding window (`effective_spend + amount <= window_limit`).
 Both are rates; a budget is the aggregate.
+
+**The budget period is not the key epoch.** Before, the budget was keyed by the mandate (key) epoch, so every
+grant, including an instant revoke followed by a grant, handed back a spent budget: a compromised owner key
+could refresh it at will. Now the contract has two counters. The mandate epoch (`Mandate.epoch`) still bumps on
+every grant and identifies the key, as it always did. The **budget epoch** (`Minder.budget_epoch`) identifies
+the budget period and changes only when a grant asks for a fresh period and some spend was booked in this one.
+How the budget reset *before*: a grant bumped the mandate epoch, and any counter stamped with an older epoch
+read as zero. Now it resets only on a deliberate, classified reset.
 
 - **`AssetPolicy.epoch_budget: Option<U128>`**, set by the owner with
   `set_asset_policy(asset, per_tx_cap, window_limit, epoch_budget)`. `None` (or omitting it from the
   call) means no budget, only the window, so existing policies and calls are unaffected.
-- **A per-asset counter `epoch_spend[asset] = (mandate_epoch, committed)`** is written by
-  `record_spend` at the same point it records into the window ring: `(current epoch,
-  committed-this-epoch + outlay)`. It is kept whether or not a budget is set, so a budget set
-  mid-grant counts what the grant already spent (it is not forgiven), and, like the ring, it survives
+- **A per-asset counter `epoch_spend[asset] = (budget_epoch, committed)`** is written by
+  `record_spend` at the same point it records into the window ring: `(current budget epoch,
+  committed-this-period + outlay)`. It is kept whether or not a budget is set, so a budget set
+  mid-period counts what the period already spent (it is not forgiven), and, like the ring, it survives
   `remove_asset_policy`, so removing and re-adding a policy cannot reset a budget.
 - **Lazy epoch reset.** `Minder::epoch_committed` reads the stored amount only if its epoch equals
-  the current mandate's, and otherwise zero. A new grant bumps the mandate epoch, which resets every
+  the current budget epoch, and otherwise zero. A reset bumps the budget epoch, which resets every
   asset's budget to zero **without touching storage**; the stale entry is simply overwritten by the
-  next settlement. Revoking does not change the epoch, so spend after a revoke (an in-flight
-  settlement) still counts for the same grant. There is no forever-growing counter.
+  next settlement. A grant, a revoke or an expiry does not change the budget epoch, so spend after any
+  of them (including an in-flight settlement) still counts for the same period. There is no
+  forever-growing counter.
+- **A grant carries usage forward.** `grant_mandate(agent_key, expiry, scope, reset_budget)` takes a new key
+  epoch and leaves the budget epoch alone, so a routine re-grant, a key rotation, or an instant revoke and
+  re-grant gives the new key exactly the budget that remains. This closes the refresh bypass. It is the
+  intended, more conservative semantics: **routine key rotation no longer refreshes the budget.**
+- **A reset is a classified, timelocked loosening.** `reset_budget: true` asks for a fresh period. With no
+  spend booked in the current period (`budget_period_used` is false) it changes nothing and is instant (the
+  epoch is not even bumped). With spend booked it hands already-spent budget back, so it is a loosening: called
+  directly it is refused as `Timelocked`; the owner proposes it (`propose_change` with `GrantMandate { ...,
+  reset_budget: true }`), waits the delay, and executes it, which applies the grant and bumps the budget epoch
+  (logging a `budget_period_reset` event). With the timelock off it is instant, like every change. The usage
+  flag is global, set when any asset books any spend, and is not a scan of the budgeted assets, for two reasons:
+  the counters live in a map that cannot be iterated, and a scan of the policies would miss an asset whose policy
+  was removed (so removing the policy first would make a reset look free). The price is that a reset is
+  timelocked when only an asset with no budget has been spent; that errs on the side of delay. To start a fresh
+  period for the same agent, the owner revokes and grants with `reset_budget`, since the live key cannot be
+  granted again.
 - **In-flight spend counts, through the shared reserved counter.** Budget usage is
   `epoch_committed + reserved[asset]` (`EvalInput.epoch_usage`, built with `policy::effective_spend`,
   the same function as for the window). A request reserves its outlay before dispatch, so a second
@@ -112,14 +138,15 @@ Both are rates; a budget is the aggregate.
   `DenyReason::MandateBudgetExceeded` is appended, so existing borsh tags are unchanged. `dry_run`
   and `dry_run_evm` run `evaluate` and so reflect it. For EVM the amount is the outlay (value plus
   worst-case fee), as for the caps.
-- **Settlement under a later grant.** A request reserved under one grant that settles after a
-  re-grant is booked to the new grant (record_spend uses the epoch current at settlement). While in
-  flight it already counted against the new grant as reserved, so this only tightens the new grant;
-  the old grant's own limit was enforced at request time, reserved included.
-- **Lowering a budget below the usage** denies everything of that asset until the next grant (or a
-  raised budget); nothing is clawed back, like a lowered window limit.
-- **Worst-case loss per grant per asset** is `min(sum of the windows over the grant's lifetime,
-  epoch_budget)`, further narrowed by the mandate's scope.
+- **Settlement across a reset.** A request reserved in one period that settles after a reset is booked to the
+  new period (`record_spend` uses the budget epoch current at settlement). While in flight it already counted
+  against the new period as reserved, so this only tightens the new period; the old period's own limit was
+  enforced at request time, reserved included.
+- **Lowering a budget below the usage** denies everything of that asset until the period is reset (or the
+  budget raised); nothing is clawed back, like a lowered window limit.
+- **Worst-case loss per budget period per asset** is `min(sum of the windows over the period,
+  epoch_budget)`, further narrowed by the mandate's scope. A period is not tied to a grant: it can outlast many
+  keys, and runs until a reset.
 
 ## Reservation lifecycle
 
@@ -254,9 +281,10 @@ a constant). It is spendable from the contract's own balance, so **the most the 
 owner is the policy limits plus this allowance per granted key**, and for a scoped mandate the policy
 part is bounded by the tighter of the two: only the scope's assets, only to the scope's recipients,
 at most `min(global cap, mandate cap)` per transaction, no more than the global window limit per
-asset in any window, and no more than the asset's `epoch_budget` over the whole grant (a token
+asset in any window, and no more than the asset's `epoch_budget` over the whole budget period (a token
 payment is bounded twice: the amount by the token's policy and its gas by the native asset's) (so
-`min(sum of the windows over the grant, epoch_budget)` per asset). The allowance bounds the transaction
+`min(sum of the windows over the budget period, epoch_budget)` per asset; a period outlasts re-grants and
+ends only at a reset). The allowance bounds the transaction
 fees the key can burn, whatever it calls (denied requests burn gas too). The runtime checks the
 allowance against the *prepaid* gas at the current gas price and gives unused gas back, so the agent
 must attach what a request needs, not the 300 Tgas maximum; at the mainnet floor price (1e8 yoctoNEAR
@@ -289,8 +317,9 @@ deployer's own, the addition fails silently and that key is the agent: the owner
 gained `scope: MandateScope`. Both change the borsh layout of the stored state, and `grant_mandate`
 and `dry_run` take a key where they took an account (and `grant_mandate` an optional scope). No
 migration is written: a testnet deployment from before these changes needs a fresh account or wiped
-state. `AssetPolicy` (a trailing `epoch_budget`) and the contract state (a new `epoch_spend` map)
-changed the same way, and so did `AssetId` (the appended `Evm20`), `EvmConfig` (a trailing
+state. `AssetPolicy` (a trailing `epoch_budget`) and the contract state (a new `epoch_spend` map, then
+`budget_epoch` and `budget_period_used`) changed the same way, `grant_mandate` and the `GrantMandate` change gained
+an optional `reset_budget` (a call without it still works), and so did `AssetId` (the appended `Evm20`), `EvmConfig` (a trailing
 `token_gas_limit`) and `Eip1559Tx` (a trailing `data`, which is also the borsh form of the
 `on_sign_complete` arguments, now `(Vec<(AssetId, u128)>, Eip1559Tx)`), and `set_asset_policy` takes an optional `epoch_budget`; a call without it still
 works. The JSON of an existing `grant_mandate` call with a key still works unchanged (no `scope`
@@ -363,8 +392,9 @@ instantly grant a mandate to its own key (bounded by the existing policy and all
 a recipient or raise a cap); send funds to the registered treasury, which it cannot change instantly.
 Known limits: (a) revoke is instant and a grant after a revoke is instant, so the extension rule
 (a timelock on lengthening a live mandate) can be walked around by revoking first, at the cost of
-dropping the agent's authority visibly; (b) a grant starts a new epoch, which resets each asset's
-lifetime budget, so instant re-grants refresh the budget (the windows still bound the rate); (c) the
+dropping the agent's authority visibly; (b) *closed:* a grant used to reset each asset's
+lifetime budget, so instant re-grants refreshed it; now the budget belongs to a budget period that only a
+timelocked reset (when anything is spent) can start; (c) the
 delay is only a reaction window if someone is watching and holds the means to cancel: with one key,
 the attacker holds it too. The guardian (below) is the second holder: with one in place, a loosening the
 owner key proposes can be cancelled by a key the attacker does not have. The external multisig remains the
@@ -861,7 +891,7 @@ until its nonce is mined or replaced, and anyone who holds it can broadcast it.
 
 - **The loss is bounded.** That transaction passed `evaluate` and was reserved and booked when it was
   signed (the G1 rule), so it is capped by exactly what applied at signing: the per-transaction cap, the
-  window limit, and the grant's lifetime budget. Revoking does not add to it, and a later request cannot
+  window limit, and the period's lifetime budget. Revoking does not add to it, and a later request cannot
   exceed what was already counted. A token transfer is bounded the same way, on both of its legs.
 - **There is a manual recall.** The owner calls `owner_evm_withdraw` (or `owner_evm_token_withdraw`) with
   the *explicit nonce of the signed transaction*, which signs a replacement at that nonce (typically a
@@ -1038,11 +1068,12 @@ with its real function-call key.
 | The effective cap is the smaller of the global and the mandate's: tighter binds, looser does not widen | unit `policy::the_effective_cap_is_the_smaller_of_the_global_and_the_mandates`; `mandate_tests::the_effective_cap_is_the_smaller_of_the_global_cap_and_the_mandates`; `gate_tests::the_mandate_cap_applies_to_the_evm_outlay_and_only_ever_narrows` |
 | Intersection: an asset or recipient in the scope but not in the global policy is still denied by the global check; the global checks decide first | unit `policy::the_global_checks_come_first_so_a_scope_never_widens`; `mandate_tests::a_scope_cannot_widen_the_global_policy` |
 | An unscoped mandate behaves as before scopes (regression) | unit `policy::an_unscoped_mandate_is_the_global_policy_alone`; `mandate_tests::an_unscoped_mandate_behaves_as_it_did_before_scopes`; `gate_tests::an_unscoped_mandate_leaves_the_evm_surface_as_it_was`; every existing sandbox test, which grants without a scope |
-| The budget denies a request whose outlay plus committed and in-flight spend of the grant would exceed it (`MandateBudgetExceeded`); it is inclusive; a failed delivery gives it back | unit `policy::the_budget_counts_epoch_usage_plus_the_request_and_is_inclusive`; `budget_tests::the_budget_denies_when_committed_spend_plus_the_request_would_exceed_it`, `a_failed_transfer_gives_its_budget_back`; sandbox `agent_key::a_budget_bounds_what_one_grant_can_spend_and_a_new_grant_starts_afresh` |
+| The budget denies a request whose outlay plus committed and in-flight spend of the period would exceed it (`MandateBudgetExceeded`); it is inclusive; a failed delivery gives it back | unit `policy::the_budget_counts_epoch_usage_plus_the_request_and_is_inclusive`; `budget_tests::the_budget_denies_when_committed_spend_plus_the_request_would_exceed_it`, `a_failed_transfer_gives_its_budget_back`; sandbox `agent_key::a_budget_bounds_a_budget_period_and_only_a_reset_starts_afresh` |
 | TOCTOU: two in-flight requests that together pass the budget, the second denied before the first settles, by the reserved count | unit `budget_tests::in_flight_requests_count_against_the_budget_before_they_settle`; `gate_tests::the_evm_budget_counts_outlays_in_flight_and_binds_before_the_window` |
-| A new grant resets the budget by the epoch bump alone (the stored counter is not touched); spend settled after a re-grant is charged to the new grant | unit `budget_tests::a_new_grant_resets_the_budget_without_writing_anything`, `spend_settled_after_a_regrant_is_charged_to_the_new_grant`; sandbox `agent_key::a_budget_bounds_what_one_grant_can_spend_and_a_new_grant_starts_afresh` |
+| A re-grant carries the budget forward (the key epoch moves, the budget epoch does not); an instant revoke and re-grant cannot refresh a spent budget; a budget never exhausted is unchanged | unit `budget_tests::a_regrant_carries_the_budget_forward_and_the_key_epoch_moves_alone`, `partial_usage_carries_across_a_regrant_and_an_unused_budget_is_unchanged`, `spend_settled_after_a_regrant_stays_in_the_same_budget_period`; sandbox `agent_key::a_budget_bounds_a_budget_period_and_only_a_reset_starts_afresh`, `timelock::a_compromised_owner_cannot_reset_a_used_budget_at_once` |
+| A reset with nothing spent is an instant no-op; with spend it is a timelocked loosening that takes the delay; with the timelock off it is instant; in-flight spend across a reset is booked to the new period; removing the policy does not make a reset free | unit `budget_tests::a_reset_with_nothing_spent_is_instant_and_changes_nothing`, `a_reset_with_spend_is_a_timelocked_loosening_that_takes_the_delay`, `a_compromised_owner_cannot_reset_a_used_budget_at_once`, `a_reset_after_a_revocation_is_still_a_loosening_when_spend_remains`, `a_reset_with_the_timelock_off_is_instant_and_hands_the_budget_back`, `spend_in_flight_across_a_reset_is_booked_to_the_new_period`, `removing_the_policy_does_not_let_a_reset_through_the_timelock`; sandbox `timelock::a_compromised_owner_cannot_reset_a_used_budget_at_once` |
 | The budget and the window are independent and the tighter decides; where both deny the window is the reason | unit `budget_tests::the_budget_binds_before_the_window_when_it_is_the_smaller`, `the_window_binds_before_the_budget_and_the_budget_outlasts_the_window`, `where_both_would_deny_the_window_is_the_reason`; `policy::the_window_is_the_reason_when_both_would_deny_and_the_budget_decides_otherwise` |
-| An unset budget is the window alone; a budget set mid-grant counts earlier spend; lowering it denies until the next grant; removing and re-adding a policy does not reset it; it is per asset | unit `budget_tests::an_unset_budget_is_the_window_alone`, `a_budget_set_mid_grant_counts_what_the_grant_already_spent`, `lowering_the_budget_below_what_was_used_denies_until_the_next_grant`, `removing_and_re_adding_a_policy_does_not_reset_the_budget`, `the_budget_is_per_asset`; `policy::no_budget_means_the_window_alone_however_much_was_spent` |
+| An unset budget is the window alone; a budget set mid-grant counts earlier spend; lowering it denies until the period is reset; removing and re-adding a policy does not reset it; it is per asset | unit `budget_tests::an_unset_budget_is_the_window_alone`, `a_budget_set_mid_grant_counts_what_the_grant_already_spent`, `lowering_the_budget_below_what_was_used_denies_until_the_budget_is_reset`, `removing_and_re_adding_a_policy_does_not_reset_the_budget`, `the_budget_is_per_asset`; `policy::no_budget_means_the_window_alone_however_much_was_spent` |
 | A re-grant replaces the scope; scopes are validated and stored normalized; only the owner sets one | unit `mandate_tests::a_regrant_can_change_the_scope_and_the_new_scope_applies_from_the_new_grant`, `a_scope_is_validated_and_stored_normalized`, `only_the_owner_sets_a_scope_and_the_scope_is_visible` |
 | Grant provisions a function-call key scoped to the three agent methods, on the contract itself, with a limited allowance | unit `mandate_tests::a_grant_provisions_a_function_call_key_limited_to_the_two_agent_methods`, `the_key_can_reach_only_methods_that_exist_on_the_contract`; sandbox `agent_key::a_grant_puts_a_scoped_function_call_key_on_the_contract_account` (reads the key back from the chain) |
 | The real key is refused by the protocol everywhere but the three agent methods | sandbox `agent_key::the_protocol_refuses_the_agent_key_every_method_but_the_two_agent_ones` (every other exported method, no contract logic runs), `the_agent_key_cannot_call_another_contract_such_as_the_signer`, `the_agent_key_cannot_do_anything_but_call_the_two_methods`; and it passes the new auth on both: `the_agent_key_passes_the_new_authentication_on_both_agent_methods` |
@@ -1156,8 +1187,8 @@ one charged to a new grant after a re-grant, are recorded when and where they ar
 step asserts, with no slot, bucket or ring in sight, the guarantees in the owner's terms. (1) Window: the
 spend booked inside any real interval of one window length, taken exactly as the maximum sliding-window sum
 over the booking times (half-open: spends a full window apart are not in one), is at most the asset's
-`window_limit`. (2) Budget: the spend booked under one mandate epoch is at most the asset's `epoch_budget`.
-(3) Worst-case loss: the spend booked under one epoch is at most `min(windows spanned * window_limit,
+`window_limit`. (2) Budget: the spend booked in one budget period is at most the asset's `epoch_budget`.
+(3) Worst-case loss: the spend booked in one budget period is at most `min(windows spanned * window_limit,
 epoch_budget)`. Each spend is held to the limit and budget in force when it was *requested* (read from the
 contract), because that is when the contract decides: the last-requested of any set of spends booked together
 was allowed with every other one already booked in the window or still reserved, so an owner lowering a limit
@@ -1201,7 +1232,8 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
   real path agree with the oracle on each leg (the transfer leg decided first, with its recipient and
   scope, the gas leg by the native policy alone). A delivery releases both and books both or neither.
 - Policies include two with a lifetime budget (70 and 150, over the default cap and window). The
-  oracle keeps per-asset, per-grant committed spend that never ages out and a grant resets, and counts
+  oracle keeps per-asset committed spend per budget period that never ages out, carried across re-grants and
+  reset only by a grant that asks for it while something is spent (timelocked then), and counts
   in-flight spend against it. Because that counter is part of the state, it separates states the
   window alone would fold together, so the older suites explore more states than before.
 - Every grant also carries one of six scopes (none, NEAR only, exactly the allowed recipients, only
@@ -1226,14 +1258,15 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 | Suite (test) | Actions | States | Transitions | Deduplicated | No-ops skipped | Focus |
 | --- | --- | --- | --- | --- | --- | --- |
 | accounting (`exhaustive_accounting_across_interleavings`) | 9 | 22,857 | 91,479 | 65,233 | 2,940 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
-| authority (`exhaustive_authority_and_time`) | 11 | 45,534 | 185,244 | 127,867 | 39,860 | freeze, unfreeze, revoke, short and long grants (each rotating the agent key), slot advances, requests with the current and the stale key, interleaved with in-flight requests |
+| authority (`exhaustive_authority_and_time`) | 11 | 30,715 | 143,154 | 103,057 | 29,194 | freeze, unfreeze, revoke, short and long grants (each rotating the agent key), slot advances, requests with the current and the stale key, interleaved with in-flight requests |
 | policy (`exhaustive_policy_changes_and_caps`) | 11 | 29,991 | 147,137 | 105,176 | 24,705 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
-| scope (`exhaustive_mandate_scopes`) | 10 | 50,140 | 185,809 | 135,670 | 16,081 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
-| budget (`exhaustive_epoch_budgets`) | 10 | 125,916 | 455,491 | 297,864 | 70,529 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
-| token (`exhaustive_token_payments`) | 10 | 32,064 | 131,633 | 99,570 | 18,407 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
+| scope (`exhaustive_mandate_scopes`) | 10 | 30,508 | 126,329 | 95,822 | 11,121 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
+| budget (`exhaustive_epoch_budgets`) | 10 | 98,543 | 391,797 | 265,043 | 58,913 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
+| token (`exhaustive_token_payments`) | 10 | 19,178 | 90,716 | 71,539 | 11,114 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
 | timelock (`exhaustive_timelock`) | 12 | 38,605 | 129,199 | 90,181 | 18,665 | policy changes that tighten (instant) and loosen (refused when called, held when proposed), unfreeze and grants under the timelock, execution only when due, cancellation, requests, freezes and the clock, in a world booted timelocked |
 | guardian (`exhaustive_guardian`) | 16 | 65,036 | 242,233 | 176,660 | 23,079 | two guardian accounts (one the guardian, one a stranger until it is made the guardian); freeze, revoke and cancel by each; forbidden owner methods tried by the guardian; the owner adding, replacing and removing the guardian directly and by proposal; unfreeze proposals, execution, cancellation, a freeze and the clock, in a world booted timelocked with a guardian |
-| **Total** | | **410,143** | **1,568,225** | | | |
+| budget reset (`exhaustive_budget_reset`) | 12 | 73,949 | 235,669 | 152,661 | 81,959 | the budget period apart from the key epoch: a budget of 70 binds; plain re-grants and revoke-and-re-grant carry the usage forward; a grant that asks for a fresh period is instant while nothing is spent and, once something is, refused when called, held when proposed, executed when due, or failing to apply and staying pending (expiry passed, key now the live one); run in a world booted timelocked (53,442 states) and one with the timelock off (20,507), where the reset is always instant |
+| **Total** | | **409,382** | **1,597,713** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -1262,7 +1295,7 @@ every step. Every step of every harness driver runs every check.
 | The decision log: on every request, allowed or panicked, exactly one decision event is emitted and it equals the one restated from the model's decisions and the request's inputs (method, key, asset, recipient, amount, each evaluated leg with its amount and verdict, and the first denying leg) | yes | yes | yes | yes | |
 | The timelock: every owner policy change, unfreeze and grant is classified as the model's independent restatement says (a loosening one refused when called and held when proposed, a tightening one applied at once); the pending list, ids and ready-at times equal the model's; a change is executed only when due and cancelled at will; no loosening takes effect before its delay; and every asset's stored policy equals the model's (reached by the random driver, which runs timelocked, and the `timelock` suite) | | | | yes | |
 | Token payments: both legs are decided as the oracle says (the transfer by the token's policy, allowlist and scope; the gas by the native policy alone), both are reserved together and counted by the next request, the callback carries both reservations and the exact transfer transaction with its calldata, and a delivery releases and books both or neither (reached by the random driver and the `token` suite) | | | | yes | |
-| The lifetime budget: the contract's per-epoch committed spend (read through its lazy-reset accessor) equals the oracle's after every step; budget usage, committed plus in flight, never passes the budget unless the owner lowered it; a new grant resets it, a delivery after the re-grant is booked to the new grant, and the decision (allow or `MandateBudgetExceeded`, with the window deciding first when both deny) equals the oracle's (reached by the random driver and the `budget` suite) | | | | yes | |
+| The lifetime budget: the contract's per-epoch committed spend (read through its lazy-reset accessor) equals the oracle's after every step; budget usage, committed plus in flight, never passes the budget unless the owner lowered it; a re-grant carries it forward, only a reset of a used period starts a fresh one (refused when called and held when proposed while the timelock is on, instant when nothing is spent or the timelock is off, and failing to apply, to stay pending, if its expiry has passed or its key has become the live one), a delivery after a reset is booked to the new period, and the decision (allow or `MandateBudgetExceeded`, with the window deciding first when both deny) equals the oracle's (reached by the random driver and the `budget` and `budget-reset` suites) | | | | yes | |
 | The agent's authority is the intersection of the policy and the mandate's scope: the shadow model restricts every request to what both allow, with the scope checked after the global ones (out-of-scope asset or recipient, the tighter cap), so an allowlist or cap is never widened by a scope, and the stored scope equals the granted one (reached by the random driver and the `scope` suite) | | | | yes | |
 | Agent authentication is by key: every grant switches to the other of two keys, and a request signed with the key the mandate no longer names is never approved (`NotAuthorized` once the mandate checks that rank above it pass), and `dry_run` agrees | | yes | | yes | |
 | EVM nonce (agent path; `owner_evm_withdraw` is deliberately outside this rule and is not in the harness's alphabet): the counter equals the oracle, strictly increases, no `(chain, nonce)` is reused, and a failed signing still consumes its nonce | yes | yes | yes | yes | |
@@ -1418,8 +1451,8 @@ readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds
 invocation under the repository (an environment variable you set yourself still wins). Waiting longer
 costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
 consecutive full runs of `contract/test.sh` when it was added, each exit 0 with no start-up failure and the
-default thread count (so no cap on test threads was needed). The most recent full run, after the guardian was
-added: 261 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
-`method_surface`, 9 `signing_confinement`, 10 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
+default thread count (so no cap on test threads was needed). The most recent full run, after the budget period was split from the
+key epoch: 283 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
+`method_surface`, 9 `signing_confinement`, 11 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
 (`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
 part of the suite.

@@ -91,12 +91,24 @@ pub struct Minder {
     evm_recipients: IterableSet<[u8; 20]>,
     /// Next nonce to hand out per chain id. Only ever increases.
     evm_nonces: LookupMap<u64, u64>,
-    /// Committed spend per asset under one mandate epoch, for the policy's
-    /// `epoch_budget`. An entry from an older epoch than the current mandate's
+    /// Committed spend per asset in one budget period, for the policy's
+    /// `epoch_budget`. An entry from an older budget epoch than the current one
     /// reads as zero (see [`Self::epoch_committed`]). Like `spend`, it is kept
     /// when a policy is removed, so removing and re-adding a policy cannot
     /// reset a budget.
     epoch_spend: LookupMap<AssetId, EpochSpend>,
+    /// The current budget period. It is separate from the mandate (key) epoch:
+    /// a grant takes a new key epoch but leaves this one alone, so rotating the
+    /// agent's key never refreshes a budget. It changes only when a grant asks
+    /// for a reset and some spend was booked in the period (a timelocked
+    /// loosening). Starts at 1.
+    budget_epoch: u64,
+    /// Whether any spend (of any asset) has been booked in the current budget
+    /// period. A reset of an unused period changes nothing, so it is instant;
+    /// of a used one it hands spent budget back, so it is timelocked. A flag
+    /// rather than a scan because the counters live in a map that cannot be
+    /// iterated, and it also covers an asset whose policy was removed.
+    budget_period_used: bool,
     /// Loosening changes waiting out the timelock, by id.
     pending_changes: IterableMap<u64, PendingChange>,
     /// The id the next proposal gets. Starts at 1 and never decreases, so an id
@@ -171,6 +183,8 @@ impl Minder {
             evm_recipients: IterableSet::new(StorageKey::EvmRecipients),
             evm_nonces: LookupMap::new(StorageKey::EvmNonces),
             epoch_spend: LookupMap::new(StorageKey::EpochSpend),
+            budget_epoch: 1,
+            budget_period_used: false,
             pending_changes: IterableMap::new(StorageKey::PendingChanges),
             next_change_id: 1,
         }
@@ -226,17 +240,27 @@ impl Minder {
     /// The provisioning is asynchronous: the mandate is recorded now and the
     /// key appears on the account in a later block. Until then nothing can
     /// authenticate as the agent, so the delay only withholds authority.
+    ///
+    /// A grant takes a new key epoch but **does not refresh the lifetime
+    /// budget**: spend already booked in the budget period carries forward, so
+    /// rotating the agent's key (or an instant revoke and re-grant) cannot hand
+    /// back a spent budget. `reset_budget` asks for a fresh period. With no
+    /// spend booked in the period that changes nothing and is instant; with
+    /// spend booked it hands budget back, so it is a loosening change and goes
+    /// through the timelock. Omitted means false.
     pub fn grant_mandate(
         &mut self,
         agent_key: PublicKey,
         expiry: U64,
         scope: Option<MandateScope>,
+        reset_budget: Option<bool>,
     ) {
         self.assert_owner();
         self.owner_change(OwnerChange::GrantMandate {
             agent_key,
             expiry,
             scope,
+            reset_budget,
         });
     }
 
@@ -493,6 +517,7 @@ impl Minder {
         agent_key: PublicKey,
         expiry: U64,
         scope: Option<MandateScope>,
+        reset_budget: bool,
     ) {
         require!(
             expiry.0 > env::block_timestamp(),
@@ -530,6 +555,21 @@ impl Minder {
             revoked: false,
             scope,
         });
+        // A fresh budget period only if something was spent in this one: an
+        // unused period is already fresh.
+        if reset_budget && self.budget_period_used {
+            self.budget_epoch += 1;
+            self.budget_period_used = false;
+            env::log_str(&format!(
+                "EVENT_JSON:{}",
+                near_sdk::serde_json::json!({
+                    "standard": "minder",
+                    "version": "1.0.0",
+                    "event": "budget_period_reset",
+                    "data": [{ "budget_epoch": self.budget_epoch }],
+                })
+            ));
+        }
     }
 
     pub(crate) fn apply_revoke_mandate(&mut self) {
@@ -676,34 +716,29 @@ impl Minder {
             .or_insert_with(|| SpendRing::new(num_buckets))
             .record(now, slot_len, amount);
 
-        // And into the budget counter of the current mandate epoch. This is a
-        // settlement under whatever grant is current now: spend that was
-        // reserved under an earlier grant and settles after a re-grant is
-        // charged to the new one, where it was already being counted as
-        // in flight. That can only tighten the new grant, never loosen it.
+        // And into the budget counter of the current budget period. This is a
+        // settlement under whatever period is current now: spend that was
+        // reserved in an earlier period and settles after a reset is charged
+        // to the new one, where it was already being counted as in flight.
+        // That can only tighten the new period, never loosen it.
+        self.budget_period_used = true;
         let committed = self.epoch_committed(asset).saturating_add(amount);
         self.epoch_spend.insert(
             asset.clone(),
             EpochSpend {
-                epoch: self.current_epoch(),
+                epoch: self.budget_epoch,
                 committed,
             },
         );
     }
 
-    /// The epoch of the current mandate. Epochs start at 1, so 0 means no
-    /// mandate was ever granted.
-    fn current_epoch(&self) -> u64 {
-        self.mandate.as_ref().map_or(0, |mandate| mandate.epoch)
-    }
-
-    /// Committed spend of `asset` under the current mandate epoch: the stored
-    /// amount if it belongs to this epoch, otherwise zero. The lazy reset: a
-    /// new grant bumps the epoch, and every older entry then reads as zero
+    /// Committed spend of `asset` in the current budget period: the stored
+    /// amount if it belongs to this period, otherwise zero. The lazy reset: a
+    /// reset bumps the budget epoch, and every older entry then reads as zero
     /// with nothing written.
     pub(crate) fn epoch_committed(&self, asset: &AssetId) -> u128 {
         match self.epoch_spend.get(asset) {
-            Some(spend) if spend.epoch == self.current_epoch() => spend.committed,
+            Some(spend) if spend.epoch == self.budget_epoch => spend.committed,
             _ => 0,
         }
     }

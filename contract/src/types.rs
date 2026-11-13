@@ -347,6 +347,9 @@ pub enum OwnerChange {
         agent_key: PublicKey,
         expiry: U64,
         scope: Option<MandateScope>,
+        /// Start a fresh budget period with this grant (see
+        /// `Minder::grant_mandate`). Omitted means false.
+        reset_budget: Option<bool>,
     },
     Unfreeze,
     SetEvmConfig {

@@ -76,6 +76,8 @@ pub enum Observed {
     Delivered(Asset, Outcome),
     /// A guardian call: what it was and whether it was allowed or refused.
     Guardian(&'static str),
+    /// A budget-period reset: what became of it.
+    Budget(&'static str),
     Other,
 }
 
@@ -88,6 +90,7 @@ impl Observed {
             Observed::GasDenied(reason) => format!("GasDenied({reason:?})"),
             Observed::Delivered(asset, outcome) => format!("Delivered({asset:?}, {outcome:?})"),
             Observed::Guardian(what) => format!("Guardian({what})"),
+            Observed::Budget(what) => format!("Budget({what})"),
             Observed::Other => "Other".to_string(),
         }
     }
@@ -145,7 +148,7 @@ impl World {
             Some(GAS_LIMIT),
             Some(TOKEN_GAS_LIMIT),
         );
-        minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None);
+        minder.grant_mandate(agent_key(0), U64(T0 + LONG_MANDATE), None, None);
         // Adding a guardian is instant, so it is in place before the timelock.
         minder.set_guardian(Some(guardian_account(0)));
         let mut model = Model::new(T0, T0 + LONG_MANDATE);
@@ -271,20 +274,55 @@ impl World {
                 }
                 Observed::Other
             }
-            Action::GrantMandate(grant, scope) => {
+            Action::GrantMandate(grant, scope) | Action::GrantReset(grant, scope) => {
+                let reset = matches!(action, Action::GrantReset(..));
                 let expiry = model.now + grant.lifetime();
                 // Every grant switches to the other key, as the contract requires
                 // a new key while a mandate is live.
                 let key = agent_key(model.stale_key());
-                let attempt =
-                    guarded(|| minder.grant_mandate(key, U64(expiry), grant_scope(scope)));
-                if model.grant_timelocked(expiry) {
+                let attempt = guarded(|| {
+                    minder.grant_mandate(
+                        key,
+                        U64(expiry),
+                        grant_scope(scope),
+                        reset.then_some(true),
+                    )
+                });
+                if model.grant_timelocked(expiry, reset) {
                     expect_timelocked(attempt, "grant_mandate")?;
+                    if reset && model.period_used {
+                        Observed::Budget("ResetRefused")
+                    } else {
+                        Observed::Other
+                    }
                 } else {
                     expect_applied(attempt, "grant_mandate")?;
-                    model.grant(expiry, scope);
+                    let hands_back = reset && model.period_used;
+                    model.grant(expiry, scope, reset);
+                    match (reset, hands_back) {
+                        (true, true) => Observed::Budget("ResetApplied"),
+                        (true, false) => Observed::Budget("ResetNoop"),
+                        _ => Observed::Other,
+                    }
                 }
-                Observed::Other
+            }
+            Action::ProposeGrantReset(grant, scope) => {
+                let expiry = model.now + grant.lifetime();
+                let key = model.stale_key();
+                let change = OwnerChange::GrantMandate {
+                    agent_key: agent_key(key),
+                    expiry: U64(expiry),
+                    scope: grant_scope(scope),
+                    reset_budget: Some(true),
+                };
+                let attempt = guarded(|| minder.propose_change(change));
+                if model.grant_timelocked(expiry, true) {
+                    propose_accepted(attempt, &mut model, Held::GrantReset { expiry, scope, key })?;
+                    Observed::Budget("ResetProposed")
+                } else {
+                    expect_not_timelocked(attempt, "a grant reset proposal")?;
+                    Observed::Other
+                }
             }
             Action::ProposePolicy { asset, variant } => {
                 let (cap, limit) = variant.limits();
@@ -312,19 +350,42 @@ impl World {
                 Observed::Other
             }
             Action::ExecutePending(pick) => {
+                let mut observed = Observed::Other;
                 if let Some(index) = model.pending_index(pick) {
                     let entry = model.pending[index];
                     let attempt = guarded(|| {
                         let _ = minder.execute_change(U64(entry.id));
                     });
                     if model.now >= entry.ready_at {
-                        // Due: it takes effect now, and not before.
-                        expect_applied(attempt, "execute_change")?;
-                        model.pending.remove(index);
-                        match entry.change {
-                            Held::Policy(asset, variant) => model.set_policy(asset, variant),
-                            Held::Unfreeze => model.set_frozen(false),
-                            Held::Guardian(slot) => model.guardian = slot,
+                        // Due: it takes effect now, and not before. A grant can
+                        // still fail at execution if its expiry has passed or
+                        // its key has become the live one; then it stays pending.
+                        let grant_failure = match entry.change {
+                            Held::GrantReset { expiry, .. } if model.now >= expiry => {
+                                Some("Mandate expiry must be in the future")
+                            }
+                            Held::GrantReset { key, .. }
+                                if !model.mandate.revoked && model.mandate.key == key =>
+                            {
+                                Some("That key is the current agent key")
+                            }
+                            _ => None,
+                        };
+                        if let Some(needle) = grant_failure {
+                            expect_refused(attempt, needle, "a due grant that cannot apply")?;
+                            observed = Observed::Budget("ResetExecutionFailed");
+                        } else {
+                            expect_applied(attempt, "execute_change")?;
+                            model.pending.remove(index);
+                            match entry.change {
+                                Held::Policy(asset, variant) => model.set_policy(asset, variant),
+                                Held::Unfreeze => model.set_frozen(false),
+                                Held::Guardian(slot) => model.guardian = slot,
+                                Held::GrantReset { expiry, scope, key } => {
+                                    model.grant_with_key(expiry, scope, key, true);
+                                    observed = Observed::Budget("ResetExecuted");
+                                }
+                            }
                         }
                     } else {
                         let message = attempt.err().ok_or_else(|| {
@@ -338,7 +399,7 @@ impl World {
                         );
                     }
                 }
-                Observed::Other
+                observed
             }
             Action::CancelPending(pick) => {
                 if let Some(index) = model.pending_index(pick) {
@@ -517,7 +578,7 @@ fn forbidden_call(minder: &mut Minder, kind: Forbidden) {
             minder.set_asset_policy(AssetId::Near, U128(80), U128(160), None);
         }
         Forbidden::Grant => {
-            minder.grant_mandate(agent_key(1), U64(T0 + LONG_MANDATE), None);
+            minder.grant_mandate(agent_key(1), U64(T0 + LONG_MANDATE), None, None);
         }
         Forbidden::Unfreeze => minder.unfreeze(),
         Forbidden::Withdraw => {
@@ -1019,10 +1080,12 @@ fn deliver(
         }
     }
     model.deliver(index, outcome);
-    // Booked now, at settlement, under the contract's own current epoch: this
-    // is the record the loss-bound check works from.
+    // Booked now, at settlement, in the current budget period: this is the
+    // record the loss-bound check works from.
     if outcome.books_spend() {
-        let epoch = minder.get_mandate().expect("boot grants a mandate").epoch;
+        // The budget period, apart from the key epoch: only a reset of a used
+        // period starts a new one.
+        let epoch = model.budget_period;
         for ((asset, amount), (limit, budget)) in pending.legs().into_iter().zip(&pending.terms) {
             model.ledger.book(
                 asset.index(),
@@ -1093,7 +1156,7 @@ fn check_invariants(
         let epoch_committed = minder.epoch_committed(&asset_id(asset));
         ensure!(
             epoch_committed == model.epoch_committed[i],
-            "{asset:?}: this grant's committed spend is {epoch_committed}, the model has {}",
+            "{asset:?}: this period's committed spend is {epoch_committed}, the model has {}",
             model.epoch_committed[i]
         );
         if let Some(budget) = model.policy[i].budget {
@@ -1182,6 +1245,12 @@ fn check_invariants(
             Held::Unfreeze => OwnerChange::Unfreeze,
             Held::Guardian(slot) => OwnerChange::SetGuardian {
                 guardian: slot.map(guardian_account),
+            },
+            Held::GrantReset { expiry, scope, key } => OwnerChange::GrantMandate {
+                agent_key: agent_key(key),
+                expiry: U64(expiry),
+                scope: grant_scope(scope),
+                reset_budget: Some(true),
             },
         };
         ensure!(

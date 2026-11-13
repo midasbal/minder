@@ -63,7 +63,7 @@ pub fn armed_as_agent() -> Minder {
         minder.set_asset_policy(asset, U128(PER_TX_CAP), U128(WINDOW_LIMIT), None);
     }
     minder.set_recipient(account("bob.near"), true);
-    minder.grant_mandate(agent_key(), U64(u64::MAX), None);
+    minder.grant_mandate(agent_key(), U64(u64::MAX), None, None);
     testing_env!(agent_context().build());
     minder
 }

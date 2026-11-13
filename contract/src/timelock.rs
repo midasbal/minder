@@ -19,6 +19,7 @@
 //! - adding a recipient (NEAR or EVM);
 //! - unfreezing;
 //! - a grant that extends a live mandate's expiry;
+//! - a grant that resets the budget period while some of its budget is spent;
 //! - an EVM configuration that is new, or raises a fee or a gas limit, or moves
 //!   the chain;
 //! - lowering the delay, and changing the treasury;
@@ -301,12 +302,22 @@ impl Minder {
             // Only a grant that extends a mandate that is live loosens: any
             // other grant (none, revoked, expired, or no later expiry) leaves
             // the agent bounded by the same policy for no longer than before.
-            OwnerChange::GrantMandate { expiry, .. } => match &self.mandate {
-                Some(live) if !live.revoked && env::block_timestamp() < live.expiry.0 => {
-                    expiry.0 > live.expiry.0
-                }
-                _ => false,
-            },
+            // A grant that asks for a fresh budget period also loosens when
+            // some of the period's budget has been spent: it hands that back.
+            // With nothing spent it changes nothing.
+            OwnerChange::GrantMandate {
+                expiry,
+                reset_budget,
+                ..
+            } => {
+                let extends_a_live_mandate = match &self.mandate {
+                    Some(live) if !live.revoked && env::block_timestamp() < live.expiry.0 => {
+                        expiry.0 > live.expiry.0
+                    }
+                    _ => false,
+                };
+                extends_a_live_mandate || (reset_budget.unwrap_or(false) && self.budget_period_used)
+            }
             OwnerChange::Unfreeze => self.config.status == Status::Frozen,
             OwnerChange::SetEvmConfig {
                 chain_id,
@@ -376,7 +387,8 @@ impl Minder {
                 agent_key,
                 expiry,
                 scope,
-            } => self.apply_grant_mandate(agent_key, expiry, scope),
+                reset_budget,
+            } => self.apply_grant_mandate(agent_key, expiry, scope, reset_budget.unwrap_or(false)),
             OwnerChange::Unfreeze => self.apply_unfreeze(),
             OwnerChange::SetEvmConfig {
                 signer_id,

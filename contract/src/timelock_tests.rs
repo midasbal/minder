@@ -171,12 +171,12 @@ fn a_grant_that_does_not_extend_a_live_mandate_is_instant() {
     let mut minder = armed();
     owner_at(T0);
     // The armed mandate never expires, so any new expiry is not an extension.
-    minder.grant_mandate(other_key(), U64(T0 + 5_000), None);
+    minder.grant_mandate(other_key(), U64(T0 + 5_000), None, None);
     assert_eq!(minder.get_mandate().unwrap().agent_key, other_key());
     // Once revoked, a grant restores authority at once, whatever its expiry:
     // the agent is bounded by the policy, which cannot be loosened instantly.
     minder.revoke_mandate();
-    minder.grant_mandate(agent_key(), U64(T0 + 1_000_000_000), None);
+    minder.grant_mandate(agent_key(), U64(T0 + 1_000_000_000), None, None);
     assert_eq!(minder.get_mandate().unwrap().epoch, 3);
 }
 
@@ -347,16 +347,17 @@ fn adding_a_recipient_is_delayed_on_both_surfaces() {
 fn extending_a_live_mandate_is_delayed() {
     let mut minder = armed();
     owner_at(T0);
-    minder.grant_mandate(other_key(), U64(T0 + 1_000), None); // short, live
+    minder.grant_mandate(other_key(), U64(T0 + 1_000), None, None); // short, live
     let extended = U64(T0 + 100_000);
     let key = agent_key();
     through_the_delay(
         &mut minder,
-        |m| m.grant_mandate(key.clone(), extended, None),
+        |m| m.grant_mandate(key.clone(), extended, None, None),
         OwnerChange::GrantMandate {
             agent_key: agent_key(),
             expiry: extended,
             scope: None,
+            reset_budget: None,
         },
         |m| m.get_mandate().unwrap().expiry.0,
         extended.0,
@@ -367,11 +368,12 @@ fn extending_a_live_mandate_is_delayed() {
 fn a_grant_whose_time_has_passed_by_execution_reverts_and_stays_pending() {
     let mut minder = armed();
     owner_at(T0);
-    minder.grant_mandate(other_key(), U64(T0 + 100), None);
+    minder.grant_mandate(other_key(), U64(T0 + 100), None, None);
     let id = minder.propose_change(OwnerChange::GrantMandate {
         agent_key: agent_key(),
         expiry: U64(T0 + DELAY / 2 + 200),
         scope: Some(MandateScope::default()),
+        reset_budget: None,
     });
     owner_at(T0 + DELAY + 1_000);
     let text = panic_text(|| {
@@ -655,6 +657,7 @@ fn only_a_loosening_change_can_be_proposed_and_only_a_valid_one() {
             agent_key: agent_key(),
             expiry: U64(1),
             scope: None,
+            reset_budget: None,
         },
     ] {
         assert!(

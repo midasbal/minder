@@ -8,9 +8,9 @@
 //!
 //! 1. **Window.** Spend booked inside any real interval of `WINDOW_LEN`
 //!    nanoseconds is at most the asset's `window_limit`.
-//! 2. **Budget.** Spend booked under one mandate epoch is at most that asset's
-//!    `epoch_budget`.
-//! 3. **Worst-case loss.** Spend booked under one epoch is at most
+//! 2. **Budget.** Spend booked in one budget period (which a re-grant does not end;
+//!    only a deliberate reset does) is at most that asset's `epoch_budget`.
+//! 3. **Worst-case loss.** Spend booked in one budget period is at most
 //!    `min(sum of the windows the epoch spans, epoch_budget)`.
 //!
 //! It uses no slot, bucket or ring: only times, amounts and the limits that were
@@ -48,7 +48,7 @@ pub struct Booking {
     pub budget: Option<u128>,
 }
 
-/// What one mandate epoch has booked of one asset.
+/// What one budget period has booked of one asset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tally {
     epoch: u64,
@@ -66,13 +66,13 @@ struct Tally {
 pub struct Ledger {
     /// Bookings that can still be in a future window, per asset, in time order.
     recent: [Vec<Booking>; ASSET_COUNT],
-    /// The current epoch's tally per asset. An epoch's bookings all arrive while
-    /// it is current, so an older epoch's tally is final and was already checked.
+    /// The current period's tally per asset. A period's bookings all arrive while
+    /// it is current, so an older period's tally is final and was already checked.
     epoch: [Option<Tally>; ASSET_COUNT],
 }
 
 impl Ledger {
-    /// Records a spend booked at `booking.time` under mandate `epoch`.
+    /// Records a spend booked at `booking.time` in budget period `epoch`.
     pub fn book(&mut self, asset: usize, epoch: u64, booking: Booking) {
         self.recent[asset].push(booking);
         let tally = match self.epoch[asset] {
@@ -149,7 +149,7 @@ fn check_epoch(asset: usize, tally: &Tally) -> Result<(), String> {
     if let Some(budget) = tally.budget_bound {
         if tally.total > budget {
             return Err(format!(
-                "asset {asset}: {} was booked under mandate epoch {}, over its budget of {budget}",
+                "asset {asset}: {} was booked in budget period {}, over its budget of {budget}",
                 tally.total, tally.epoch
             ));
         }
@@ -164,7 +164,7 @@ fn check_epoch(asset: usize, tally: &Tally) -> Result<(), String> {
     };
     if tally.total > worst_case {
         return Err(format!(
-            "asset {asset}: {} was booked under mandate epoch {} across {windows} window(s), \
+            "asset {asset}: {} was booked in budget period {} across {windows} window(s), \
              over min(windows * limit, budget) = {worst_case}",
             tally.total, tally.epoch
         ));
@@ -320,7 +320,7 @@ mod tests {
 
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
-    use near_sdk::json_types::U128;
+    use near_sdk::json_types::{U128, U64};
     use near_sdk::{testing_env, PromiseResult, RuntimeFeesConfig};
 
     use crate::test_support::{account, agent_context, armed_as_agent, context};
@@ -387,5 +387,93 @@ mod tests {
         // window: 8 windows can carry at most 8 times the limit.
         assert!(booked >= 6 * CAP, "the agent was never allowed: {booked}");
         assert!(booked <= 8 * crate::test_support::WINDOW_LIMIT, "{booked}");
+    }
+
+    /// The budget bypass this closes. The budget is 70 and the window 100, so the
+    /// budget is what binds. A greedy agent spends as soon as it is allowed, and a
+    /// compromised owner key revokes and grants a new key (both instant) every
+    /// few windows, hoping each time for a fresh budget. The record of what was
+    /// booked, with no reset ever requested, is held to one budget period: no
+    /// more than 70 in all.
+    #[test]
+    fn an_owner_that_keeps_regranting_cannot_refresh_the_budget() {
+        const CAP: u128 = 50;
+        const BUDGET: u128 = 70;
+        const START: u64 = 1_000_000;
+        let mut minder = armed_as_agent();
+        let mut owner = context("owner.near");
+        owner.block_timestamp(START);
+        testing_env!(owner.build());
+        minder.set_asset_policy(
+            AssetId::Near,
+            U128(CAP),
+            U128(crate::test_support::WINDOW_LIMIT),
+            Some(U128(BUDGET)),
+        );
+        let key_of = |n: u8| {
+            near_sdk::PublicKey::from_parts(near_sdk::CurveType::ED25519, vec![10 + n; 32])
+                .expect("a valid key")
+        };
+        // The mandate granted by `armed_as_agent` is for `agent_key()`.
+        let mut agent_key = crate::test_support::agent_key();
+        let mut ledger = Ledger::default();
+        let mut booked = 0u128;
+        let mut regrants = 0u8;
+
+        let mut offset = 0;
+        while offset < 12 * WINDOW_LEN {
+            let now = START + offset;
+            // Every second window the owner key rotates the agent.
+            if offset > 0 && offset % (2 * WINDOW_LEN) < 7 {
+                let mut context = context("owner.near");
+                context.block_timestamp(now);
+                testing_env!(context.build());
+                regrants += 1;
+                minder.revoke_mandate();
+                agent_key = key_of(regrants);
+                minder.grant_mandate(agent_key.clone(), U64(u64::MAX), None, None);
+            }
+            let mut agent = crate::test_support::agent_context_for(agent_key.clone());
+            agent.block_timestamp(now);
+            testing_env!(agent.build());
+            let allowed = catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    minder.request_local_transfer(AssetId::Near, U128(CAP), account("bob.near"));
+            }))
+            .is_ok();
+            if allowed {
+                let mut settle = context("minder.near");
+                settle.block_timestamp(now);
+                testing_env!(
+                    settle.build(),
+                    near_sdk::test_vm_config(),
+                    RuntimeFeesConfig::test(),
+                    Default::default(),
+                    vec![PromiseResult::Successful(Vec::new())]
+                );
+                minder.on_transfer_complete(AssetId::Near, U128(CAP));
+                ledger.book(
+                    0,
+                    1,
+                    Booking {
+                        time: now,
+                        amount: CAP,
+                        limit: crate::test_support::WINDOW_LIMIT,
+                        budget: Some(BUDGET),
+                    },
+                );
+                booked += CAP;
+            }
+            if let Err(error) = ledger.check() {
+                panic!("the budget was refreshed: {error}");
+            }
+            ledger.prune(now);
+            offset += 7;
+        }
+        assert!(regrants >= 4, "the owner key re-granted {regrants} times");
+        assert_eq!(
+            booked, CAP,
+            "one spend fits the budget of {BUDGET}; no more"
+        );
     }
 }
