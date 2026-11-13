@@ -1149,6 +1149,26 @@ across interleavings nobody wrote by hand. It is unit level (the mocked NEAR env
 deterministic, and compiled only for tests: `proptest` is a dev-dependency, and the production wasm
 is unchanged.
 
+**The loss bound is asserted directly, not as agreement with the ring.** The shadow oracle states the
+rules, so it agrees with the contract's window arithmetic by construction. `loss_bound.rs` is a different
+witness: it records only what was booked, each spend with its settlement time (so a late-settling request, and
+one charged to a new grant after a re-grant, are recorded when and where they are booked), and after every
+step asserts, with no slot, bucket or ring in sight, the guarantees in the owner's terms. (1) Window: the
+spend booked inside any real interval of one window length, taken exactly as the maximum sliding-window sum
+over the booking times (half-open: spends a full window apart are not in one), is at most the asset's
+`window_limit`. (2) Budget: the spend booked under one mandate epoch is at most the asset's `epoch_budget`.
+(3) Worst-case loss: the spend booked under one epoch is at most `min(windows spanned * window_limit,
+epoch_budget)`. Each spend is held to the limit and budget in force when it was *requested* (read from the
+contract), because that is when the contract decides: the last-requested of any set of spends booked together
+was allowed with every other one already booked in the window or still reserved, so an owner lowering a limit
+mid-flight needs no special case. The checker is itself tested on hand-made histories (the boundary at exactly
+one window, ties, epochs, the largest-limit rule), and a greedy agent that times a request at every offset in a
+slot, for eight windows against the real contract, is held to the same check. Breaking the ring so that it forgets
+a spend one slot early, or counts only the current slot, lets that agent book 150 inside one real window against a
+limit of 100, which the check reports on its own; the stateful harness also trips there, at the ring oracle,
+earlier (in the `authority` suite and the random driver; the `accounting` suite's alphabet has no slot-sized
+clock tick, so it never puts a spend at exactly the age where that mutation matters).
+
 **The shadow oracle is written independently of `policy.rs` and `window.rs`.** `model.rs` restates the
 rules from the documentation: spend is a plain list of `(time, amount)` and the window is arithmetic on
 slot numbers, so a bug in the contract's ring (aliasing, early forgetting) or in `policy::evaluate`
@@ -1205,15 +1225,15 @@ successful signer receipt, valid or merely unusable (G1), with only a failed rec
 
 | Suite (test) | Actions | States | Transitions | Deduplicated | No-ops skipped | Focus |
 | --- | --- | --- | --- | --- | --- | --- |
-| accounting (`exhaustive_accounting_across_interleavings`) | 9 | 22,328 | 90,887 | 65,178 | 2,812 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
+| accounting (`exhaustive_accounting_across_interleavings`) | 9 | 22,857 | 91,479 | 65,233 | 2,940 | requests at and below the cap that press the limit; deliveries of `Ok`, `Fail`, `WrongShape`, `Oversized` in either order; a window-length advance |
 | authority (`exhaustive_authority_and_time`) | 11 | 45,534 | 185,244 | 127,867 | 39,860 | freeze, unfreeze, revoke, short and long grants (each rotating the agent key), slot advances, requests with the current and the stale key, interleaved with in-flight requests |
-| policy (`exhaustive_policy_changes_and_caps`) | 11 | 13,486 | 73,721 | 54,642 | 11,749 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
-| scope (`exhaustive_mandate_scopes`) | 10 | 24,854 | 104,843 | 79,990 | 6,517 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
-| budget (`exhaustive_epoch_budgets`) | 10 | 60,702 | 237,500 | 163,103 | 30,220 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
-| token (`exhaustive_token_payments`) | 10 | 21,652 | 91,702 | 70,051 | 9,358 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
-| timelock (`exhaustive_timelock`) | 12 | 38,233 | 128,403 | 89,835 | 18,381 | policy changes that tighten (instant) and loosen (refused when called, held when proposed), unfreeze and grants under the timelock, execution only when due, cancellation, requests, freezes and the clock, in a world booted timelocked |
+| policy (`exhaustive_policy_changes_and_caps`) | 11 | 29,991 | 147,137 | 105,176 | 24,705 | tightening and loosening limits under in-flight spend, over-cap and non-allowlisted requests, `Garbage` delivery |
+| scope (`exhaustive_mandate_scopes`) | 10 | 50,140 | 185,809 | 135,670 | 16,081 | grants of each kind of scope (NEAR only, only the disallowed recipients, a tight cap, none) interleaved with requests on both surfaces to allowed and disallowed recipients, a loosened limit and in-flight spend |
+| budget (`exhaustive_epoch_budgets`) | 10 | 125,916 | 455,491 | 297,864 | 70,529 | lifetime budgets of 70 (binds before the window of 100) and 150 (after it) on both assets, set and replaced under in-flight spend, failed and successful deliveries, window ageing, and a re-grant that resets the budget, including a delivery that lands after it |
+| token (`exhaustive_token_payments`) | 10 | 32,064 | 131,633 | 99,570 | 18,407 | token payments with their two legs interleaved with native payments that share the gas asset, a tight native policy, a token budget, scopes that exclude the token, and successful and failed deliveries |
+| timelock (`exhaustive_timelock`) | 12 | 38,605 | 129,199 | 90,181 | 18,665 | policy changes that tighten (instant) and loosen (refused when called, held when proposed), unfreeze and grants under the timelock, execution only when due, cancellation, requests, freezes and the clock, in a world booted timelocked |
 | guardian (`exhaustive_guardian`) | 16 | 65,036 | 242,233 | 176,660 | 23,079 | two guardian accounts (one the guardian, one a stranger until it is made the guardian); freeze, revoke and cancel by each; forbidden owner methods tried by the guardian; the owner adding, replacing and removing the guardian directly and by proposal; unfreeze proposals, execution, cancellation, a freeze and the clock, in a world booted timelocked with a guardian |
-| **Total** | | **291,825** | **1,154,533** | | | |
+| **Total** | | **410,143** | **1,568,225** | | | |
 
 The random driver (`random_long_sequences`) runs 4,000 proptest cases of up to 40 actions over the
 **full** alphabet from a fixed seed, so a build always draws the same cases; a failure is shrunk to a
@@ -1227,6 +1247,7 @@ every step. Every step of every harness driver runs every check.
 
 | Invariant | Accounting | Authority | Policy | Random | Fuzz |
 | --- | --- | --- | --- | --- | --- |
+| The loss bound, from the record of bookings alone: at most the window limit inside any real window-length interval, at most the budget per epoch, at most `min(windows * limit, budget)` per epoch (each spend against the limit it was requested under) | yes | yes | yes | yes | |
 | Window spend equals the oracle after every step, including aging past slot and window boundaries (the ring never under-counts) | yes | yes | yes | yes | |
 | Reserved equals the oracle and the sum of in-flight outlays; each reservation is released exactly once | yes | yes | yes | yes | |
 | Reserved is zero once every callback has been delivered | yes | yes | yes | yes | |

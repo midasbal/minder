@@ -81,6 +81,11 @@ pub struct Pending {
     pub gas: u128,
     /// The transaction the contract built, for EVM requests.
     pub tx: Option<Eip1559Tx>,
+    /// For each leg of `legs()`, in order: the asset's `window_limit` and
+    /// `epoch_budget` in force when the request was made, read from the
+    /// contract. The loss-bound check holds a spend to the limit it was allowed
+    /// under, however late it settles.
+    pub terms: Vec<(u128, Option<u128>)>,
 }
 
 impl Pending {
@@ -127,6 +132,8 @@ pub struct Model {
     /// transactions it built. History only: not part of the fingerprint.
     pub issued: BTreeSet<(u64, u64)>,
     pub queue: Vec<Pending>,
+    /// Every booked spend, for the loss-bound check (see `loss_bound.rs`).
+    pub ledger: super::loss_bound::Ledger,
     /// Authority-loss ghost state for the monotonic-revocation invariant. It
     /// is maintained apart from `decide`, so the two are independent.
     ghost_frozen: bool,
@@ -159,6 +166,7 @@ impl Model {
             next_nonce: 0,
             issued: BTreeSet::new(),
             queue: Vec::new(),
+            ledger: super::loss_bound::Ledger::default(),
             ghost_frozen: false,
             ghost_lapsed_epoch: None,
         }
@@ -479,7 +487,7 @@ impl Model {
                     self.next_change_id,
                     self.guardian
                 ),
-                &self.queue,
+                (&self.queue, &self.ledger),
                 (self.ghost_frozen, self.ghost_lapsed_epoch),
             )
         )

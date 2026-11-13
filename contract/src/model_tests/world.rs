@@ -34,6 +34,7 @@ use super::actions::{
     Action, Amount, Asset, Forbidden, GuardianCall, Outcome, Pick, Recipient, Scope, ASSETS,
     ASSET_COUNT,
 };
+use super::loss_bound::Booking;
 use super::model::{Held, Model, Pending};
 use super::{
     CHAIN_ID, DERIVATION_PATH, EVM_ALLOWED, EVM_DISALLOWED, GAS_LIMIT, LONG_MANDATE, MAX_FEE,
@@ -398,6 +399,7 @@ impl World {
         model.settle_bookkeeping();
 
         check_invariants(&minder, &model, delivered, live_before)?;
+        model.ledger.prune(model.now);
 
         let storage = persist(minder);
         // A call the guardian may not make, or that is refused to an account
@@ -705,7 +707,18 @@ fn request(
 
     match (predicted, called) {
         (Ok(()), Ok(())) => {
-            dispatched(model, asset, outlay, evm_value, to)?;
+            // The limits these legs were allowed under, as the contract holds them.
+            let terms_of = |leg: Asset| {
+                let policy = minder
+                    .get_asset_policy(asset_id(leg))
+                    .expect("boot sets a policy for every asset");
+                (policy.window_limit.0, policy.epoch_budget.map(|b| b.0))
+            };
+            let mut terms = vec![terms_of(asset)];
+            if asset == Asset::Token {
+                terms.push(terms_of(Asset::Evm));
+            }
+            dispatched(model, asset, outlay, evm_value, to, terms)?;
             Ok(Observed::Allowed(asset))
         }
         (Ok(()), Err(message)) => Err(Violation(format!(
@@ -819,6 +832,7 @@ fn dispatched(
     outlay: u128,
     evm_value: u128,
     to: Recipient,
+    terms: Vec<(u128, Option<u128>)>,
 ) -> Result<(), Violation> {
     let receipts = get_created_receipts();
     let mut tx = None;
@@ -923,6 +937,7 @@ fn dispatched(
         outlay,
         gas,
         tx,
+        terms,
     };
     model.reserve_pending(&pending);
     model.queue.push(pending);
@@ -1004,6 +1019,23 @@ fn deliver(
         }
     }
     model.deliver(index, outcome);
+    // Booked now, at settlement, under the contract's own current epoch: this
+    // is the record the loss-bound check works from.
+    if outcome.books_spend() {
+        let epoch = minder.get_mandate().expect("boot grants a mandate").epoch;
+        for ((asset, amount), (limit, budget)) in pending.legs().into_iter().zip(&pending.terms) {
+            model.ledger.book(
+                asset.index(),
+                epoch,
+                Booking {
+                    time: model.now,
+                    amount,
+                    limit: *limit,
+                    budget: *budget,
+                },
+            );
+        }
+    }
     Ok(Observed::Delivered(pending.asset, outcome))
 }
 
@@ -1159,6 +1191,8 @@ fn check_invariants(
             "pending change {stored:?} differs from the model's {held:?}"
         );
     }
+    // The user-facing guarantee, from the record of what was booked alone.
+    model.ledger.check().map_err(Violation)?;
     let mandate = minder.get_mandate().expect("boot grants a mandate");
     ensure!(
         mandate.epoch == model.mandate.epoch

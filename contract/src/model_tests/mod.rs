@@ -15,6 +15,7 @@
 
 mod actions;
 mod explore;
+mod loss_bound;
 mod model;
 mod random;
 mod world;
