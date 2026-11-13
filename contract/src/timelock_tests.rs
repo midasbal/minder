@@ -854,3 +854,140 @@ fn tightening_works_while_a_loosening_of_the_same_thing_is_pending() {
     assert!(minder.get_pending_change(raise).is_some());
     minder.cancel_change(raise);
 }
+
+// ---- The exact edges of `is_loosening` ----
+//
+// The timelock holds back a change exactly when `Minder::is_loosening` says it
+// loosens authority, so each comparison in it is a security boundary. The tests
+// below pin those edges one at a time, through the public methods: a change is
+// instant when it is not loosening and refused as `Timelocked` when it is, with
+// the delay on. Equal is never loosening.
+
+/// `set_evm_recipient` loosens only by adding an address that is not yet
+/// allowed: removing one, or adding one already there, is instant.
+#[test]
+fn an_evm_recipient_change_loosens_only_when_it_adds_a_new_address() {
+    let mut minder = armed();
+    owner_at(T0);
+    // Disallowing an address that was never allowed changes nothing.
+    minder.set_evm_recipient(STRANGER.to_string(), false);
+    assert!(!minder.is_evm_recipient_allowed(STRANGER.to_string()));
+
+    // Adding it is the loosening change.
+    through_the_delay(
+        &mut minder,
+        |m| m.set_evm_recipient(STRANGER.to_string(), true),
+        OwnerChange::SetEvmRecipient {
+            address: STRANGER.to_string(),
+            allowed: true,
+        },
+        |m| m.is_evm_recipient_allowed(STRANGER.to_string()),
+        true,
+    );
+
+    // Adding it again changes nothing, and removing it is a tightening.
+    minder.set_evm_recipient(STRANGER.to_string(), true);
+    assert!(minder.is_evm_recipient_allowed(STRANGER.to_string()));
+    minder.set_evm_recipient(STRANGER.to_string(), false);
+    assert!(!minder.is_evm_recipient_allowed(STRANGER.to_string()));
+}
+
+/// A mandate is live strictly before its expiry instant and expired at it (the
+/// policy denies `MandateExpired` from `now >= expiry`), so a grant that goes
+/// later than the mandate extends it one tick before the expiry and replaces
+/// an expired mandate at the expiry instant.
+#[test]
+fn a_grant_extends_a_live_mandate_up_to_but_not_at_its_expiry_instant() {
+    let mut minder = armed();
+    owner_at(T0);
+    let expiry = T0 + 1_000;
+    minder.grant_mandate(other_key(), U64(expiry), None, None);
+
+    owner_at(expiry - 1);
+    refused_as_timelocked(|| minder.grant_mandate(agent_key(), U64(expiry + 5_000), None, None));
+    assert_eq!(minder.get_mandate().unwrap().agent_key, other_key());
+
+    owner_at(expiry);
+    minder.grant_mandate(agent_key(), U64(expiry + 5_000), None, None);
+    assert_eq!(minder.get_mandate().unwrap().agent_key, agent_key());
+}
+
+/// Each of the four EVM bounds loosens only when strictly raised. For each one
+/// in turn, with every other bound strictly lower (so only the bound under test
+/// can decide): equal is instant, one more is delayed. Also all four equal and
+/// all four lower, both instant.
+#[test]
+fn each_evm_fee_and_gas_bound_loosens_only_when_strictly_raised() {
+    // (max fee, max priority fee, gas limit, token gas limit) as `armed` sets them.
+    const START: [u128; 4] = [5, 1, 21_000, 100_000];
+    const LOWER: [u128; 4] = [4, 0, 20_000, 90_000];
+    const NAMES: [&str; 4] = [
+        "max_fee_per_gas",
+        "max_priority_fee_per_gas",
+        "gas_limit",
+        "token_gas_limit",
+    ];
+    let configure = |minder: &mut Minder, bounds: [u128; 4]| {
+        minder.set_evm_config(
+            account("signer.near"),
+            "minder-evm-1".to_string(),
+            test_sender_hex(),
+            5,
+            U128(bounds[0]),
+            U128(bounds[1]),
+            Some(bounds[2] as u64),
+            Some(bounds[3] as u64),
+        )
+    };
+    let fresh = || {
+        let minder = armed();
+        owner_at(T0);
+        let config = minder.get_evm_config().unwrap();
+        assert_eq!(
+            [
+                config.max_fee_per_gas.0,
+                config.max_priority_fee_per_gas.0,
+                u128::from(config.gas_limit),
+                u128::from(config.token_gas_limit),
+            ],
+            START,
+            "the starting configuration"
+        );
+        minder
+    };
+
+    for (field, name) in NAMES.iter().enumerate() {
+        let others_lower_and = |bound: u128| {
+            let mut bounds = LOWER;
+            bounds[field] = bound;
+            bounds
+        };
+
+        let mut minder = fresh();
+        configure(&mut minder, others_lower_and(START[field]));
+
+        let mut minder = fresh();
+        let text = panic_text(|| configure(&mut minder, others_lower_and(START[field] + 1)));
+        assert!(
+            text.contains("Timelocked"),
+            "raising {name} by one must be timelocked: {text}"
+        );
+    }
+
+    let mut minder = fresh();
+    configure(&mut minder, START);
+    let mut minder = fresh();
+    configure(&mut minder, LOWER);
+}
+
+/// Lowering the delay is delayed; keeping it the same or raising it is instant.
+#[test]
+fn the_timelock_delay_loosens_only_when_strictly_lowered() {
+    let mut minder = armed();
+    owner_at(T0);
+    refused_as_timelocked(|| minder.set_timelock_delay(U64(DELAY - 1)));
+    minder.set_timelock_delay(U64(DELAY));
+    assert_eq!(minder.get_config().timelock_delay.0, DELAY);
+    minder.set_timelock_delay(U64(DELAY + 1));
+    assert_eq!(minder.get_config().timelock_delay.0, DELAY + 1);
+}

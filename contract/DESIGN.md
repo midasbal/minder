@@ -1429,6 +1429,63 @@ sliding window is proved only inside the bounds above; the stateful harness cove
 **Environment note.** `cargo kani setup` installs Kani's own nightly toolchain next to the pinned
 stable 1.94.1; the pinned toolchain is not changed.
 
+## Mutation testing (`cargo-mutants`)
+
+A mutation score over the deterministic logic, so that every surviving mutant is either killed by a test or
+a documented equivalent. It complements the ad-hoc check of reintroducing a known bug, and the Kani proofs.
+
+- **Tool:** `cargo-mutants` 27.1.0, on rustc 1.94.1 (the pinned toolchain; no workaround was needed).
+  Configuration is `contract/.cargo/mutants.toml`.
+- **Scope:** 259 mutants in `src/policy.rs` (30), `src/window.rs` (17), `src/timelock.rs` (73: the
+  tighten-versus-loosen classification `is_loosening`, `policy_loosens`, `is_timelocked`,
+  `is_evm_safe_destination`, `validate_change`, `normalized_treasury`), `src/gate.rs` (26: nonce accounting,
+  `authenticate`, `parse_signature`, `parse_address`, `build_evm_config` and the other helpers) and
+  `src/evm.rs` (113: every encoder and helper). Left out: the near-sdk entry points, the promise-building sign
+  dispatch and storage-only views, which only the sandbox tests reach, and `src/lib.rs`.
+- **Test set:** `cargo test --lib -- --skip model_tests`: the unit tests (260 at the time of the run, about 25 s),
+  not the sandbox binaries and not the model harness (about six minutes per run, too slow to repeat for every
+  mutant). The `evm.rs` mutants are in scope because the unit tests do pin it: `evm.rs` carries its own twelve
+  viem vectors (encode, signing hash, signed form) and the `gate_tests` check the calldata and the emitted
+  transaction against viem byte for byte.
+- **Command**, from `contract/`, one job so there is one target directory:
+
+  ```
+  cargo mutants -j 1 --timeout 120 --build-timeout 900 \
+      --file src/policy.rs --file src/window.rs --file src/timelock.rs \
+      --file src/gate.rs --file src/evm.rs -- --lib -- --skip model_tests
+  ```
+
+- **Result:** 259 mutants: 235 caught, 12 missed, 12 unviable (they need a `Default` that the type lacks, so they
+  do not compile), 0 timed out. 247 are viable.
+- **After triage:** of the 247 viable, **241 killed and 6 documented equivalents, none unexplained**. The six
+  `is_loosening` survivors were genuine gaps (no unit test sat on these edges; the model harness was not part of
+  this tier) and are now pinned by four dedicated tests in `src/timelock_tests.rs`, section "The exact edges of
+  `is_loosening`". Each was proved against its own mutant: the one mutation applied by hand, the new test run
+  alone and seen to fail, the source restored.
+
+  | Mutant | Killed by |
+  | --- | --- |
+  | `timelock.rs:298` `&&` to `\|\|` (`SetEvmRecipient`) | `an_evm_recipient_change_loosens_only_when_it_adds_a_new_address` |
+  | `timelock.rs:314` `<` to `<=` (a mandate is live strictly before its expiry) | `a_grant_extends_a_live_mandate_up_to_but_not_at_its_expiry_instant` |
+  | `timelock.rs:334` `>` to `>=` (`max_fee_per_gas`) | `each_evm_fee_and_gas_bound_loosens_only_when_strictly_raised` |
+  | `timelock.rs:335` `>` to `<` (`max_priority_fee_per_gas`) | the same |
+  | `timelock.rs:337` `>` to `<` (`token_gas_limit`) | the same |
+  | `timelock.rs:346` `<` to `<=` (`SetTimelockDelay`) | `the_timelock_delay_loosens_only_when_strictly_lowered` |
+
+- **Equivalent mutants** (cannot change observable behaviour):
+
+  | Mutant | Why it is equivalent |
+  | --- | --- |
+  | `evm.rs:61` (three, the two `+` in `ERC20_TRANSFER_CALLDATA_LEN`) | The constant's only use is `Vec::with_capacity` in `erc20_transfer_calldata`; capacity is an allocation hint and the vector's contents are unchanged. |
+  | `evm.rs:237` `\|` to `^` in `hex_decode` | The high nibble is shifted left four bits and the low nibble is at most 15 (`hex_digit` returns 0 to 15), so the operands share no set bits and `\|`, `^` and `+` agree. |
+  | `evm.rs:291` `+=` to `-=` in `sub_be` | The adjusted `digit` is read only through `digit as u8`, which keeps the low eight bits, and 256 is zero modulo 256: `digit + 256` and `digit - 256` give the same byte for every digit (checked over the whole range). The borrow is set separately. |
+  | `gate.rs:716` `>` to `>=` in `advance_nonce_past` | Only the case `after == next_nonce` differs, and it re-inserts the value already stored, so the state is identical. |
+
+- **Not covered by this score:** the 28 mutants of the accounting helpers in `src/lib.rs` (`reserve`, `release`,
+  `record_spend`, `epoch_committed`, `eval_input`, `evaluate_*` and the like), whose real coverage is the model
+  harness. They are deferred to a small separate pass run against the harness. The 12 unviable mutants and the
+  entry-point glue are not scored.
+
 ## Running
 
 ```
@@ -1451,8 +1508,8 @@ readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds
 invocation under the repository (an environment variable you set yourself still wins). Waiting longer
 costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
 consecutive full runs of `contract/test.sh` when it was added, each exit 0 with no start-up failure and the
-default thread count (so no cap on test threads was needed). The most recent full run, after the budget period was split from the
-key epoch: 283 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
+default thread count (so no cap on test threads was needed). The most recent full run, after the mutation-testing edge tests were added:
+287 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
 `method_surface`, 9 `signing_confinement`, 11 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
 (`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
 part of the suite.
