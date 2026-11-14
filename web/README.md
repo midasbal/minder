@@ -2,31 +2,44 @@
 
 The demo frontend and its relay, served by one process on one port.
 
-- `client/`: Vite, React, TypeScript, Framer Motion, hand-written CSS. A shell for now.
-- `server/`: Node, TypeScript, Fastify. Serves the built frontend and the API. Today the API is `GET /health`.
+- `client/`: Vite, React, TypeScript, React Router, Framer Motion, hand-written CSS.
+- `server/`: Node, TypeScript, Fastify. Serves the built frontend and the API from one port.
 
-There are no keys, no chain access and no contract calls in this directory yet.
+The pages are `/` (the overview), `/app` (the live demo surface, a placeholder for now) and `/docs`. The relay's API is
+`GET /health` today. Any other GET that is not under `/api/` and does not name a file is answered with the app's
+`index.html`, so a deep link or a reload on `/app` or `/docs` works; an unknown `/api/*` path or a missing asset is a JSON
+404. Nothing in this directory touches a key, a chain or a contract yet.
 
 ```
 web/
-  package.json            workspace root: build, start, dev, test scripts
+  package.json            workspace root: build, start, dev, typecheck, test scripts
   package-lock.json
   Dockerfile              one image: builds both parts, runs the relay
   .dockerignore
   client/
     index.html
     vite.config.ts        dev server proxies /health and /api to the relay
-    src/                  main.tsx, App.tsx, useRelayHealth.ts, styles.css
     public/favicon.svg
+    src/
+      main.tsx            entry: router, fonts, styles
+      App.tsx             layout and routes
+      links.ts            repository, explorer and account links
+      motion.ts           shared Framer Motion variants
+      useRelayHealth.ts   the footer's relay status
+      components/         Header, Footer, Rail, Buttons, ExternalLink, ScrollManager
+      pages/              Landing, AppShell, NotFound
+      docs/               Docs and its sections (Overview ... Reference), contents, reading helpers
+      styles.css, landing.css, docs.css
+      App.test.tsx        renders every route to HTML and checks the chrome and the content
   server/
-    src/app.ts            the app: /health, static files, JSON 404
+    src/app.ts            /health, static files, the app catch-all, JSON 404
     src/index.ts          reads PORT and HOST, starts, shuts down on SIGTERM
     src/app.test.ts
 ```
 
 ## Run it locally
 
-Needs Node 22 or newer.
+Needs Node 22.22 or newer (React Router 8 requires it); the Dockerfile pins 22.23.5.
 
 ```
 cd web
@@ -47,7 +60,7 @@ npm run dev:server   # relay on http://localhost:8080
 npm run dev:client   # page on http://localhost:5173
 ```
 
-Checks: `npm run typecheck` and `npm test` (the relay's tests).
+Checks: `npm run typecheck`, and `npm test` (the relay's tests and the client's render tests).
 
 ## Get a public URL
 

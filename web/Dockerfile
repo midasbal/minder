@@ -1,7 +1,12 @@
 # One image, one process: the relay serves the built frontend and the API on a
 # single port. Build context is this directory (web/).
 
-FROM node:22-alpine AS build
+# One Node version for both stages. React Router 8 needs Node 22.22 or newer, so
+# this is pinned rather than left to a floating tag that a build cache could hold
+# at an older release. Raise it deliberately, with the tests.
+ARG NODE_VERSION=22.23.5
+
+FROM node:${NODE_VERSION}-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY client/package.json client/
@@ -11,7 +16,7 @@ COPY client client
 COPY server server
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:${NODE_VERSION}-alpine AS runtime
 ENV NODE_ENV=production
 ENV PORT=8080
 WORKDIR /app
