@@ -20,12 +20,17 @@ function toBase64(text: string): string {
   return btoa(binary);
 }
 
-/** A free view call on the contract at the latest final block. No key, no gas, no state change. */
-export async function callView<T>(rpc: Rpc, method: string, args: Record<string, unknown> = {}): Promise<ViewOutcome<T>> {
+/** A free view call at the latest final block (on the contract unless another account is named). No key, no gas, no state change. */
+export async function callView<T>(
+  rpc: Rpc,
+  method: string,
+  args: Record<string, unknown> = {},
+  account: string = CONTRACT_ACCOUNT,
+): Promise<ViewOutcome<T>> {
   const { result, trace } = await rpc.query({
     request_type: 'call_function',
     finality: 'final',
-    account_id: CONTRACT_ACCOUNT,
+    account_id: account,
     method_name: method,
     args_base64: toBase64(JSON.stringify(args)),
   });

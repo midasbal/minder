@@ -498,3 +498,329 @@
     flex-basis: 100%;
   }
 }
+
+/* ---- The verified value: a green that is only ever a checked fact ---- */
+
+.is-verified {
+  color: var(--allow);
+  font-weight: 500;
+}
+
+/* ---- The framing at the top of /app ---- */
+
+.tracks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem 1.5rem;
+  max-width: 52rem;
+  margin: 1.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tracks li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--line-2);
+}
+
+.tracks__name {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.tracks__what {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+/* ---- The headline reasons the money is safe ---- */
+
+.safety {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
+  gap: 0.7rem;
+}
+
+.safe {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.85rem 0.9rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+}
+
+.safe__name {
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.safe__fact {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.safe__why {
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+.safe__more {
+  font-size: 0.84rem;
+  color: var(--ink-2);
+}
+
+.safe__more a {
+  color: var(--ink);
+}
+
+.safe__source {
+  margin-top: auto;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  opacity: 0.8;
+}
+
+.facts__source {
+  margin-left: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  opacity: 0.8;
+}
+
+/* ---- The real run ---- */
+
+.run {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+}
+
+.run__title {
+  max-width: 28em;
+  font-size: clamp(1.4rem, 2.8vw, 2rem);
+  line-height: 1.15;
+}
+
+.run__flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.payments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.payment {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+  padding: 0.95rem 1rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+}
+
+.payment__what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+}
+
+.payment__asset {
+  flex-basis: 100%;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.payment__amount {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.payment__to {
+  min-width: 0;
+  font-size: 0.86rem;
+  color: var(--ink-2);
+}
+
+.payment .kv__row {
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.payment .kv__row dd {
+  white-space: normal;
+}
+
+.run__note {
+  font-size: 0.88rem;
+  color: var(--ink-2);
+}
+
+/* ---- The provenance proof ---- */
+
+.provenance {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+}
+
+.provenance__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem 1.5rem;
+}
+
+.provenance__title {
+  font-size: 1.15rem;
+}
+
+.provenance__lede {
+  max-width: 44rem;
+  margin-top: 0.4rem;
+  font-size: 0.95rem;
+  color: var(--ink-2);
+}
+
+.provenance__head .btn {
+  padding: 0.55rem 0.9rem;
+  background: transparent;
+  cursor: pointer;
+}
+
+.provenance__head .btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.proofs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.proof {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 1rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+}
+
+.proof__title {
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.chain {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chain__link {
+  position: relative;
+  min-width: 0;
+  padding: 0.55rem 0 0.55rem 1.1rem;
+  border-left: 1px solid var(--line-2);
+}
+
+.chain__link + .chain__link::before {
+  content: '=';
+  position: absolute;
+  left: -0.45rem;
+  top: -0.7rem;
+  width: 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  text-align: center;
+  background: var(--bg-inset);
+  color: var(--ink-2);
+}
+
+.chain__label {
+  font-size: 0.86rem;
+  color: var(--ink);
+}
+
+.chain__address {
+  margin: 0.2rem 0;
+}
+
+.chain__address code {
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.chain__note {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+.proof__verdict {
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+@media (max-width: 40rem) {
+  .tracks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .proofs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

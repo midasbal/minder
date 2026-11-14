@@ -4,14 +4,19 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 import { renderToString } from 'react-dom/server';
+import { StaticRouter } from 'react-router';
 
+import { AppShell } from './pages/AppShell';
 import { AgentPanel } from './components/console/AgentPanel';
 import { LivePanel } from './components/console/LivePanel';
 import { prettyJson } from './components/console/RawCall';
+import { RealRun } from './components/console/RealRun';
 import { Verdict } from './components/console/Verdict';
 import { AGENT_PUBLIC_KEY, recipientError } from './chain/assets';
 import { callView, dryRun, parseDecision } from './chain/contract';
+import { LIVE_RUN, nearTxUrl, parseLiveRun, sepoliaTxUrl, type LiveRun } from './chain/liverun';
 import { presetsFor } from './chain/presets';
+import { addressFromNearKey, allThreeMatch, base58Decode, proveProvenance, recoverSigner } from './chain/provenance';
 import { reasonLine } from './chain/reasons';
 import { RpcFailure, createRpc, type Rpc } from './chain/rpc';
 import { readSnapshot, reachedChain } from './chain/snapshot';
@@ -24,6 +29,9 @@ const NEAR = 10n ** 24n;
 const USDC_TOKEN = [28, 125, 75, 25, 108, 176, 199, 176, 29, 116, 63, 188, 97, 22, 169, 2, 55, 156, 114, 56];
 const VENDOR = 'vendor.minder-gate-owner-bf5fcd.testnet';
 const EVM_VENDOR = '0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5';
+const SENDER = '0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F';
+/** The signer contract's real answer for this contract account and path (read on 2026-11-14). */
+const DERIVED_KEY = 'secp256k1:5TwhSn1pPtKHnPmGT2ajUkxK1s4sRxnzXDgiXRbxSHJHJxv2oMbNJ1rsmi9XAKBtLGQQxP2fSFDHhbzJHuD5dtjV';
 const CODE = Buffer.from('a stand-in for the contract wasm');
 const CODE_SHA256 = createHash('sha256').update(CODE).digest('hex');
 
@@ -65,6 +73,13 @@ function chainAnswers(): Answers {
       },
     }),
     get_asset_policies: () => POLICIES,
+    get_evm_config: () => ({
+      signer_id: 'v1.signer-prod.testnet',
+      derivation_path: 'minder-evm-1',
+      sender: SENDER.toLowerCase(),
+      chain_id: 11155111,
+    }),
+    derived_public_key: () => DERIVED_KEY,
     get_recipients: () => [VENDOR],
     get_evm_recipients: () => [EVM_VENDOR],
     get_headroom: ({ asset }) => {
@@ -81,10 +96,13 @@ function chainAnswers(): Answers {
 interface FakeChain {
   rpc: Rpc;
   calls: Array<{ method: string; args: Record<string, unknown> }>;
+  /** The account each view call was made on, in order. */
+  accounts: string[];
 }
 
 function fakeChain(answers: Answers = chainAnswers(), extra: { keys?: unknown[]; code?: Buffer } = {}): FakeChain {
   const calls: FakeChain['calls'] = [];
+  const accounts: string[] = [];
   const keys = extra.keys ?? [
     {
       public_key: AGENT_PUBLIC_KEY,
@@ -115,13 +133,14 @@ function fakeChain(answers: Answers = chainAnswers(), extra: { keys?: unknown[];
       const method = params.method_name as string;
       const args = JSON.parse(Buffer.from(params.args_base64 as string, 'base64').toString()) as Record<string, unknown>;
       calls.push({ method, args });
+      accounts.push(params.account_id as string);
       const answer = answers[method];
       if (!answer) throw new RpcFailure('contract', `no such method ${method}`);
       const result = { result: [...Buffer.from(JSON.stringify(answer(args)))], logs: [], block_height: 102 };
       return { result, trace: trace(request, { result }) };
     },
   };
-  return { rpc, calls };
+  return { rpc, calls, accounts };
 }
 
 const failing = (message: string): Rpc => ({
@@ -598,6 +617,13 @@ async function readyStore(answers: Answers = chainAnswers()) {
   return store;
 }
 
+const renderLive = (store: ReturnType<typeof createConsoleStore>) =>
+  renderToString(
+    <StaticRouter location="/app">
+      <LivePanel store={store} state={store.getState()} />
+    </StaticRouter>,
+  );
+
 const text = (html: string) => html.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ');
 
 describe('the agent panel', () => {
@@ -691,13 +717,13 @@ describe('the verdict', () => {
 describe('the live panel', () => {
   it('shows what the chain returned, labelled as read from the chain, with the time and block', async () => {
     const store = await readyStore();
-    const words = text(renderToString(<LivePanel store={store} state={store.getState()} />));
+    const words = text(renderLive(store));
     assert.ok(words.includes('Read from the chain at 09:30:05 UTC, block 102.'));
     assert.ok(words.includes('0 full-access keys'));
     assert.ok(words.includes('1 restricted key'));
-    assert.ok(words.includes('Explorer'));
+    assert.ok(words.includes('Check the explorer'));
     assert.ok(words.includes('Active'));
-    assert.ok(words.includes('Policy and headroom'));
+    assert.ok(words.includes('Live limits'));
     assert.match(words, /NEAR 0\.5 1 \/ 1 2 \/ 2 0\.05/);
     assert.match(words, /ETH 0\.005 0\.015 \/ 0\.015 0\.03 \/ 0\.03 0\.0005/);
     assert.match(words, /USDC 5 10 \/ 10 none set 0\.5/);
@@ -706,7 +732,7 @@ describe('the live panel', () => {
 
   it('keeps the secondary detail in expanders, closed, and the headline items outside them', async () => {
     const store = await readyStore();
-    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    const html = renderLive(store);
     const summaries = [...html.matchAll(/<details class="more"><summary>(.*?)<\/summary>/g)].map((match) => text(match[1]!).trim());
     assert.deepEqual(summaries, [
       'The restricted key',
@@ -716,7 +742,7 @@ describe('the live panel', () => {
     ]);
     assert.ok(!/<details[^>]*\bopen\b/.test(html), 'folded until asked for');
     const outside = text(html.replace(/<details class="more">[\s\S]*?<\/details>/g, ''));
-    for (const headline of ['0 full-access keys', '401d99935ad4229f', 'Active', 'Policy and headroom']) assert.ok(outside.includes(headline), headline);
+    for (const headline of ['0 full-access keys', '401d99935ad4229f', 'Active', 'Live limits']) assert.ok(outside.includes(headline), headline);
     for (const detail of ['request_evm_token_payment', VENDOR, EVM_VENDOR, 'guardian.testnet']) assert.ok(!outside.includes(detail), detail);
     const inside = text(html);
     for (const detail of ['request_evm_token_payment', VENDOR, EVM_VENDOR, 'guardian.testnet']) assert.ok(inside.includes(detail), detail);
@@ -724,7 +750,7 @@ describe('the live panel', () => {
 
   it('lays the three assets out as one table, not three cards', async () => {
     const store = await readyStore();
-    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    const html = renderLive(store);
     assert.equal((html.match(/<table class="ptable"/g) ?? []).length, 1);
     assert.equal((html.match(/<tbody>[\s\S]*?<\/tbody>/)![0].match(/<tr>/g) ?? []).length, 3);
     assert.ok(!html.includes('asset__title'));
@@ -732,19 +758,19 @@ describe('the live panel', () => {
 
   it('marks the keyless count verified only when there really are no full-access keys', async () => {
     const keyless = await readyStore();
-    assert.match(text(renderToString(<LivePanel store={keyless} state={keyless.getState()} />)), /0 full-access keys ?, 1 restricted key/);
-    assert.match(renderToString(<LivePanel store={keyless} state={keyless.getState()} />), /<span class="is-verified">0<!-- --> full-access/);
+    assert.match(text(renderLive(keyless)), /0 full-access keys[\s\S]*1 restricted key/);
+    assert.match(renderLive(keyless), /<span class="is-verified">0<!-- --> full-access/);
     const keys = [{ public_key: 'ed25519:owner', access_key: { nonce: 1, permission: 'FullAccess' } }];
     const store = createConsoleStore(fakeChain(chainAnswers(), { keys }).rpc);
     await store.load();
-    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    const html = renderLive(store);
     assert.ok(!html.includes('is-verified">1<!-- --> full-access'));
     assert.ok(text(html).includes('1 full-access key'));
   });
 
   it('shows the code hash from the chain, and says when it does not match', async () => {
     const store = await readyStore();
-    const words = text(renderToString(<LivePanel store={store} state={store.getState()} />));
+    const words = text(renderLive(store));
     assert.ok(words.includes(CODE_SHA256));
     assert.ok(words.includes('Does NOT match the repository build'), 'the stand-in wasm is not the repository build, and the page says so');
   });
@@ -755,7 +781,7 @@ describe('the live panel', () => {
       throw new RpcFailure('contract', 'boom');
     };
     const store = await readyStore(answers);
-    const words = text(renderToString(<LivePanel store={store} state={store.getState()} />));
+    const words = text(renderLive(store));
     assert.ok(words.includes("Couldn't read this from the chain. boom"));
     assert.ok(words.includes('0 full-access keys'));
   });
@@ -763,7 +789,7 @@ describe('the live panel', () => {
   it('shows a clear retry state, and no data, when the RPC cannot be reached', async () => {
     const store = createConsoleStore(failing('Could not reach the NEAR RPC (a.test: HTTP 503)'));
     await store.load();
-    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    const html = renderLive(store);
     const words = text(html);
     assert.ok(words.includes("Couldn't reach the NEAR RPC"));
     assert.ok(words.includes('Use Refresh to retry'));
@@ -774,7 +800,7 @@ describe('the live panel', () => {
 
   it('shows a loading line before the first reading', () => {
     const store = createConsoleStore(fakeChain().rpc);
-    assert.ok(text(renderToString(<LivePanel store={store} state={store.getState()} />)).includes('Reading the contract from the chain'));
+    assert.ok(text(renderLive(store)).includes('Reading the contract from the chain'));
   });
 });
 
@@ -803,7 +829,7 @@ describe('the frontend holds no secret and has no other server', () => {
   it('has no private key, seed, signing or credential handling', () => {
     for (const { file, code } of sources) {
       const stripped = code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-      assert.ok(!/private[_ ]?key|secret|seed|mnemonic|credential|sign(ing|ature|Transaction)|KeyPair/i.test(stripped), file);
+      assert.ok(!/private[_ ]?key|secret|mnemonic|seed phrase|credential|KeyPair|nacl|\bsign\(|signTransaction|signMessage|privateKeyTo/i.test(stripped), file);
       assert.ok(!/localStorage|sessionStorage|document\.cookie|process\.env|import\.meta\.env/.test(stripped), file);
     }
   });
@@ -816,11 +842,278 @@ describe('the frontend holds no secret and has no other server', () => {
     }
   });
 
-  it('only ever asks the contract for views', () => {
+  it('only ever asks for views, and the viem it loads is for reading a signature, not making one', () => {
     const calls = sources.flatMap(({ code }) => [...code.matchAll(/request_type: '([a-z_]+)'/g)].map((match) => match[1]));
     assert.ok(calls.length >= 3);
     for (const type of calls) assert.ok(['call_function', 'view_access_key_list', 'view_code'].includes(type!), type);
     const methods = readFileSync(new URL('./chain/contract.ts', import.meta.url), 'utf8');
     assert.ok(!/broadcast_tx|send_tx|functionCall|FunctionCall/.test(methods));
+  });
+});
+
+/* ---------- the recorded real run ---------- */
+
+describe('the recorded real run', () => {
+  const file = JSON.parse(readFileSync(new URL('./data/live-run.json', import.meta.url), 'utf8')) as {
+    payments: Array<{ nearTxHash: string; nearExplorer: string; sepoliaTxHash?: string; sepoliaExplorer?: string; rawTx?: string }>;
+    provenance: { recoveredFromRawTx: { eth: string; usdc: string } };
+  };
+
+  it('holds the three payments, NEAR then ETH then USDC, all succeeded', () => {
+    assert.deepEqual(LIVE_RUN.payments.map((payment) => [payment.kind, payment.amountDisplay, payment.status]), [
+      ['near_transfer', '0.05 NEAR', 'success'],
+      ['evm_eth', '0.0002 ETH', 'success'],
+      ['evm_erc20', '0.5 USDC', 'success'],
+    ]);
+    assert.equal(LIVE_RUN.payments[0]!.recipient, LIVE_RUN.vendorNearAccount);
+    for (const payment of LIVE_RUN.payments.slice(1)) assert.equal(payment.recipient.toLowerCase(), LIVE_RUN.vendorEvmAddress.toLowerCase());
+  });
+
+  it('builds every link from the hash, and the links agree with the ones recorded', () => {
+    LIVE_RUN.payments.forEach((payment, index) => {
+      assert.match(payment.nearTxHash, /^[1-9A-HJ-NP-Za-km-z]{43,44}$/);
+      assert.equal(nearTxUrl(payment.nearTxHash), file.payments[index]!.nearExplorer);
+      if (payment.sepoliaTxHash !== null) {
+        assert.match(payment.sepoliaTxHash, /^0x[0-9a-f]{64}$/);
+        assert.equal(sepoliaTxUrl(payment.sepoliaTxHash), file.payments[index]!.sepoliaExplorer);
+      }
+    });
+  });
+
+  it("recovers the contract's sender from each real signed transaction: no mock, the recorded signatures themselves", async () => {
+    for (const [index, payment] of LIVE_RUN.payments.entries()) {
+      if (payment.rawTx === null) continue;
+      const signed = await recoverSigner(payment.rawTx);
+      assert.equal(signed.address, SENDER, `payment ${index}`);
+      assert.equal(signed.chainId, 11155111);
+    }
+    const eth = await recoverSigner(LIVE_RUN.payments[1]!.rawTx!);
+    assert.equal(eth.to?.toLowerCase(), LIVE_RUN.vendorEvmAddress.toLowerCase());
+    assert.equal(eth.value, 200_000_000_000_000n);
+    const usdc = await recoverSigner(LIVE_RUN.payments[2]!.rawTx!);
+    assert.equal(usdc.to?.toLowerCase(), '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', 'a token payment goes to the token contract');
+    assert.equal(usdc.value, 0n);
+    assert.equal(LIVE_RUN.recordedProvenance.configuredSender.toLowerCase(), SENDER.toLowerCase());
+    assert.equal(file.provenance.recoveredFromRawTx.eth, SENDER);
+  });
+
+  it('refuses a recorded run that is incomplete, rather than showing part of it', () => {
+    const raw = JSON.parse(readFileSync(new URL('./data/live-run.json', import.meta.url), 'utf8')) as { payments: Array<Record<string, unknown>> };
+    assert.doesNotThrow(() => parseLiveRun(raw));
+    assert.throws(() => parseLiveRun({ ...raw, payments: [] }), /no payments/);
+    const noRaw = structuredClone(raw);
+    delete noRaw.payments[1]!.rawTx;
+    assert.throws(() => parseLiveRun(noRaw), /without its raw transaction/);
+    const noHash = structuredClone(raw);
+    delete noHash.payments[0]!.nearTxHash;
+    assert.throws(() => parseLiveRun(noHash), /nearTxHash is missing/);
+    const strange = structuredClone(raw);
+    strange.payments[0]!.kind = 'bitcoin';
+    assert.throws(() => parseLiveRun(strange), /kind bitcoin is unknown/);
+  });
+});
+
+/* ---------- the provenance proof ---------- */
+
+describe('the provenance proof', () => {
+  it('decodes base58 and turns the signer contract\'s key into the contract\'s EVM address', async () => {
+    assert.equal(Buffer.from(base58Decode('2NEpo7TZRRrLZSi2U')).toString(), 'Hello World!');
+    assert.deepEqual([...base58Decode('112')], [0, 0, 1]);
+    assert.throws(() => base58Decode('0OIl'), /base58/);
+    assert.equal(await addressFromNearKey(DERIVED_KEY), SENDER);
+    await assert.rejects(addressFromNearKey('ed25519:abc'), /secp256k1/);
+    await assert.rejects(addressFromNearKey('secp256k1:2NEpo7TZRRrLZSi2U'), /64 bytes/);
+  });
+
+  it('refuses something that is not a signed transaction', async () => {
+    await assert.rejects(recoverSigner('0xdeadbeef'));
+    await assert.rejects(recoverSigner('not hex'));
+  });
+
+  it('reads the sender and the derived address live, and all three match for both EVM payments', async () => {
+    const chain = fakeChain();
+    const proof = await proveProvenance(chain.rpc, LIVE_RUN);
+    assert.deepEqual([proof.sender.source, proof.derived.source, proof.sender.reason, proof.derived.reason], ['live', 'live', null, null]);
+    assert.equal(proof.derived.address, SENDER);
+    assert.deepEqual(chain.calls, [
+      { method: 'get_evm_config', args: {} },
+      { method: 'derived_public_key', args: { path: 'minder-evm-1', predecessor: 'gate.minder-gate-owner-bf5fcd.testnet', domain_id: 0 } },
+    ]);
+    assert.deepEqual(chain.accounts, ['gate.minder-gate-owner-bf5fcd.testnet', 'v1.signer-prod.testnet'], 'the derivation is asked of the signer contract');
+    assert.equal(proof.recoveries.length, 2);
+    for (const { recovery } of proof.recoveries) assert.equal(allThreeMatch(proof, recovery), true);
+  });
+
+  it('falls back to what was recorded when a live read fails, and says so', async () => {
+    const proof = await proveProvenance(failing('Could not reach the NEAR RPC (a.test: HTTP 503)'), LIVE_RUN);
+    assert.equal(proof.sender.source, 'recorded');
+    assert.equal(proof.derived.source, 'recorded');
+    assert.match(proof.sender.reason ?? '', /Could not reach the NEAR RPC/);
+    assert.match(proof.derived.reason ?? '', /Could not reach the NEAR RPC/);
+    assert.equal(proof.recoveries.length, 2, 'the signatures are still checked here');
+    for (const { recovery } of proof.recoveries) assert.equal(allThreeMatch(proof, recovery), true);
+  });
+
+  it('falls back only for the read that failed', async () => {
+    const answers = chainAnswers();
+    answers.derived_public_key = () => 'ed25519:not-a-secp-key';
+    const proof = await proveProvenance(fakeChain(answers).rpc, LIVE_RUN);
+    assert.equal(proof.sender.source, 'live');
+    assert.equal(proof.derived.source, 'recorded');
+    assert.match(proof.derived.reason ?? '', /secp256k1/);
+  });
+
+  it('reports no match when the contract is configured with a different sender', async () => {
+    const answers = chainAnswers();
+    answers.get_evm_config = () => ({ signer_id: 'v1.signer-prod.testnet', derivation_path: 'minder-evm-1', sender: '0x000000000000000000000000000000000000dead' });
+    const proof = await proveProvenance(fakeChain(answers).rpc, LIVE_RUN);
+    assert.equal(proof.sender.source, 'live');
+    for (const { recovery } of proof.recoveries) assert.equal(allThreeMatch(proof, recovery), false);
+  });
+
+  it('does not match a transaction it cannot read, and does not crash', async () => {
+    const broken: LiveRun = { ...LIVE_RUN, payments: LIVE_RUN.payments.map((payment) => (payment.rawTx ? { ...payment, rawTx: '0x1234' } : payment)) };
+    const proof = await proveProvenance(fakeChain().rpc, broken);
+    for (const { recovery } of proof.recoveries) {
+      assert.equal(recovery.ok, false);
+      assert.equal(allThreeMatch(proof, recovery), false);
+    }
+  });
+
+  it('compares addresses without regard to case, as the chain returns them in lowercase', async () => {
+    const proof = await proveProvenance(fakeChain().rpc, LIVE_RUN);
+    assert.equal(proof.sender.address, SENDER.toLowerCase());
+    assert.notEqual(proof.sender.address, proof.derived.address);
+    assert.equal(allThreeMatch(proof, proof.recoveries[0]!.recovery), true);
+  });
+});
+
+describe('the real run on the page', () => {
+  const proven = async (answers: Answers = chainAnswers()) => {
+    const store = createConsoleStore(fakeChain(answers).rpc);
+    await store.verify();
+    return store;
+  };
+  const draw = (store: ReturnType<typeof createConsoleStore>) =>
+    renderToString(
+      <StaticRouter location="/app">
+        <RealRun run={LIVE_RUN} state={store.getState()} store={store} />
+      </StaticRouter>,
+    );
+
+  it('states what it is, and the flow, in the opening lines', async () => {
+    const words = text(draw(await proven()));
+    assert.ok(words.includes('Not a simulation. Real money moved, and the firewall gated every step.'));
+    assert.ok(words.includes('The agent requested it → the firewall allowed it → the contract signed it, with no master key → it settled on Sepolia'));
+  });
+
+  it('shows each payment with its amount, its recipient and clickable hashes on the explorers', async () => {
+    const html = draw(await proven());
+    const words = text(html);
+    for (const amount of ['0.05 NEAR', '0.0002 ETH', '0.5 USDC']) assert.ok(words.includes(amount), amount);
+    assert.ok(words.includes(LIVE_RUN.vendorNearAccount) && words.includes(LIVE_RUN.vendorEvmAddress));
+    for (const payment of LIVE_RUN.payments) {
+      assert.ok(html.includes(`href="${nearTxUrl(payment.nearTxHash)}"`), 'the NEAR transaction');
+      if (payment.sepoliaTxHash) assert.ok(html.includes(`href="${sepoliaTxUrl(payment.sepoliaTxHash)}"`), 'the Sepolia transaction');
+    }
+    assert.equal((html.match(/<span class="is-verified">Succeeded<\/span>/g) ?? []).length, 3);
+    assert.equal((html.match(/rel="noopener noreferrer"/g) ?? []).length, 5, 'three NEAR links and two Sepolia links, all external');
+  });
+
+  it('draws the three addresses as a matching chain and concludes the contract is the sole signer', async () => {
+    const html = draw(await proven());
+    const words = text(html);
+    assert.equal((words.match(/All three are the same address\./g) ?? []).length, 2);
+    assert.ok(words.includes('an address only this NEAR contract controls'));
+    assert.ok(words.includes('The contract is the sole signer'));
+    for (const label of ['Signed the Sepolia transaction', "The contract's configured sender", 'The address NEAR Chain Signatures derives for this contract']) {
+      assert.equal((words.match(new RegExp(label, 'g')) ?? []).length, 2, label);
+    }
+    assert.ok(words.includes('Recovered in this browser from the signature in the raw transaction'));
+    assert.equal((words.match(/read from the chain just now/g) ?? []).length, 4);
+    assert.ok(!words.includes('recorded with the run'));
+    assert.ok(words.includes('The signed transaction'), 'the raw transaction is available to inspect');
+  });
+
+  it('says the values are recorded, and why, when the live reads failed', async () => {
+    const store = createConsoleStore(failing('Could not reach the NEAR RPC (a.test: HTTP 503)'));
+    await store.verify();
+    const words = text(draw(store));
+    assert.ok(words.includes('recorded with the run, because the live read failed: Could not reach the NEAR RPC'));
+    assert.ok(!words.includes('read from the chain just now'));
+    assert.ok(words.includes('All three are the same address.'), 'the signatures are still checked in the browser');
+  });
+
+  it('says plainly when the addresses do not match, and does not celebrate', async () => {
+    const answers = chainAnswers();
+    answers.get_evm_config = () => ({ signer_id: 'v1.signer-prod.testnet', derivation_path: 'minder-evm-1', sender: '0x000000000000000000000000000000000000dead' });
+    const html = draw(await proven(answers));
+    const words = text(html);
+    assert.ok(words.includes('The three addresses are not all the same.'));
+    assert.ok(!words.includes('All three are the same address'));
+    assert.ok(!html.includes('chain__address"><code class="is-verified"'));
+  });
+
+  it('says it is checking, claims nothing, before the check has run', () => {
+    const store = createConsoleStore(fakeChain().rpc);
+    const words = text(draw(store));
+    assert.ok(words.includes('Checking the signatures in your browser…'));
+    assert.ok(!words.includes('same address'));
+    assert.ok(words.includes('Not a simulation'), 'the recorded payments do not wait for the check');
+  });
+});
+
+describe('the store keeps the proof', () => {
+  it('computes it once, shares one in progress, and again only when asked', async () => {
+    const chain = fakeChain();
+    const store = createConsoleStore(chain.rpc);
+    await Promise.all([store.verify(), store.verify()]);
+    assert.equal(chain.calls.length, 2);
+    await store.verify();
+    assert.equal(chain.calls.length, 2);
+    const again = store.verify(true);
+    const running = store.getState().proof;
+    assert.equal(running.phase, 'running');
+    assert.ok(running.phase === 'running' && running.previous !== null, 'the last result stays up while it is checked again');
+    await again;
+    assert.equal(chain.calls.length, 4);
+  });
+});
+
+describe('the framing and the headline facts', () => {
+  const app = renderToString(
+    <StaticRouter location="/app">
+      <AppShell />
+    </StaticRouter>,
+  );
+
+  it('says in one read that the agent is compromised, holds real money, and what bounds it', () => {
+    const words = text(app);
+    assert.ok(words.includes('This agent is compromised and holds a key to real money.'));
+    assert.ok(words.includes('The firewall decides what that key can do'));
+    assert.ok(words.includes('AI Security') && words.includes('Bounded loss from a compromised agent'));
+    assert.ok(words.includes('Real-World Money') && words.includes('Real USDC and ETH payments'));
+    assert.ok(words.includes('Not a simulation'), 'the real run is on the page');
+  });
+
+  it('leads the verification panel with the three reasons the money is safe, each with its why', async () => {
+    const store = await readyStore();
+    const html = renderLive(store);
+    const words = text(html);
+    for (const name of ['Keyless', 'Provable', 'Bounded loss']) assert.ok(words.includes(name), name);
+    assert.ok(words.includes('no key to phish or leak'));
+    assert.ok(words.includes('0 full-access keys'));
+    assert.ok(words.includes('43 Kani proofs, 200+ mutations caught'));
+    assert.ok(words.includes('machine-checked within stated bounds'));
+    assert.ok(words.includes('from the repository, not the chain'), 'the one static claim is labelled static');
+    assert.match(html, /<a[^>]*href="\/docs#proofs"[^>]*>How far the proofs reach<\/a>/);
+    assert.ok(words.includes('At most 2 NEAR + 0.03 ETH + 10 USDC per 60 s window'), 'worked out from the live policy');
+    assert.ok(words.indexOf('Keyless') < words.indexOf('Live limits'), 'the reasons come before the table');
+    assert.ok(!words.includes('formally proved'), 'no stronger than the proofs');
+  });
+
+  it('keeps the view-call names as quiet tags, not headings', async () => {
+    const html = renderLive(await readyStore());
+    assert.ok(html.includes('<span class="facts__source">get_asset_policies, get_headroom, get_budget_usage</span>'));
   });
 });

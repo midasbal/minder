@@ -8,6 +8,7 @@ export function useConsole(): { store: ConsoleStore; state: ConsoleState } {
   const state = useSyncExternalStore(store.subscribe, store.getState, () => SERVER_STATE);
   useEffect(() => {
     void store.load();
+    void store.verify();
   }, [store]);
   return { store, state };
 }

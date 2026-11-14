@@ -244,6 +244,7 @@ describe('the stylesheets do not collide', () => {
       .map((rule) => rule.selector)
       .sort();
     assert.deepEqual(outOfFlow, [
+      '.chain__link + .chain__link::before',
       '.field',
       '.live-dot::after',
       '.method input',

@@ -6,6 +6,8 @@
 */
 
 import { dryRun, type DryRunInput, type DryRunResult } from './contract';
+import { LIVE_RUN, type LiveRun } from './liverun';
+import { proveProvenance, type Proof } from './provenance';
 import { RpcFailure, createRpc, type Rpc } from './rpc';
 import { readSnapshot, type Snapshot } from './snapshot';
 
@@ -15,11 +17,15 @@ export type RunState =
   | { phase: 'done'; input: DryRunInput; result: DryRunResult }
   | { phase: 'failed'; input: DryRunInput; message: string };
 
+export type ProofState = { phase: 'idle' } | { phase: 'running'; previous: Proof | null } | { phase: 'done'; proof: Proof };
+
 export interface ConsoleState {
   /** `loading` with a snapshot present is a refresh: the old reading stays until the new one lands. */
   reading: 'idle' | 'loading' | 'ready';
   snapshot: Snapshot | null;
   run: RunState;
+  /** The provenance proof of the recorded real run. */
+  proof: ProofState;
 }
 
 export interface ConsoleStore {
@@ -28,6 +34,8 @@ export interface ConsoleStore {
   /** Reads the chain unless it has already been read; `force` reads again (the Refresh button). */
   load(force?: boolean): Promise<void>;
   dryRun(input: DryRunInput): Promise<void>;
+  /** Computes the provenance proof unless it has been computed; `force` computes it again. */
+  verify(force?: boolean): Promise<void>;
 }
 
 /**
@@ -36,12 +44,13 @@ export interface ConsoleStore {
  */
 export const NEAR_RPC_ENDPOINTS = ['https://rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org'] as const;
 
-const IDLE: ConsoleState = { reading: 'idle', snapshot: null, run: { phase: 'idle' } };
+const IDLE: ConsoleState = { reading: 'idle', snapshot: null, run: { phase: 'idle' }, proof: { phase: 'idle' } };
 
-export function createConsoleStore(rpc: Rpc, now: () => number = Date.now): ConsoleStore {
+export function createConsoleStore(rpc: Rpc, now: () => number = Date.now, run: LiveRun = LIVE_RUN): ConsoleStore {
   let state: ConsoleState = IDLE;
   const listeners = new Set<() => void>();
   let loading: Promise<void> | null = null;
+  let proving: Promise<void> | null = null;
 
   const set = (next: Partial<ConsoleState>) => {
     state = { ...state, ...next };
@@ -64,6 +73,17 @@ export function createConsoleStore(rpc: Rpc, now: () => number = Date.now): Cons
           loading = null;
         });
       return loading;
+    },
+    verify(force = false) {
+      if (proving) return proving;
+      if (state.proof.phase === 'done' && !force) return Promise.resolve();
+      set({ proof: { phase: 'running', previous: state.proof.phase === 'done' ? state.proof.proof : null } });
+      proving = proveProvenance(rpc, run)
+        .then((proof) => set({ proof: { phase: 'done', proof } }))
+        .finally(() => {
+          proving = null;
+        });
+      return proving;
     },
     async dryRun(input) {
       if (state.run.phase === 'running') return;

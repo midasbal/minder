@@ -5,11 +5,11 @@ The demo frontend and its relay, served by one process on one port.
 - `client/`: Vite, React, TypeScript, React Router, Framer Motion, hand-written CSS, IBM Plex Mono and Sans (bundled, no external requests).
 - `server/`: Node, TypeScript, Fastify. Serves the built frontend and the API from one port.
 
-The pages are `/` (the overview), `/app` (the live console: dry runs against the deployed contract, and its state, read from the chain in the browser) and `/docs`. The relay's API is
+The pages are `/` (the overview), `/app` (the live console: dry runs against the deployed contract, its state read from the chain in the browser, and a recorded real run whose signatures are checked in the browser) and `/docs`. The relay's API is
 `GET /health` today. Any other GET that is not under `/api/` and does not name a file is answered with the app's
 `index.html`, so a deep link or a reload on `/app` or `/docs` works; an unknown `/api/*` path or a missing asset is a JSON
 404. The relay itself touches no key, chain or contract. The `/app` console does not use the relay: the browser calls public NEAR
-RPC nodes directly, with views only (no signing, no keys), so there is nothing server-side to compromise.
+RPC nodes directly, with views only (no signing, no keys; viem is used only to read a signature), so there is nothing server-side to compromise.
 
 ```
 web/
@@ -28,7 +28,8 @@ web/
       motion.ts           shared Framer Motion variants
       field.ts            the sensing surface: the lattice, the physics and the canvas drawing
       chain/              the browser's view of the live contract: rpc (failover, timeouts), contract (dry runs),
-                          snapshot (the readings), presets, store, units, reasons
+                          snapshot (the readings), presets, store, units, reasons,
+                          liverun (the recorded real run) and provenance (who signed it, checked in the browser)
       useRelayHealth.ts   the footer's relay status
       components/         Header, Footer, SensingField, PolicyGate, Datasheet, Rail, Buttons,
                           ExternalLink, ScrollManager, console/ (the two /app panels)
@@ -38,6 +39,7 @@ web/
       landing.css, docs.css, console.css
       App.test.tsx        renders every route to HTML and checks the chrome and the content
       theme.test.tsx      the colour rules, enforced against the stylesheets: tokens, contrast, roles
+      data/live-run.json  the real payments the contract gated and signed, recorded on testnet
       field.test.tsx      the sensing surface against a fake window and a recording canvas
       console.test.tsx    the console against a mocked RPC layer: units, failover, dry runs, readings, rendering
   server/

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
 
 import { CONTRACT_ACCOUNT } from '../../chain/contract';
 import { reachedChain, type AssetRow, type Section, type Snapshot } from '../../chain/snapshot';
@@ -15,10 +16,9 @@ function Read<T>({ section, children }: { section: Section<T>; children: (value:
 function Facts({ title, source, children }: { title: string; source: string; children: ReactNode }) {
   return (
     <section className="facts">
-      <h3 className="facts__title">{title}</h3>
-      <p className="facts__source">
-        <code>{source}</code>
-      </p>
+      <h3 className="facts__title">
+        {title} <span className="facts__source">{source}</span>
+      </h3>
       {children}
     </section>
   );
@@ -97,83 +97,130 @@ function More({ summary, children }: { summary: string; children: ReactNode }) {
   );
 }
 
+/** One headline reason the money is safe: the fact, and why it matters, in one line each. */
+function Safe({ name, source, fact, why, children }: { name: string; source: string; fact: ReactNode; why: string; children?: ReactNode }) {
+  return (
+    <article className="safe">
+      <h3 className="safe__name">{name}</h3>
+      <p className="safe__fact">{fact}</p>
+      <p className="safe__why">{why}</p>
+      {children}
+      <p className="safe__source">{source}</p>
+    </article>
+  );
+}
+
+/** What a compromised agent could lose at most under the live policy, worked out from the table below it. */
+function worstCase(rows: AssetRow[], windowSeconds: number | null): string {
+  return rows
+    .map((row) => (row.budget !== null ? `${row.budget} ${row.symbol}` : `${row.window} ${row.symbol} per ${windowSeconds ?? '?'} s window`))
+    .join(' + ');
+}
+
 function Body({ snapshot }: { snapshot: Snapshot }) {
   const windowSeconds = snapshot.contract.ok ? snapshot.contract.value.windowSeconds : null;
   return (
     <>
-      <div className="vitals">
-        <Facts title="Keyless" source="view_access_key_list">
-          <Read section={snapshot.keys}>
-            {(keys) => (
-              <>
-                <p className="headline">
-                  <span className={keys.fullAccess === 0 ? 'is-verified' : undefined}>
-                    {keys.fullAccess} full-access {keys.fullAccess === 1 ? 'key' : 'keys'}
-                  </span>
-                  , {keys.restricted} restricted {keys.restricted === 1 ? 'key' : 'keys'}
-                </p>
-                <p className="facts__note">
-                  No one can sign as the contract or change its code. <ExternalLink href={EXPLORER_URL}>Explorer</ExternalLink>
-                </p>
-                {keys.keys.length > 0 && (
-                  <More summary="The restricted key">
-                    {keys.keys.map((key) => (
-                      <dl className="kv" key={key.publicKey}>
-                        <Row name="Key">
-                          <code>{key.publicKey}</code>
-                        </Row>
-                        <Row name="May call only">
-                          <Codes items={key.methods} />
-                        </Row>
-                        <Row name="On">
-                          <code>{key.receiver}</code>
-                        </Row>
-                        <Row name="Allowance left">{key.allowance}</Row>
-                      </dl>
-                    ))}
-                  </More>
-                )}
-              </>
-            )}
-          </Read>
-        </Facts>
+      <div className="safety">
+        <Safe
+          name="Keyless"
+          source="view_access_key_list"
+          fact={
+            snapshot.keys.ok ? (
+              <span className={snapshot.keys.value.fullAccess === 0 ? 'is-verified' : undefined}>
+                {snapshot.keys.value.fullAccess} full-access {snapshot.keys.value.fullAccess === 1 ? 'key' : 'keys'}
+              </span>
+            ) : (
+              'Not read'
+            )
+          }
+          why="No master key exists, so there is no key to phish or leak. Only the agent's narrow key can call the contract."
+        >
+          {snapshot.keys.ok ? (
+            <p className="safe__more">
+              {snapshot.keys.value.restricted} restricted {snapshot.keys.value.restricted === 1 ? 'key' : 'keys'}.{' '}
+              <ExternalLink href={EXPLORER_URL}>Check the explorer</ExternalLink>
+            </p>
+          ) : (
+            <p className="unread">Couldn't read this from the chain. {snapshot.keys.message}</p>
+          )}
+        </Safe>
 
-        <Facts title="Deployed code" source="view_code, hashed in this browser">
-          <Read section={snapshot.code}>
-            {(code) => (
-              <>
-                <p className="headline headline--hash">
-                  <code className="break">{code.sha256}</code>
-                </p>
-                <p className="facts__note">
-                  SHA-256 of the {code.bytes.toLocaleString('en-US')}-byte wasm the chain holds.{' '}
-                  {code.matches ? (
-                    <span className="is-verified">Matches the repository build.</span>
-                  ) : (
-                    <span>Does NOT match the repository build ({code.expected}).</span>
-                  )}
-                </p>
-              </>
-            )}
-          </Read>
-        </Facts>
+        <Safe
+          name="Provable"
+          source="from the repository, not the chain"
+          fact="43 Kani proofs, 200+ mutations caught"
+          why="The policy's guarantees are machine-checked within stated bounds and cross-checked on 1,743 EVM encodings, not only tested."
+        >
+          <p className="safe__more">
+            <Link to="/docs#proofs">How far the proofs reach</Link>
+          </p>
+        </Safe>
+
+        <Safe
+          name="Bounded loss"
+          source="get_asset_policies"
+          fact={snapshot.assets.ok ? `At most ${worstCase(snapshot.assets.value, windowSeconds)}` : 'Not read'}
+          why="However badly the agent is compromised, the contract refuses everything past these limits. They are in the table below, read live."
+        >
+          {!snapshot.assets.ok && <p className="unread">Couldn't read this from the chain. {snapshot.assets.message}</p>}
+        </Safe>
       </div>
 
-      <Facts title="State" source="get_config, get_status">
+      <Facts title="Live limits" source="get_asset_policies, get_headroom, get_budget_usage">
+        <Read section={snapshot.assets}>{(rows) => <PolicyTable rows={rows} windowSeconds={windowSeconds} />}</Read>
         <Read section={snapshot.contract}>
           {(contract) => (
-            <p className="headline">
-              {contract.status} · {contract.windowSeconds} s spend window · {contract.timelockSeconds} s timelock on loosening
+            <p className="facts__note">
+              {contract.status} · {contract.windowSeconds} s spend window · {contract.timelockSeconds} s timelock on any loosening
             </p>
           )}
         </Read>
       </Facts>
 
-      <Facts title="Policy and headroom" source="get_asset_policies, get_headroom, get_budget_usage">
-        <Read section={snapshot.assets}>{(rows) => <PolicyTable rows={rows} windowSeconds={windowSeconds} />}</Read>
+      <Facts title="Deployed code" source="view_code, hashed in this browser">
+        <Read section={snapshot.code}>
+          {(code) => (
+            <>
+              <p className="headline headline--hash">
+                <code className="break">{code.sha256}</code>
+              </p>
+              <p className="facts__note">
+                SHA-256 of the {code.bytes.toLocaleString('en-US')}-byte wasm the chain holds.{' '}
+                {code.matches ? (
+                  <span className="is-verified">Matches the repository build.</span>
+                ) : (
+                  <span>Does NOT match the repository build ({code.expected}).</span>
+                )}
+              </p>
+            </>
+          )}
+        </Read>
       </Facts>
 
       <div className="expanders">
+        <Read section={snapshot.keys}>
+          {(keys) =>
+            keys.keys.length === 0 ? null : (
+              <More summary="The restricted key">
+                {keys.keys.map((key) => (
+                  <dl className="kv" key={key.publicKey}>
+                    <Row name="Key">
+                      <code>{key.publicKey}</code>
+                    </Row>
+                    <Row name="May call only">
+                      <Codes items={key.methods} />
+                    </Row>
+                    <Row name="On">
+                      <code>{key.receiver}</code>
+                    </Row>
+                    <Row name="Allowance left">{key.allowance}</Row>
+                  </dl>
+                ))}
+              </More>
+            )
+          }
+        </Read>
         <Read section={snapshot.mandate}>
           {(mandate) =>
             mandate === null ? (

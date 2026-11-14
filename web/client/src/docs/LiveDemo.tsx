@@ -7,8 +7,9 @@ export function LiveDemo() {
     <DocSection id="live-demo" number="5" title="The live demo">
       <Note title="Status">
         The surface at <Link to="/app">/app</Link> is live for everything that needs no key: it asks the deployed contract
-        for dry runs, and reads its state, straight from your browser. Signing and sending a real request, and the
-        guardian&rsquo;s freeze, are not wired yet; the table says which scenarios each covers.
+        for dry runs, and reads its state, straight from your browser. Sending a new real request from the page, and the
+        guardian&rsquo;s freeze, are not wired yet; in their place the page shows a real run recorded on testnet (NEAR, ETH
+        and USDC payments the contract gated and signed), and checks in your browser that the contract signed it.
       </Note>
 
       <Sub id="scenarios" title="Scenarios and methods">
