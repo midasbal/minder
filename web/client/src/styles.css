@@ -1,0 +1,326 @@
+:root {
+  --canvas: #2b2d31;
+  --silver: #d9dadc;
+  --accent: #ffc93c;
+
+  --silver-dim: color-mix(in srgb, var(--silver) 64%, var(--canvas));
+  --hairline: color-mix(in srgb, var(--silver) 22%, transparent);
+  --hairline-strong: color-mix(in srgb, var(--silver) 40%, transparent);
+
+  --gutter: clamp(1.5rem, 6vw, 6rem);
+  --serif: 'Instrument Serif', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  --mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--canvas);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--silver);
+  font-family: var(--serif);
+  font-size: 1.125rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--canvas);
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+/* ---- Page ---- */
+
+.page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: clamp(3rem, 8vw, 7rem);
+  padding: clamp(1.25rem, 3vw, 2.5rem) var(--gutter);
+  max-width: 96rem;
+  margin-inline: auto;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(3.5rem, 9vw, 8rem);
+}
+
+/* ---- Masthead ---- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 1.75rem;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+
+.wordmark__bar {
+  width: 3px;
+  height: 1.5rem;
+  background: var(--accent);
+}
+
+.tag,
+.label,
+.footer,
+.rail__label,
+.slot__name {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.tag {
+  color: var(--silver-dim);
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--hairline-strong);
+}
+
+/* ---- Headline ---- */
+
+.headline {
+  font-weight: 400;
+  font-size: clamp(2.4rem, 6.4vw, 5.75rem);
+  line-height: 1.02;
+  letter-spacing: -0.015em;
+  max-width: 17em;
+}
+
+.headline__line {
+  display: block;
+}
+
+.headline__line--accent {
+  margin-top: 0.3em;
+  font-style: italic;
+  color: var(--accent);
+}
+
+/* ---- Stage: the agent, the boundary, the money ---- */
+
+.stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) 3.5rem minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.zone {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.zone--agent {
+  padding-right: clamp(0.5rem, 2.5vw, 2.5rem);
+}
+
+.zone--money {
+  padding-left: clamp(0.5rem, 2.5vw, 2.5rem);
+  padding-top: clamp(0rem, 5vw, 4.5rem);
+}
+
+.label {
+  color: var(--silver-dim);
+}
+
+.zone__title {
+  font-weight: 400;
+  font-size: clamp(1.75rem, 3vw, 2.5rem);
+  line-height: 1.1;
+}
+
+.zone__text {
+  max-width: 30em;
+  color: var(--silver-dim);
+}
+
+/* Reserved space for what comes next: a framed, empty slot. */
+
+.slot {
+  --bar: 2px;
+  --reach: 18px;
+  position: relative;
+  flex: 1;
+  display: grid;
+  place-content: center;
+  gap: 0.7rem;
+  min-height: clamp(18rem, 38vh, 30rem);
+  margin-top: 0.5rem;
+  padding: 2rem;
+  text-align: center;
+  border: 1px dashed var(--hairline-strong);
+  background:
+    linear-gradient(var(--accent), var(--accent)) top left / var(--reach) var(--bar) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top left / var(--bar) var(--reach) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top right / var(--reach) var(--bar) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) top right / var(--bar) var(--reach) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom left / var(--reach) var(--bar) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom left / var(--bar) var(--reach) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom right / var(--reach) var(--bar) no-repeat,
+    linear-gradient(var(--accent), var(--accent)) bottom right / var(--bar) var(--reach) no-repeat;
+}
+
+.slot__name {
+  color: var(--silver);
+}
+
+.slot__note {
+  max-width: 22em;
+  margin-inline: auto;
+  font-size: 1rem;
+  color: var(--silver-dim);
+}
+
+/* The boundary: the one thing the agent cannot cross without the policy. */
+
+.rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.rail__ticks {
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: 20px;
+  transform: translateX(-50%);
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--hairline-strong) 0 1px,
+    transparent 1px 22px
+  );
+}
+
+.rail__line {
+  position: relative;
+  width: 2px;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: top;
+}
+
+.rail__label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(180deg);
+  writing-mode: vertical-rl;
+  padding: 1.1rem 0.4rem;
+  white-space: nowrap;
+  color: var(--accent);
+  background: var(--canvas);
+}
+
+/* ---- Footer ---- */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--hairline);
+  color: var(--silver-dim);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.chip__dot {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--silver-dim);
+}
+
+.chip[data-state='online'] {
+  color: var(--silver);
+}
+
+.chip[data-state='online'] .chip__dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.chip[data-state='offline'] .chip__dot {
+  background: repeating-linear-gradient(135deg, var(--silver-dim) 0 1px, transparent 1px 3px);
+}
+
+/* ---- Narrow screens: the boundary turns horizontal ---- */
+
+@media (max-width: 54rem) {
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .zone--agent,
+  .zone--money {
+    padding: 0;
+  }
+
+  .rail {
+    height: 3.5rem;
+    align-items: center;
+  }
+
+  .rail__ticks {
+    inset-block: auto;
+    inset-inline: 0;
+    left: 0;
+    width: auto;
+    height: 20px;
+    transform: none;
+    background: repeating-linear-gradient(
+      to right,
+      var(--hairline-strong) 0 1px,
+      transparent 1px 22px
+    );
+  }
+
+  .rail__line {
+    width: 100%;
+    height: 2px;
+    transform-origin: left;
+  }
+
+  .rail__label {
+    writing-mode: horizontal-tb;
+    transform: translate(-50%, -50%);
+    padding: 0.4rem 1.1rem;
+  }
+}

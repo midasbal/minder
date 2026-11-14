@@ -1,0 +1,21 @@
+{
+  "name": "minder-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Minder demo: a frontend and its relay, served by one process.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build -w client && npm run build -w server",
+    "start": "node server/dist/index.js",
+    "dev:client": "npm run dev -w client",
+    "dev:server": "npm run dev -w server",
+    "typecheck": "npm run typecheck -w client && npm run typecheck -w server",
+    "test": "npm run test -w server"
+  }
+}
