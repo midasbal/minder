@@ -5,10 +5,11 @@ The demo frontend and its relay, served by one process on one port.
 - `client/`: Vite, React, TypeScript, React Router, Framer Motion, hand-written CSS, IBM Plex Mono and Sans (bundled, no external requests).
 - `server/`: Node, TypeScript, Fastify. Serves the built frontend and the API from one port.
 
-The pages are `/` (the overview), `/app` (the live demo surface, a placeholder for now) and `/docs`. The relay's API is
+The pages are `/` (the overview), `/app` (the live console: dry runs against the deployed contract, and its state, read from the chain in the browser) and `/docs`. The relay's API is
 `GET /health` today. Any other GET that is not under `/api/` and does not name a file is answered with the app's
 `index.html`, so a deep link or a reload on `/app` or `/docs` works; an unknown `/api/*` path or a missing asset is a JSON
-404. Nothing in this directory touches a key, a chain or a contract yet.
+404. The relay itself touches no key, chain or contract. The `/app` console does not use the relay: the browser calls public NEAR
+RPC nodes directly, with views only (no signing, no keys), so there is nothing server-side to compromise.
 
 ```
 web/
@@ -26,16 +27,19 @@ web/
       links.ts            repository, explorer and account links
       motion.ts           shared Framer Motion variants
       field.ts            the sensing surface: the lattice, the physics and the canvas drawing
+      chain/              the browser's view of the live contract: rpc (failover, timeouts), contract (dry runs),
+                          snapshot (the readings), presets, store, units, reasons
       useRelayHealth.ts   the footer's relay status
       components/         Header, Footer, SensingField, PolicyGate, Datasheet, Rail, Buttons,
-                          ExternalLink, ScrollManager
+                          ExternalLink, ScrollManager, console/ (the two /app panels)
       pages/              Landing, AppShell, NotFound
       docs/               Docs and its sections (Overview ... Reference), contents, reading helpers
       styles.css          the dark theme: tokens, header, footer, buttons, the app shell
-      landing.css, docs.css
+      landing.css, docs.css, console.css
       App.test.tsx        renders every route to HTML and checks the chrome and the content
       theme.test.tsx      the colour rules, enforced against the stylesheets: tokens, contrast, roles
       field.test.tsx      the sensing surface against a fake window and a recording canvas
+      console.test.tsx    the console against a mocked RPC layer: units, failover, dry runs, readings, rendering
   server/
     src/app.ts            /health, static files, the app catch-all, JSON 404
     src/index.ts          reads PORT and HOST, starts, shuts down on SIGTERM

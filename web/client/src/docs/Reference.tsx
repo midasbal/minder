@@ -1,10 +1,9 @@
 import { ExternalLink } from '../components/ExternalLink';
-import { CONTRACT_ID, DESIGN_URL, EXPLORER_URL, GUARDIAN_ID, OWNER_ID, REPO_URL } from '../links';
+import { CONTRACT_ID, DESIGN_URL, EXPLORER_URL, GUARDIAN_ID, OWNER_ID, REPO_URL, WASM_SHA256 } from '../links';
 import { DocSection, Sub, Table } from './parts';
 
 const DEPLOY_TX = 'GrwY6FL7QGqcCMGBnZmiJCbkQNbRtNjGtKQ4j8VkVGwH';
 const SENDER = '0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F';
-const WASM_SHA256 = '2fdd044411312fba8bc18b91ce06138b0c933cdb32bbb5296964f6b35ba54d09';
 const CAPSTONE_TX = '0x1427c99004f0f8632aedd670f9ad457633841c4a90464c017f4ed051572fda63';
 
 export function Reference() {

@@ -456,7 +456,7 @@ code {
   row-gap: 1rem;
 }
 
-/* Each zone spans the stage's four rows (label, title, text, slot) as a subgrid, so
+/* Each zone spans the stage's four rows (label, title, text, panel) as a subgrid, so
    the two columns share their row lines and line up across the boundary whatever
    their text does. Without subgrid support they are plain stacks from the same top. */
 .zone {
@@ -493,63 +493,6 @@ code {
 
 .zone__text {
   max-width: 30em;
-  color: var(--ink-2);
-}
-
-/* Reserved space for what comes next: a framed, empty slot. */
-
-.slot {
-  --bar: 1px;
-  --reach: 16px;
-  position: relative;
-  flex: 1;
-  display: grid;
-  place-content: center;
-  gap: 0.6rem;
-  min-height: clamp(18rem, 38vh, 30rem);
-  margin-top: 0.5rem;
-  padding: 2rem;
-  text-align: center;
-  background-color: var(--bg-inset);
-  border: 1px dashed var(--line-2);
-  background-image:
-    linear-gradient(var(--ink-3), var(--ink-3)), linear-gradient(var(--ink-3), var(--ink-3)),
-    linear-gradient(var(--ink-3), var(--ink-3)), linear-gradient(var(--ink-3), var(--ink-3)),
-    linear-gradient(var(--ink-3), var(--ink-3)), linear-gradient(var(--ink-3), var(--ink-3)),
-    linear-gradient(var(--ink-3), var(--ink-3)), linear-gradient(var(--ink-3), var(--ink-3));
-  background-repeat: no-repeat;
-  background-position:
-    top left,
-    top left,
-    top right,
-    top right,
-    bottom left,
-    bottom left,
-    bottom right,
-    bottom right;
-  background-size:
-    var(--reach) var(--bar),
-    var(--bar) var(--reach),
-    var(--reach) var(--bar),
-    var(--bar) var(--reach),
-    var(--reach) var(--bar),
-    var(--bar) var(--reach),
-    var(--reach) var(--bar),
-    var(--bar) var(--reach);
-}
-
-.slot__name {
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.slot__note {
-  max-width: 22em;
-  margin-inline: auto;
-  font-size: 0.98rem;
   color: var(--ink-2);
 }
 

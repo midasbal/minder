@@ -6,6 +6,7 @@ import '@fontsource/ibm-plex-sans/500.css';
 import './styles.css';
 import './landing.css';
 import './docs.css';
+import './console.css';
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';

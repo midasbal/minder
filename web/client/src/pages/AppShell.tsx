@@ -1,10 +1,14 @@
 import { motion } from 'framer-motion';
 
+import { AgentPanel } from '../components/console/AgentPanel';
+import { LivePanel } from '../components/console/LivePanel';
+import { useConsole } from '../components/console/useConsole';
 import { Rail } from '../components/Rail';
 import { rise, stagger } from '../motion';
 
-/** The interactive surface. A placeholder: the two panels are reserved, nothing is wired. */
+/** The live console: the agent's controls on one side of the boundary, the contract's state on the other. */
 export function AppShell() {
+  const { store, state } = useConsole();
   return (
     <div className="page-wide">
       <motion.div variants={stagger} initial="hidden" animate="shown">
@@ -15,7 +19,8 @@ export function AppShell() {
           The agent, the boundary, the money.
         </motion.h1>
         <motion.p className="lede" variants={rise}>
-          This surface is a placeholder. The scenarios and the live status will appear in the two panels below.
+          Act as a compromised agent against the live contract on one side; read the contract's real state from the chain on the other.
+          Every verdict is the contract's own answer, and nothing on this page is simulated.
         </motion.p>
       </motion.div>
 
@@ -32,10 +37,7 @@ export function AppShell() {
           <p className="zone__text">
             Untrusted. It holds one narrow, revocable, time-boxed key, and nothing else.
           </p>
-          <div className="slot">
-            <p className="slot__name">Agent control surface</p>
-            <p className="slot__note">Reserved. The scenarios the agent can attempt will live here.</p>
-          </div>
+          <AgentPanel store={store} state={state} />
         </motion.div>
 
         <Rail />
@@ -46,10 +48,7 @@ export function AppShell() {
           <p className="zone__text">
             The only path to funds. Every request meets the same deterministic policy.
           </p>
-          <div className="slot">
-            <p className="slot__name">Status panel</p>
-            <p className="slot__note">Reserved. Live policy, balances and decisions will show here.</p>
-          </div>
+          <LivePanel store={store} state={state} />
         </motion.div>
       </motion.section>
     </div>

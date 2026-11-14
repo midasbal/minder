@@ -163,7 +163,7 @@ describe('the landing page', () => {
     assert.match(html, /<a[^>]*href="\/docs#proofs"[^>]*>Guarantees hold within stated bounds<\/a>/);
   });
 
-  it('does not carry the reserved app slots, and does not scroll-reveal its sections', () => {
+  it('does not carry the old app placeholders, and does not scroll-reveal its sections', () => {
     assert.ok(!html.includes('Agent control surface'));
     assert.ok(!html.includes('Status panel'));
     const source = readFileSync(new URL('./pages/Landing.tsx', import.meta.url), 'utf8');
@@ -194,14 +194,19 @@ describe('the sensing surface behind every page', () => {
 describe('the app shell', () => {
   const html = render('/app');
 
-  it('holds the reserved slots and the boundary', () => {
-    assert.ok(html.includes('Agent control surface'));
-    assert.ok(html.includes('Status panel'));
-    assert.ok(html.includes('Policy boundary'));
+  it('holds the agent console, the contract panel and the boundary', () => {
+    const text = visibleText(html);
+    assert.ok(text.includes('Ask the contract'));
+    assert.ok(text.includes('Attack presets'));
+    assert.ok(text.includes('Reading the contract from the chain'));
+    assert.ok(text.includes('Policy boundary'));
   });
 
-  it('is a placeholder and says so', () => {
-    assert.ok(html.includes('placeholder'));
+  it('is no longer a placeholder, and shows nothing read from the chain on the server', () => {
+    const text = visibleText(html);
+    assert.ok(!text.includes('placeholder'));
+    assert.ok(!text.includes('Read from the chain at'), 'no reading is claimed before one is made');
+    assert.ok(!text.includes('ALLOW') && !text.includes('DENY'), 'no verdict is shown before a request');
   });
 });
 
@@ -235,8 +240,11 @@ describe('the docs', () => {
     assert.ok(text.includes('that new scope has not been re-run through the mutation tool'));
   });
 
-  it('says the live demo is not wired yet', () => {
-    assert.ok(html.includes('none of it is wired yet'));
+  it('says what the live demo does today, and what is not wired yet', () => {
+    const words = visibleText(html);
+    assert.ok(words.includes('live for everything that needs no key'));
+    assert.ok(words.includes('are not wired yet'));
+    assert.ok(!words.includes('is a placeholder'));
   });
 });
 

@@ -6,8 +6,9 @@ export function LiveDemo() {
   return (
     <DocSection id="live-demo" number="5" title="The live demo">
       <Note title="Status">
-        The interactive surface at <Link to="/app">/app</Link> is a placeholder in this build. This section describes what
-        it is designed to do and how it maps onto the contract; none of it is wired yet.
+        The surface at <Link to="/app">/app</Link> is live for everything that needs no key: it asks the deployed contract
+        for dry runs, and reads its state, straight from your browser. Signing and sending a real request, and the
+        guardian&rsquo;s freeze, are not wired yet; the table says which scenarios each covers.
       </Note>
 
       <Sub id="scenarios" title="Scenarios and methods">
@@ -15,7 +16,7 @@ export function LiveDemo() {
           The compromised agent&rsquo;s only moves are the three methods its key allows. Each scenario is one of those
           calls, and the contract&rsquo;s answer is one of its documented decisions.
         </p>
-        <Table caption="Planned scenarios, the method each calls, and the expected decision" head={['Scenario', 'Method', 'Expected']}>
+        <Table caption="Scenarios, the method each calls, and the expected decision" head={['Scenario', 'Method', 'Expected']}>
           <tr>
             <th scope="row">Pay the vendor, within the cap</th>
             <td>
