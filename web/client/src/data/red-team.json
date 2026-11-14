@@ -1,0 +1,873 @@
+{
+  "description": "A red-team run against the live contract. A compromised agent, using its real key, tries what it can: every denial below is a real failed NEAR transaction whose log carries the contract's own decision event; the protocol refusals never reach a block and are recorded as the raw RPC error.",
+  "contract": "gate.minder-gate-owner-bf5fcd.testnet",
+  "network": "testnet",
+  "agentKey": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+  "startedAt": "2026-11-14T16:11:47.511Z",
+  "finishedAt": "2026-11-14T16:12:22.320Z",
+  "stateBefore": {
+    "status": "Active",
+    "pendingChanges": 0,
+    "mandateRevoked": false,
+    "mandateGrant": 2,
+    "agentAllowanceYocto": "246798533699992300000000",
+    "contractBalanceYocto": "6943011174904054999999996",
+    "headroom": {
+      "near": {
+        "per_tx_cap": "500000000000000000000000",
+        "window_remaining": "1000000000000000000000000",
+        "budget_remaining": "1950000000000000000000000"
+      },
+      "eth": {
+        "per_tx_cap": "5000000000000000",
+        "window_remaining": "15000000000000000",
+        "budget_remaining": "26180000000000000"
+      },
+      "usdc": {
+        "per_tx_cap": "5000000",
+        "window_remaining": "10000000",
+        "budget_remaining": "14000000"
+      }
+    },
+    "budgetUsage": {
+      "near": {
+        "committed": "50000000000000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "eth": {
+        "committed": "3820000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "usdc": {
+        "committed": "1000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      }
+    }
+  },
+  "stateAfter": {
+    "status": "Active",
+    "pendingChanges": 0,
+    "mandateRevoked": false,
+    "mandateGrant": 2,
+    "agentAllowanceYocto": "242964725049542900000000",
+    "contractBalanceYocto": "5939177366253605599999996",
+    "headroom": {
+      "near": {
+        "per_tx_cap": "500000000000000000000000",
+        "window_remaining": "1000000000000000000000000",
+        "budget_remaining": "950000000000000000000000"
+      },
+      "eth": {
+        "per_tx_cap": "5000000000000000",
+        "window_remaining": "15000000000000000",
+        "budget_remaining": "26180000000000000"
+      },
+      "usdc": {
+        "per_tx_cap": "5000000",
+        "window_remaining": "10000000",
+        "budget_remaining": "14000000"
+      }
+    },
+    "budgetUsage": {
+      "near": {
+        "committed": "1050000000000000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "eth": {
+        "committed": "3820000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "usdc": {
+        "committed": "1000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      }
+    }
+  },
+  "costs": {
+    "agentAllowanceBurnedYocto": "3833808650449400000000",
+    "nearMovedToVendorYocto": "1000000000000000000000000",
+    "note": "Only the two allowed 0.5 NEAR payments of the window demonstration moved funds, 1 NEAR in all, to the vendor account the operator controls. A denied request books nothing. The NEAR budget period shows the 1 NEAR as committed."
+  },
+  "onChainDenials": [
+    {
+      "id": "over-cap-near",
+      "attack": "Pay 1 NEAR, twice the 0.5 NEAR per-transaction cap, to the approved vendor.",
+      "method": "request_local_transfer",
+      "args": {
+        "asset": "Near",
+        "amount": "1000000000000000000000000",
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+      },
+      "expectedReason": "PerTxCapExceeded",
+      "reason": "PerTxCapExceeded",
+      "leg": null,
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_local_transfer",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": "Near",
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+        "amount": "1000000000000000000000000",
+        "decision": "deny",
+        "reason": "PerTxCapExceeded",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": "Near",
+            "amount": "1000000000000000000000000",
+            "decision": "deny",
+            "reason": "PerTxCapExceeded"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded\"}}}}",
+      "tx": "AWEyvti14d58haJYsSx6fhbVQWHxzvzeu5EEesLAFnu9",
+      "explorer": "https://testnet.nearblocks.io/txns/AWEyvti14d58haJYsSx6fhbVQWHxzvzeu5EEesLAFnu9",
+      "sentAt": "2026-11-14T16:11:48.264Z"
+    },
+    {
+      "id": "over-cap-eth",
+      "attack": "Pay 0.01 ETH, over the per-transaction cap, to the approved vendor. Denied before anything is signed.",
+      "method": "request_evm_payment",
+      "args": {
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "10000000000000000"
+      },
+      "expectedReason": "PerTxCapExceeded",
+      "reason": "PerTxCapExceeded",
+      "leg": null,
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_evm_payment",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Evm": 11155111
+        },
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "10000000000000000",
+        "decision": "deny",
+        "reason": "PerTxCapExceeded",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Evm": 11155111
+            },
+            "amount": "10210000000000000",
+            "decision": "deny",
+            "reason": "PerTxCapExceeded"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded\"}}}}",
+      "tx": "BT9ZdveNcqi4ves5qy9iN3AmBb1iunEoKapx6CJQQYBa",
+      "explorer": "https://testnet.nearblocks.io/txns/BT9ZdveNcqi4ves5qy9iN3AmBb1iunEoKapx6CJQQYBa",
+      "sentAt": "2026-11-14T16:11:51.145Z"
+    },
+    {
+      "id": "over-cap-usdc",
+      "attack": "Pay 10 USDC, twice the 5 USDC cap, to the approved vendor. Denied on the token leg, before anything is signed.",
+      "method": "request_evm_token_payment",
+      "args": {
+        "token": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "10000000"
+      },
+      "expectedReason": "PerTxCapExceeded",
+      "reason": "PerTxCapExceeded",
+      "leg": "token transfer",
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_evm_token_payment",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Evm20": {
+            "chain_id": 11155111,
+            "token": [
+              28,
+              125,
+              75,
+              25,
+              108,
+              176,
+              199,
+              176,
+              29,
+              116,
+              63,
+              188,
+              97,
+              22,
+              169,
+              2,
+              55,
+              156,
+              114,
+              56
+            ]
+          }
+        },
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "10000000",
+        "decision": "deny",
+        "reason": "PerTxCapExceeded",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Evm20": {
+                "chain_id": 11155111,
+                "token": [
+                  28,
+                  125,
+                  75,
+                  25,
+                  108,
+                  176,
+                  199,
+                  176,
+                  29,
+                  116,
+                  63,
+                  188,
+                  97,
+                  22,
+                  169,
+                  2,
+                  55,
+                  156,
+                  114,
+                  56
+                ]
+              }
+            },
+            "amount": "10000000",
+            "decision": "deny",
+            "reason": "PerTxCapExceeded"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded (token transfer)\"}}}}",
+      "tx": "Hgwk7SEhC4kgdEkFSfzA94GT5T1TC8fcw66c5se4w8kP",
+      "explorer": "https://testnet.nearblocks.io/txns/Hgwk7SEhC4kgdEkFSfzA94GT5T1TC8fcw66c5se4w8kP",
+      "sentAt": "2026-11-14T16:11:53.961Z"
+    },
+    {
+      "id": "unlisted-near",
+      "attack": "Pay 0.01 NEAR to an account that is not on the allowlist.",
+      "method": "request_local_transfer",
+      "args": {
+        "asset": "Near",
+        "amount": "10000000000000000000000",
+        "recipient": "not-on-the-list.testnet"
+      },
+      "expectedReason": "RecipientNotAllowed",
+      "reason": "RecipientNotAllowed",
+      "leg": null,
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_local_transfer",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": "Near",
+        "recipient": "not-on-the-list.testnet",
+        "amount": "10000000000000000000000",
+        "decision": "deny",
+        "reason": "RecipientNotAllowed",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": "Near",
+            "amount": "10000000000000000000000",
+            "decision": "deny",
+            "reason": "RecipientNotAllowed"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed\"}}}}",
+      "tx": "Bd7dXggBmo2fHpDskckh5YDSbypUnTedPt3ibwnvfboz",
+      "explorer": "https://testnet.nearblocks.io/txns/Bd7dXggBmo2fHpDskckh5YDSbypUnTedPt3ibwnvfboz",
+      "sentAt": "2026-11-14T16:11:56.488Z"
+    },
+    {
+      "id": "unlisted-eth",
+      "attack": "Pay 0.0002 ETH to an address that is not on the EVM allowlist (the burn address).",
+      "method": "request_evm_payment",
+      "args": {
+        "recipient": "0x000000000000000000000000000000000000dEaD",
+        "amount": "200000000000000"
+      },
+      "expectedReason": "RecipientNotAllowed",
+      "reason": "RecipientNotAllowed",
+      "leg": null,
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_evm_payment",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Evm": 11155111
+        },
+        "recipient": "0x000000000000000000000000000000000000dead",
+        "amount": "200000000000000",
+        "decision": "deny",
+        "reason": "RecipientNotAllowed",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Evm": 11155111
+            },
+            "amount": "410000000000000",
+            "decision": "deny",
+            "reason": "RecipientNotAllowed"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed\"}}}}",
+      "tx": "FSc8bEQcQrpPD9PhJ8naPa8Rmts4LhvLFk2Qn4LL4vTY",
+      "explorer": "https://testnet.nearblocks.io/txns/FSc8bEQcQrpPD9PhJ8naPa8Rmts4LhvLFk2Qn4LL4vTY",
+      "sentAt": "2026-11-14T16:11:59.530Z"
+    },
+    {
+      "id": "unlisted-usdc",
+      "attack": "Pay 0.5 USDC to an address that is not on the EVM allowlist.",
+      "method": "request_evm_token_payment",
+      "args": {
+        "token": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+        "recipient": "0x000000000000000000000000000000000000dEaD",
+        "amount": "500000"
+      },
+      "expectedReason": "RecipientNotAllowed",
+      "reason": "RecipientNotAllowed",
+      "leg": "token transfer",
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_evm_token_payment",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Evm20": {
+            "chain_id": 11155111,
+            "token": [
+              28,
+              125,
+              75,
+              25,
+              108,
+              176,
+              199,
+              176,
+              29,
+              116,
+              63,
+              188,
+              97,
+              22,
+              169,
+              2,
+              55,
+              156,
+              114,
+              56
+            ]
+          }
+        },
+        "recipient": "0x000000000000000000000000000000000000dead",
+        "amount": "500000",
+        "decision": "deny",
+        "reason": "RecipientNotAllowed",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Evm20": {
+                "chain_id": 11155111,
+                "token": [
+                  28,
+                  125,
+                  75,
+                  25,
+                  108,
+                  176,
+                  199,
+                  176,
+                  29,
+                  116,
+                  63,
+                  188,
+                  97,
+                  22,
+                  169,
+                  2,
+                  55,
+                  156,
+                  114,
+                  56
+                ]
+              }
+            },
+            "amount": "500000",
+            "decision": "deny",
+            "reason": "RecipientNotAllowed"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed (token transfer)\"}}}}",
+      "tx": "3wuU7YNB2dQrAsYHwu3mFrka6tigWivkb9NXC6xENVky",
+      "explorer": "https://testnet.nearblocks.io/txns/3wuU7YNB2dQrAsYHwu3mFrka6tigWivkb9NXC6xENVky",
+      "sentAt": "2026-11-14T16:12:02.491Z"
+    },
+    {
+      "id": "no-policy-near-token",
+      "attack": "Move a NEP-141 token the owner never set a policy for.",
+      "method": "request_local_transfer",
+      "args": {
+        "asset": {
+          "Nep141": "usdc.example.testnet"
+        },
+        "amount": "1",
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+      },
+      "expectedReason": "AssetNotAllowed",
+      "reason": "AssetNotAllowed",
+      "leg": null,
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_local_transfer",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Nep141": "usdc.example.testnet"
+        },
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+        "amount": "1",
+        "decision": "deny",
+        "reason": "AssetNotAllowed",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Nep141": "usdc.example.testnet"
+            },
+            "amount": "1",
+            "decision": "deny",
+            "reason": "AssetNotAllowed"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: AssetNotAllowed\"}}}}",
+      "tx": "4hH6uTsfouEtiStCi24R78dMke3SjYAxzoBUywkkJNYU",
+      "explorer": "https://testnet.nearblocks.io/txns/4hH6uTsfouEtiStCi24R78dMke3SjYAxzoBUywkkJNYU",
+      "sentAt": "2026-11-14T16:12:05.155Z"
+    },
+    {
+      "id": "no-policy-erc20",
+      "attack": "Pay an ERC-20 token the owner never set a policy for.",
+      "method": "request_evm_token_payment",
+      "args": {
+        "token": "0x0000000000000000000000000000000000001234",
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "1"
+      },
+      "expectedReason": "AssetNotAllowed",
+      "reason": "AssetNotAllowed",
+      "leg": "token transfer",
+      "finalStatus": "Failure",
+      "decisionEvent": {
+        "method": "request_evm_token_payment",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": {
+          "Evm20": {
+            "chain_id": 11155111,
+            "token": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              18,
+              52
+            ]
+          }
+        },
+        "recipient": "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5",
+        "amount": "1",
+        "decision": "deny",
+        "reason": "AssetNotAllowed",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": {
+              "Evm20": {
+                "chain_id": 11155111,
+                "token": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  18,
+                  52
+                ]
+              }
+            },
+            "amount": "1",
+            "decision": "deny",
+            "reason": "AssetNotAllowed"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: AssetNotAllowed (token transfer)\"}}}}",
+      "tx": "93zLPiHM82kbXrGkGKrZfPjsdB8TLr7ZtRHZ6WNpGDZ1",
+      "explorer": "https://testnet.nearblocks.io/txns/93zLPiHM82kbXrGkGKrZfPjsdB8TLr7ZtRHZ6WNpGDZ1",
+      "sentAt": "2026-11-14T16:12:07.866Z"
+    }
+  ],
+  "window": {
+    "explanation": "A dry run spends nothing, so it cannot show the window filling. Here two real 0.5 NEAR payments, each within the cap, fill the 1 NEAR / 60 s window; the third is refused on chain.",
+    "entries": [
+      {
+        "id": "window-1",
+        "attack": "Pay the vendor 0.5 NEAR (the cap). Allowed: the window is empty.",
+        "method": "request_local_transfer",
+        "args": {
+          "asset": "Near",
+          "amount": "500000000000000000000000",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+        },
+        "expectedReason": null,
+        "reason": null,
+        "leg": null,
+        "finalStatus": "SuccessValue",
+        "decisionEvent": {
+          "method": "request_local_transfer",
+          "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+          "asset": "Near",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+          "amount": "500000000000000000000000",
+          "decision": "allow",
+          "reason": null,
+          "leg": null,
+          "legs": [
+            {
+              "leg": "transfer",
+              "asset": "Near",
+              "amount": "500000000000000000000000",
+              "decision": "allow",
+              "reason": null
+            }
+          ]
+        },
+        "failureMessage": null,
+        "tx": "9jnLqfsk8rvgCh4f5Ff4cVfii7LZgkpVxqvFsxjU28Vo",
+        "explorer": "https://testnet.nearblocks.io/txns/9jnLqfsk8rvgCh4f5Ff4cVfii7LZgkpVxqvFsxjU28Vo",
+        "sentAt": "2026-11-14T16:12:11.052Z"
+      },
+      {
+        "id": "window-2",
+        "attack": "Pay the vendor another 0.5 NEAR within the same minute. Allowed: it fills the 1 NEAR window exactly.",
+        "method": "request_local_transfer",
+        "args": {
+          "asset": "Near",
+          "amount": "500000000000000000000000",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+        },
+        "expectedReason": null,
+        "reason": null,
+        "leg": null,
+        "finalStatus": "SuccessValue",
+        "decisionEvent": {
+          "method": "request_local_transfer",
+          "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+          "asset": "Near",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+          "amount": "500000000000000000000000",
+          "decision": "allow",
+          "reason": null,
+          "leg": null,
+          "legs": [
+            {
+              "leg": "transfer",
+              "asset": "Near",
+              "amount": "500000000000000000000000",
+              "decision": "allow",
+              "reason": null
+            }
+          ]
+        },
+        "failureMessage": null,
+        "tx": "DrrXE1ProgtrKSWNMNnugX8jypHryQV84XmmfPfGAMxX",
+        "explorer": "https://testnet.nearblocks.io/txns/DrrXE1ProgtrKSWNMNnugX8jypHryQV84XmmfPfGAMxX",
+        "sentAt": "2026-11-14T16:12:15.213Z"
+      },
+      {
+        "id": "window-3",
+        "attack": "Ask for a third 0.5 NEAR inside the same 60-second window. Each request is within the cap, but the window is full.",
+        "method": "request_local_transfer",
+        "args": {
+          "asset": "Near",
+          "amount": "500000000000000000000000",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+        },
+        "expectedReason": "WindowLimitExceeded",
+        "reason": "WindowLimitExceeded",
+        "leg": null,
+        "finalStatus": "Failure",
+        "decisionEvent": {
+          "method": "request_local_transfer",
+          "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+          "asset": "Near",
+          "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+          "amount": "500000000000000000000000",
+          "decision": "deny",
+          "reason": "WindowLimitExceeded",
+          "leg": "transfer",
+          "legs": [
+            {
+              "leg": "transfer",
+              "asset": "Near",
+              "amount": "500000000000000000000000",
+              "decision": "deny",
+              "reason": "WindowLimitExceeded"
+            }
+          ]
+        },
+        "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: WindowLimitExceeded\"}}}}",
+        "tx": "2Eouy2sVDw8dP7rd621ZhTxqDEPkvrW8Hi5FSNjDFT68",
+        "explorer": "https://testnet.nearblocks.io/txns/2Eouy2sVDw8dP7rd621ZhTxqDEPkvrW8Hi5FSNjDFT68",
+        "sentAt": "2026-11-14T16:12:19.459Z"
+      }
+    ]
+  },
+  "protocolRefusals": [
+    {
+      "id": "owner-method",
+      "attack": "Call an owner-only method (owner_withdraw) with the agent key, to take the funds.",
+      "label": "Rejected by the NEAR runtime before any contract code ran; no block, so no transaction hash exists on chain.",
+      "expectedError": "MethodNameMismatch",
+      "signedTransactionHash": "8ndvibr2Ln5KshjSmBnnSgHMnJsjtTFg71aZjupjwox4",
+      "signedBy": "the agent key (signing as the contract account)",
+      "receiver": "gate.minder-gate-owner-bf5fcd.testnet",
+      "method": "owner_withdraw",
+      "args": {
+        "asset": "Near",
+        "amount": "1000000000000000000000000",
+        "to": "vendor.minder-gate-owner-bf5fcd.testnet"
+      },
+      "sentAt": "2026-11-14T16:11:47.668Z",
+      "rpcEndpoint": "https://rpc.testnet.fastnear.com",
+      "rawRpcResponse": {
+        "jsonrpc": "2.0",
+        "error": {
+          "name": "HANDLER_ERROR",
+          "cause": {
+            "info": {},
+            "name": "INVALID_TRANSACTION"
+          },
+          "code": -32000,
+          "message": "Server error",
+          "data": {
+            "TxExecutionError": {
+              "InvalidTxError": {
+                "InvalidAccessKeyError": {
+                  "MethodNameMismatch": {
+                    "method_name": "owner_withdraw"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "id": "redteam"
+      }
+    },
+    {
+      "id": "add-key",
+      "attack": "Add a full-access key to the contract account, to take it over (a fresh random public key; its private half was discarded).",
+      "label": "Rejected by the NEAR runtime before any contract code ran; no block, so no transaction hash exists on chain.",
+      "expectedError": "RequiresFullAccess",
+      "signedTransactionHash": "5CKbwRRwKLTee7FDtquvjinZqUeTsuJ47tyDxKfjXQ3h",
+      "signedBy": "the agent key (signing as the contract account)",
+      "receiver": "gate.minder-gate-owner-bf5fcd.testnet",
+      "method": "AddKey",
+      "args": {
+        "publicKey": "ed25519:ApQ59P2W7yYxgie7dY6AHJ9kqHv6pTUmDkzWyGasK63Q"
+      },
+      "sentAt": "2026-11-14T16:11:47.786Z",
+      "rpcEndpoint": "https://rpc.testnet.fastnear.com",
+      "rawRpcResponse": {
+        "jsonrpc": "2.0",
+        "error": {
+          "name": "HANDLER_ERROR",
+          "cause": {
+            "info": {},
+            "name": "INVALID_TRANSACTION"
+          },
+          "code": -32000,
+          "message": "Server error",
+          "data": {
+            "TxExecutionError": {
+              "InvalidTxError": {
+                "InvalidAccessKeyError": "RequiresFullAccess"
+              }
+            }
+          }
+        },
+        "id": "redteam"
+      }
+    },
+    {
+      "id": "transfer",
+      "attack": "Transfer NEAR out of the contract account with a plain Transfer action.",
+      "label": "Rejected by the NEAR runtime before any contract code ran; no block, so no transaction hash exists on chain.",
+      "expectedError": "RequiresFullAccess",
+      "signedTransactionHash": "BqeawTbtEhjqCFR6CjAPAcsrkbnAxBbw4n2pMhxJ6UYu",
+      "signedBy": "the agent key (signing as the contract account)",
+      "receiver": "gate.minder-gate-owner-bf5fcd.testnet",
+      "method": "Transfer",
+      "args": {
+        "deposit": "1"
+      },
+      "sentAt": "2026-11-14T16:11:47.900Z",
+      "rpcEndpoint": "https://rpc.testnet.fastnear.com",
+      "rawRpcResponse": {
+        "jsonrpc": "2.0",
+        "error": {
+          "name": "HANDLER_ERROR",
+          "cause": {
+            "info": {},
+            "name": "INVALID_TRANSACTION"
+          },
+          "code": -32000,
+          "message": "Server error",
+          "data": {
+            "TxExecutionError": {
+              "InvalidTxError": {
+                "InvalidAccessKeyError": "RequiresFullAccess"
+              }
+            }
+          }
+        },
+        "id": "redteam"
+      }
+    },
+    {
+      "id": "deploy-contract",
+      "attack": "Replace the contract code with a DeployContract action.",
+      "label": "Rejected by the NEAR runtime before any contract code ran; no block, so no transaction hash exists on chain.",
+      "expectedError": "RequiresFullAccess",
+      "signedTransactionHash": "8WovxvvvaX1SUZi997bqCb6GEAeFDNerPoE733MdvkWp",
+      "signedBy": "the agent key (signing as the contract account)",
+      "receiver": "gate.minder-gate-owner-bf5fcd.testnet",
+      "method": "DeployContract",
+      "args": {
+        "code": "4 bytes: the wasm magic number"
+      },
+      "sentAt": "2026-11-14T16:11:48.057Z",
+      "rpcEndpoint": "https://rpc.testnet.fastnear.com",
+      "rawRpcResponse": {
+        "jsonrpc": "2.0",
+        "error": {
+          "name": "HANDLER_ERROR",
+          "cause": {
+            "info": {},
+            "name": "INVALID_TRANSACTION"
+          },
+          "code": -32000,
+          "message": "Server error",
+          "data": {
+            "TxExecutionError": {
+              "InvalidTxError": {
+                "InvalidAccessKeyError": "RequiresFullAccess"
+              }
+            }
+          }
+        },
+        "id": "redteam"
+      }
+    },
+    {
+      "id": "call-signer-directly",
+      "attack": "Call the Chain Signatures signer directly, to get an arbitrary hash signed, bypassing the contract.",
+      "label": "Rejected by the NEAR runtime before any contract code ran; no block, so no transaction hash exists on chain.",
+      "expectedError": "ReceiverMismatch",
+      "signedTransactionHash": "3nh7Rkbrxx7Qvu5ft1rWUYPzWgmrxkeboSRBMkuW5mAx",
+      "signedBy": "the agent key (signing as the contract account)",
+      "receiver": "v1.signer-prod.testnet",
+      "method": "sign",
+      "args": {
+        "request": {
+          "path": "minder-evm-1",
+          "payload_v2": {
+            "Ecdsa": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "domain_id": 0
+        }
+      },
+      "sentAt": "2026-11-14T16:11:48.149Z",
+      "rpcEndpoint": "https://rpc.testnet.fastnear.com",
+      "rawRpcResponse": {
+        "jsonrpc": "2.0",
+        "error": {
+          "name": "HANDLER_ERROR",
+          "cause": {
+            "info": {},
+            "name": "INVALID_TRANSACTION"
+          },
+          "code": -32000,
+          "message": "Server error",
+          "data": {
+            "TxExecutionError": {
+              "InvalidTxError": {
+                "InvalidAccessKeyError": {
+                  "ReceiverMismatch": {
+                    "ak_receiver": "gate.minder-gate-owner-bf5fcd.testnet",
+                    "tx_receiver": "v1.signer-prod.testnet"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "id": "redteam"
+      }
+    }
+  ]
+}

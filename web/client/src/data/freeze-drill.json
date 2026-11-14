@@ -1,0 +1,138 @@
+{
+  "description": "A real incident drill on the live contract: the guardian freezes it, the agent is refused, and resuming has to wait out the timelock.",
+  "contract": "gate.minder-gate-owner-bf5fcd.testnet",
+  "network": "testnet",
+  "guardian": "minder-gate-agent-26d088.testnet",
+  "agentKey": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+  "timelockDelaySeconds": 120,
+  "startedAt": "2026-11-14T16:06:56.268Z",
+  "finishedAt": "2026-11-14T16:09:40.560Z",
+  "agentAllowanceBeforeYocto": "246798533699992300000000",
+  "agentAllowanceAfterYocto": "246544083714432100000000",
+  "finalStatus": "Active",
+  "entries": [
+    {
+      "id": "freeze",
+      "description": "The guardian freezes the contract: one call, instant, no delay.",
+      "signer": "minder-gate-agent-26d088.testnet",
+      "method": "freeze",
+      "args": {},
+      "sentAt": "2026-11-14T16:06:59.512Z",
+      "finalStatus": "SuccessValue",
+      "reason": null,
+      "leg": null,
+      "decisionEvent": null,
+      "failureMessage": null,
+      "tx": "3Gp6QTJSEuWrXZWA14hsfgS9HXt9iPDorafDEQwVPGAs",
+      "explorer": "https://testnet.nearblocks.io/txns/3Gp6QTJSEuWrXZWA14hsfgS9HXt9iPDorafDEQwVPGAs"
+    },
+    {
+      "id": "denied-while-frozen",
+      "description": "The agent, with its valid key, asks to pay the vendor 0.01 NEAR while the contract is frozen.",
+      "signer": "the agent key (signing as the contract account)",
+      "method": "request_local_transfer",
+      "args": {
+        "asset": "Near",
+        "amount": "10000000000000000000000",
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet"
+      },
+      "sentAt": "2026-11-14T16:07:09.189Z",
+      "finalStatus": "Failure",
+      "reason": "Frozen",
+      "leg": null,
+      "decisionEvent": {
+        "method": "request_local_transfer",
+        "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+        "asset": "Near",
+        "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+        "amount": "10000000000000000000000",
+        "decision": "deny",
+        "reason": "Frozen",
+        "leg": "transfer",
+        "legs": [
+          {
+            "leg": "transfer",
+            "asset": "Near",
+            "amount": "10000000000000000000000",
+            "decision": "deny",
+            "reason": "Frozen"
+          }
+        ]
+      },
+      "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: Frozen\"}}}}",
+      "tx": "655ira2u368ZRke3XEfsCTfXj9Mp5oyx8toWxbWNWCsQ",
+      "explorer": "https://testnet.nearblocks.io/txns/655ira2u368ZRke3XEfsCTfXj9Mp5oyx8toWxbWNWCsQ"
+    },
+    {
+      "id": "propose-unfreeze",
+      "description": "The owner proposes Unfreeze. It is a loosening, so it is queued, not applied.",
+      "signer": "minder-gate-owner-bf5fcd.testnet",
+      "method": "propose_change",
+      "args": {
+        "change": "Unfreeze"
+      },
+      "tx": "9Bz2cdhGfFzyHfaDx92ytQPFcWLHMWHyjCycfQfk4EGy",
+      "explorer": "https://testnet.nearblocks.io/txns/9Bz2cdhGfFzyHfaDx92ytQPFcWLHMWHyjCycfQfk4EGy",
+      "pendingChange": {
+        "id": "9",
+        "change": "Unfreeze",
+        "proposed_at": "1794672439567725173",
+        "ready_at": "1794672559567725173"
+      },
+      "delaySeconds": 120
+    },
+    {
+      "id": "execute-unfreeze",
+      "description": "After the 120-second delay the owner executes it, and the contract is Active again.",
+      "signer": "minder-gate-owner-bf5fcd.testnet",
+      "method": "execute_change",
+      "args": {
+        "id": "9"
+      },
+      "tx": "2aWxhRR1oMvoUPKCtewHQdFF63Zcx6jaAgu1UzCsCeDb",
+      "explorer": "https://testnet.nearblocks.io/txns/2aWxhRR1oMvoUPKCtewHQdFF63Zcx6jaAgu1UzCsCeDb"
+    }
+  ],
+  "stateAfter": {
+    "status": "Active",
+    "pendingChanges": 0,
+    "mandateRevoked": false,
+    "mandateGrant": 2,
+    "agentAllowanceYocto": "242964725049542900000000",
+    "contractBalanceYocto": "5939177366253605599999996",
+    "headroom": {
+      "near": {
+        "per_tx_cap": "500000000000000000000000",
+        "window_remaining": "1000000000000000000000000",
+        "budget_remaining": "950000000000000000000000"
+      },
+      "eth": {
+        "per_tx_cap": "5000000000000000",
+        "window_remaining": "15000000000000000",
+        "budget_remaining": "26180000000000000"
+      },
+      "usdc": {
+        "per_tx_cap": "5000000",
+        "window_remaining": "10000000",
+        "budget_remaining": "14000000"
+      }
+    },
+    "budgetUsage": {
+      "near": {
+        "committed": "1050000000000000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "eth": {
+        "committed": "3820000000000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      },
+      "usdc": {
+        "committed": "1000000",
+        "reserved": "0",
+        "budget_epoch": "1"
+      }
+    }
+  }
+}
