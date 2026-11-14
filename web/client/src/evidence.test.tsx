@@ -7,7 +7,7 @@ import { StaticRouter } from 'react-router';
 
 import { App } from './App';
 import { FREEZE_DRILL, RED_TEAM, parseFreezeDrill, parseRedTeam } from './chain/evidence';
-import { nearTxUrl } from './chain/liverun';
+import { LIVE_RUN, nearTxUrl, sepoliaTxUrl } from './chain/liverun';
 import { FreezeDrill } from './components/console/FreezeDrill';
 import { RedTeam } from './components/console/RedTeam';
 import { elapsed, utcClock } from './components/console/time';
@@ -246,5 +246,53 @@ describe('the story on /app', () => {
       assert.ok(!/private[_ ]?key|secret_key|seed[_ ]?phrase|mnemonic/i.test(raw.replace(/its private half was discarded/g, '')), file);
       assert.ok(!/ed25519:[1-9A-HJ-NP-Za-km-z]{80,}|secp256k1:[1-9A-HJ-NP-Za-km-z]{40,48}(?![1-9A-HJ-NP-Za-km-z])/.test(raw), `${file}: no private key shape`);
     }
+  });
+});
+
+describe('the README\'s five-minute path', () => {
+  const readme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+  const section = readme.slice(readme.indexOf('## Verify in 5 minutes'), readme.indexOf('## The problem'));
+
+  it('comes before the problem statement, with five numbered, linked steps', () => {
+    assert.ok(section.length > 500 && readme.indexOf('## Verify in 5 minutes') < readme.indexOf('## The problem'));
+    const steps = section.match(/^\d\. \*\*/gm) ?? [];
+    assert.deepEqual(steps, ['1. **', '2. **', '3. **', '4. **', '5. **']);
+    for (const step of section.split(/^\d\. /m).slice(1)) assert.match(step, /\]\(/, 'each step links to what it checks');
+  });
+
+  it('links the live console, the script that exists, and a refused transaction that is in the red-team evidence', () => {
+    assert.ok(section.includes('https://minder-near.up.railway.app/app'));
+    assert.ok(section.includes('(scripts/verify-deployment.sh)'));
+    const hash = /txns\/([1-9A-HJ-NP-Za-km-z]{43,44})\)/.exec(section)![1]!;
+    const overCap = RED_TEAM.denials.find((d) => d.id === 'over-cap-near')!;
+    assert.equal(hash, overCap.tx);
+    assert.equal(overCap.reason, 'PerTxCapExceeded');
+    assert.ok(section.includes('`Denied: PerTxCapExceeded`'));
+  });
+
+  it('links the Ethereum payment it names to the Sepolia transaction in the recorded run', () => {
+    const eth = LIVE_RUN.payments.find((payment) => payment.kind === 'evm_eth')!;
+    assert.ok(section.includes(`(${sepoliaTxUrl(eth.sepoliaTxHash!)})`));
+    assert.ok(section.includes(LIVE_RUN.recordedProvenance.derivedAddress));
+  });
+
+  it('describes the script\'s output as it is: INCOMPLETE without the build, PASS with it', () => {
+    const script = readFileSync(new URL('../../../scripts/verify-deployment.sh', import.meta.url), 'utf8');
+    assert.ok(script.includes('RESULT: INCOMPLETE') && script.includes('RESULT: PASS'));
+    assert.ok(section.includes('INCOMPLETE (3 passed, 1 skipped)') && section.includes('RESULT: PASS'));
+  });
+
+  it('names the sections and buttons the page has', () => {
+    for (const label of ['Keyless', 'Deployed code', 'Over the cap', 'Unlisted recipient', 'In policy', 'Ask the contract']) {
+      assert.ok(section.includes(label), label);
+    }
+    // The presets are drawn once the live policy has been read in the browser, so their labels are checked at their source.
+    const presets = readFileSync(new URL('./chain/presets.ts', import.meta.url), 'utf8');
+    for (const label of ['Over the cap', 'Unlisted recipient', 'In policy']) assert.ok(presets.includes(`label: '${label}'`), label);
+    const app = renderToString(<StaticRouter location="/app"><App /></StaticRouter>);
+    for (const onPage of ['Ask the contract', '03 / The red-team log', '04 / The real run', '05 / Containment and recovery']) {
+      assert.ok(app.includes(onPage), onPage);
+    }
+    assert.ok(section.includes('section 03') && section.includes('section 04') && section.includes('section 05'));
   });
 });

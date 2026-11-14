@@ -6,12 +6,11 @@ export function LiveDemo() {
   return (
     <DocSection id="live-demo" number="5" title="The live demo">
       <Note title="Status">
-        The surface at <Link to="/app">/app</Link> is live for everything that needs no key: it asks the deployed contract
-        for dry runs, and reads its state, straight from your browser. Sending a new real request from the page, and the
-        guardian&rsquo;s freeze, are not wired yet; in their place the page shows what was recorded on testnet: a red-team
-        log of real attacks the contract refused (most on chain, each with its failed transaction), a real run of NEAR, ETH
-        and USDC payments the contract gated and signed, with a check in your browser that it signed them, and a freeze
-        drill.
+        The surface at <Link to="/app">/app</Link> needs no key and holds none: it asks the deployed contract for dry runs,
+        and reads its state, straight from your browser. It does not send real requests or trigger a freeze. What it shows
+        of those was recorded on testnet: a red-team log of real attacks the contract refused (most on chain, each with its
+        failed transaction), a real run of NEAR, ETH and USDC payments the contract gated and signed, with a check in your
+        browser that it signed them, and a freeze drill.
       </Note>
 
       <Sub id="scenarios" title="Scenarios and methods">
@@ -150,8 +149,8 @@ export function LiveDemo() {
           </li>
           <li>
             <strong>The decision events.</strong> Every request that reaches the policy logs a <code>decision</code>{' '}
-            event, allowed or denied; a denial&rsquo;s event is kept in the failed receipt. The console does not stream these
-            yet; its verdicts come from the dry runs.
+            event, allowed or denied; a denial&rsquo;s event is kept in the failed receipt. The console does not stream these;
+            its verdicts come from the dry runs.
           </li>
           <li>
             <strong>The signed transaction.</strong> An allowed EVM payment emits the <code>evm_payment_signed</code>{' '}
@@ -174,14 +173,12 @@ export function LiveDemo() {
 
       <Sub id="public-vs-operator" title="Public and operator-run">
         <p>
-          The design splits what runs in public from what does not. <strong>Today the public site holds no key at
-          all</strong>: the console makes free view calls from your browser straight to public NEAR nodes, and checks
-          signatures by recomputing them. If it ever sent real requests, the only key a public service would hold is the{' '}
-          <strong>agent key</strong>: the key the whole threat model assumes is compromised, so exposing its requests costs
-          nothing the policy does not already bound. The <strong>guardian</strong> (stop-only) and <strong>owner</strong>{' '}
-          actions are operator-run, and the owner key is never held by a public service. That covers re-arming the demo:
-          unfreezing, topping up a budget and re-issuing the agent&rsquo;s key are owner actions, and the ones that loosen
-          anything wait out the timelock.
+          <strong>The public site holds no key at all</strong>: the console makes free view calls from your browser straight
+          to public NEAR nodes, and checks signatures by recomputing them. The agent&rsquo;s own key stays with the agent.
+          The <strong>guardian</strong> (stop-only) and <strong>owner</strong> actions are operator-run, from the operator&rsquo;s
+          own machine, and neither key is held by the site. That covers the freeze drill and re-arming the demo: unfreezing,
+          topping up a budget and re-issuing the agent&rsquo;s key are owner actions, and the ones that loosen anything wait
+          out the timelock.
         </p>
       </Sub>
     </DocSection>

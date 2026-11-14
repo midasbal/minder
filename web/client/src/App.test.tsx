@@ -260,10 +260,10 @@ describe('the docs', () => {
     assert.ok(text.includes('that new scope has not been re-run through the mutation tool'));
   });
 
-  it('says what the live demo does today, and what is not wired yet', () => {
+  it('says what the live demo does, and that it holds no key and sends no real request', () => {
     const words = visibleText(html);
-    assert.ok(words.includes('live for everything that needs no key'));
-    assert.ok(words.includes('are not wired yet'));
+    assert.ok(words.includes('needs no key and holds none'));
+    assert.ok(words.includes('It does not send real requests or trigger a freeze.'));
     assert.ok(!words.includes('is a placeholder'));
   });
 });
@@ -404,10 +404,22 @@ describe('the docs, against what exists today', () => {
     assert.ok(text.includes('It does rely on the signer being available'));
   });
 
-  it('says today\'s public site holds no key, and does not promise one', () => {
-    assert.ok(text.includes('Today the public site holds no key at all'));
+  it('says the public site holds no key, and promises no service that would', () => {
+    assert.ok(text.includes('The public site holds no key at all'));
     assert.ok(!text.includes('will hold the agent key only'));
-    assert.ok(text.includes('the owner key is never held by a public service'));
+    assert.ok(text.includes('neither key is held by the site'));
+  });
+
+  it('promises nothing that does not exist: no key-holding service, no feature said to be coming', () => {
+    const everything = [
+      text,
+      readFileSync(new URL('../../README.md', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../../README.md', import.meta.url), 'utf8'),
+      readFileSync(new URL('../public/llms.txt', import.meta.url), 'utf8'),
+    ].join('\n');
+    for (const promise of [/would hold/i, /will hold/i, /if it ever/i, /not wired yet/i, /real-request mode/i, /when keys are added/i, /planned for later/i, /agent key only/i, /public service would/i]) {
+      assert.ok(!promise.test(everything), String(promise));
+    }
   });
 
   it('says which scenarios the console covers and which it does not', () => {

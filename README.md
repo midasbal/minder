@@ -7,6 +7,38 @@ The agent never holds funds. It holds one narrow, revocable, time-boxed key that
 own: it can ask the contract to pay, and the contract answers every request with the same deterministic policy.
 Testnet only; see [Status](#status).
 
+## Verify in 5 minutes
+
+Each step checks one claim against the live deployment. The contract is
+[`gate.minder-gate-owner-bf5fcd.testnet`](https://testnet.nearblocks.io/address/gate.minder-gate-owner-bf5fcd.testnet),
+and the console reads it from your browser, with no server of ours in between.
+
+1. **No master key.** Open the [live console](https://minder-near.up.railway.app/app). In the "Keyless" card, the count
+   reads `0 full-access keys` (read from the chain just now, with a link to the explorer). Under "Deployed code" the
+   page hashes the deployed wasm in your browser and says whether it matches the repository build.
+2. **The code is what the repository builds.** Run
+   [`scripts/verify-deployment.sh`](scripts/verify-deployment.sh). With `--skip-build` it takes seconds and needs only
+   `curl`, `jq` and coreutils: it checks the on-chain code hash against the one recorded here and that the account has no
+   full-access key, and reports `INCOMPLETE (3 passed, 1 skipped)` because it did not build. Without the flag it builds the
+   contract from a clean checkout (a few minutes, Rust and `cargo-near` needed) and ends `RESULT: PASS`.
+3. **Attack it.** On the [console](https://minder-near.up.railway.app/app), press the *Over the cap* preset, then *Ask the contract*. The answer is the live
+   contract's own `DENY`, with its reason code (`PerTxCapExceeded`) and the raw RPC request and response behind an expander.
+   Try *Unlisted recipient* too, and *In policy* for an `ALLOW`.
+4. **It refused it on chain.** In the console's red-team log (section 03), open a refused attempt on the explorer, for
+   example the
+   [over-cap NEAR payment](https://testnet.nearblocks.io/txns/AWEyvti14d58haJYsSx6fhbVQWHxzvzeu5EEesLAFnu9). The
+   transaction failed with `Denied: PerTxCapExceeded`, and its receipt's log carries the contract's own `decision`
+   event. The same log shows a limit one dry run cannot reach: two allowed 0.5 NEAR payments fill the window and the
+   third is refused `WindowLimitExceeded`.
+5. **Only this contract signed the Ethereum payments.** In the [real run](https://minder-near.up.railway.app/app)
+   (section 04), the "Proof" block recovers the signer from each raw Sepolia transaction in your browser and shows it
+   equals the contract's configured sender and the address NEAR Chain Signatures derives for this contract
+   (`0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F`). Each payment links to its Sepolia transaction, such as the
+   [0.0002 ETH payment](https://sepolia.etherscan.io/tx/0xc7e3f81c7b5a9550c08a8048c7132fcd72384329b47ec5ff7b0adda05a0fe368).
+
+Optional: the freeze drill (section 05) shows the guardian freezing the contract in one call, the agent refused
+`Frozen`, and the owner having to wait out the 120-second timelock to resume.
+
 ## The problem
 
 Agents are getting wallets. The same properties that make them useful (they read untrusted text, call tools,

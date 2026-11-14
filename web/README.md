@@ -119,5 +119,5 @@ Then open the URL. The footer reads `relay: online` when the page has reached th
 
 ## Notes
 
-- The service holds no state, so any number of restarts is fine. Free tiers that put a service to sleep will delay the first request after idle time, and will not suit the always-on monitor planned for later.
-- When keys are added, they go in the platform's secret environment variables, never in the repository or the image.
+- The service holds no state, so any number of restarts is fine. Free tiers that put a service to sleep delay the first request after idle time.
+- The service holds no key, signs nothing and needs no secrets: its only settings are `PORT` and `HOST`.
