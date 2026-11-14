@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { renderToString } from 'react-dom/server';
 import { StaticRouter } from 'react-router';
 
+import { App } from './App';
 import { AppShell } from './pages/AppShell';
 import { AgentPanel } from './components/console/AgentPanel';
 import { LivePanel } from './components/console/LivePanel';
@@ -1045,7 +1046,7 @@ describe('the real run on the page', () => {
 
   it('states what it is, and the flow, in the opening lines', async () => {
     const words = text(draw(await proven()));
-    assert.ok(words.includes('Not a simulation. Real money moved, and the firewall gated every step.'));
+    assert.ok(words.includes('Not a simulation. Real on-chain payments, settled on testnet.'));
     assert.ok(words.includes('The agent requested it → the firewall allowed it → the contract signed it, with no master key → it settled on Sepolia'));
   });
 
@@ -1137,12 +1138,13 @@ describe('the framing and the headline facts', () => {
     </StaticRouter>,
   );
 
-  it('says in one read that the agent is compromised, holds real money, and what bounds it', () => {
+  it('says in one read that the agent is compromised, holds a key that can move funds, and what bounds it', () => {
     const words = text(app);
-    assert.ok(words.includes('This agent is compromised and holds a key to real money.'));
+    assert.ok(words.includes('This agent is compromised, and the key it holds can move funds.'));
+    assert.ok(words.includes('Everything here runs on NEAR testnet and Sepolia, so the tokens have no real-world value; the transactions and the contract\'s decisions are real.'));
     assert.ok(words.includes('The firewall decides what that key can do'));
     assert.ok(words.includes('AI Security') && words.includes('Bounded loss from a compromised agent'));
-    assert.ok(words.includes('Real-World Money') && words.includes('Real USDC and ETH payments'));
+    assert.ok(words.includes('Real-World Money') && words.includes('Real on-chain USDC and ETH payments on testnet'));
     assert.ok(words.includes('Not a simulation'), 'the real run is on the page');
   });
 
@@ -1330,5 +1332,30 @@ describe('the proof on the page, in one case with a way out to Etherscan', () =>
     assert.ok(!html.includes(SENDER.toLowerCase()), 'no lowercase copy of the address');
     assert.equal((html.match(/open on Etherscan/g) ?? []).length, 2);
     assert.ok(text(html).includes('on Sepolia Etherscan'));
+  });
+});
+
+describe('what the pages say about value', () => {
+  const pages = ['/', '/app', '/docs'].map((url) =>
+    text(renderToString(<StaticRouter location={url}><App /></StaticRouter>)),
+  );
+  const documents = ['../../../README.md', '../../README.md', '../public/llms.txt'].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'));
+
+  it('never calls testnet tokens real money, or claims real-world value', () => {
+    for (const content of [...pages, ...documents]) {
+      for (const claim of [/real money/i, /(?<!no )real-world value/i, /real funds? (were|was|moved)/i, /money moved/i, /key to real/i]) {
+        assert.ok(!claim.test(content), String(claim));
+      }
+    }
+  });
+
+  it('says on /app, where the payments are, that the tokens have no real-world value', () => {
+    assert.ok(pages[1]!.includes('the tokens have no real-world value'));
+    assert.ok(pages[1]!.includes('Real on-chain payments, settled on testnet.'));
+  });
+
+  it('keeps the contrast with the dry-run console: the run is on chain, not a dry run', () => {
+    assert.ok(pages[1]!.includes('Not a simulation.'));
+    assert.ok(pages[1]!.includes('dry runs') || pages[1]!.includes('Ask the contract'));
   });
 });

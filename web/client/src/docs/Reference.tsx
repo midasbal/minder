@@ -83,7 +83,7 @@ export function Reference() {
 
       <Sub id="real-run" title="The recorded real run">
         <p>
-          Real payments the deployed contract gated, signed through Chain Signatures and settled, recorded on testnet on{' '}
+          On-chain payments the deployed contract gated, signed through Chain Signatures and settled, recorded on testnet on{' '}
           {LIVE_RUN.recordedAt.slice(0, 10)}. Every hash opens on an explorer; the{' '}
           <Link to="/app">console</Link> checks who signed the Ethereum ones in your browser.
         </p>

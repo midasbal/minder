@@ -237,7 +237,7 @@ export function RealRun({ run, state, store }: { run: LiveRun; state: ConsoleSta
     <section className="run" aria-labelledby="run-title">
       <p className="label">04 / The real run</p>
       <h2 className="run__title" id="run-title">
-        Not a simulation. Real money moved, and the firewall gated every step.
+        Not a simulation. Real on-chain payments, settled on testnet.
       </h2>
       <p className="run__flow">
         <span>The agent requested it</span>

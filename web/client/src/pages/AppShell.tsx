@@ -20,11 +20,13 @@ export function AppShell() {
           Live demo
         </motion.p>
         <motion.h1 className="page-title" variants={rise}>
-          This agent is compromised and holds a key to real money.
+          This agent is compromised, and the key it holds can move funds.
         </motion.h1>
         <motion.p className="lede" variants={rise}>
           The firewall decides what that key can do. Every payment is gated by the contract, and the most the agent can lose is
-          bounded. Attack it below, read the contract's real limits, then check payments that really moved.
+          bounded. Attack it below, read the contract's real limits, then check payments that were really made on chain.
+          Everything here runs on NEAR testnet and Sepolia, so the tokens have no real-world value; the transactions and the
+          contract's decisions are real.
         </motion.p>
         <motion.ul className="tracks" variants={rise}>
           <li>
@@ -33,7 +35,7 @@ export function AppShell() {
           </li>
           <li>
             <span className="tracks__name">Real-World Money</span>
-            <span className="tracks__what">Real USDC and ETH payments, gated, signed with no master key, and settled on Sepolia.</span>
+            <span className="tracks__what">Real on-chain USDC and ETH payments on testnet, gated, signed with no master key, and settled on Sepolia.</span>
           </li>
         </motion.ul>
       </motion.div>
