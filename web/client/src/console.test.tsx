@@ -12,13 +12,14 @@ import { LivePanel } from './components/console/LivePanel';
 import { prettyJson } from './components/console/RawCall';
 import { RealRun } from './components/console/RealRun';
 import { Verdict } from './components/console/Verdict';
-import { AGENT_PUBLIC_KEY, recipientError } from './chain/assets';
+import { AGENT_PUBLIC_KEY, METHODS, amountHint, recipientError } from './chain/assets';
 import { callView, dryRun, parseDecision } from './chain/contract';
 import { LIVE_RUN, nearTxUrl, parseLiveRun, sepoliaTxUrl, type LiveRun } from './chain/liverun';
 import { presetsFor } from './chain/presets';
 import { addressFromNearKey, allThreeMatch, base58Decode, proveProvenance, recoverSigner } from './chain/provenance';
 import { reasonLine } from './chain/reasons';
-import { RpcFailure, createRpc, type Rpc } from './chain/rpc';
+import { RpcFailure, createJsonRpc, createRpc, type JsonRpc, type Rpc } from './chain/rpc';
+import { SEPOLIA_RPC_ENDPOINTS, confirmSettlement } from './chain/settlement';
 import { readSnapshot, reachedChain } from './chain/snapshot';
 import { createConsoleStore } from './chain/store';
 import { formatUnits, parseUnits } from './chain/units';
@@ -142,6 +143,23 @@ function fakeChain(answers: Answers = chainAnswers(), extra: { keys?: unknown[];
   };
   return { rpc, calls, accounts };
 }
+
+/** A stand-in Sepolia node: answers `eth_getTransactionReceipt` with whatever `answer` gives for the hash asked about. */
+function fakeEvm(answer: (hash: string) => unknown): JsonRpc & { asked: string[] } {
+  const asked: string[] = [];
+  return {
+    asked,
+    async call(method, params) {
+      assert.equal(method, 'eth_getTransactionReceipt');
+      const hash = (params as string[])[0]!;
+      asked.push(hash);
+      const result = answer(hash);
+      return { result, trace: { endpoint: 'https://sepolia.test', request: { method, params }, response: { result }, milliseconds: 2 } };
+    },
+  };
+}
+
+const receipt = (status: '0x1' | '0x0', hash: string) => ({ status, blockNumber: '0xb920f8', transactionHash: hash });
 
 const failing = (message: string): Rpc => ({
   async query() {
@@ -846,6 +864,8 @@ describe('the frontend holds no secret and has no other server', () => {
     const calls = sources.flatMap(({ code }) => [...code.matchAll(/request_type: '([a-z_]+)'/g)].map((match) => match[1]));
     assert.ok(calls.length >= 3);
     for (const type of calls) assert.ok(['call_function', 'view_access_key_list', 'view_code'].includes(type!), type);
+    const ethereum = sources.flatMap(({ code }) => [...code.matchAll(/call\('(eth_[A-Za-z]+)'/g)].map((match) => match[1]));
+    assert.deepEqual(ethereum, ['eth_getTransactionReceipt'], 'the only thing asked of an Ethereum node is a receipt');
     const methods = readFileSync(new URL('./chain/contract.ts', import.meta.url), 'utf8');
     assert.ok(!/broadcast_tx|send_tx|functionCall|FunctionCall/.test(methods));
   });
@@ -980,11 +1000,33 @@ describe('the provenance proof', () => {
     }
   });
 
-  it('compares addresses without regard to case, as the chain returns them in lowercase', async () => {
+  it('writes all three addresses in the same EIP-55 case, though the chain returns the sender in lowercase', async () => {
+    const chain = fakeChain();
+    const proof = await proveProvenance(chain.rpc, LIVE_RUN);
+    assert.notEqual(chain.calls.length, 0);
+    assert.equal(proof.sender.address, SENDER, 'the configured sender, checksummed');
+    assert.equal(proof.derived.address, SENDER);
+    const recovered = proof.recoveries[0]!.recovery;
+    assert.ok(recovered.ok && recovered.signed.address === SENDER);
+    const offline = await proveProvenance(failing('down'), LIVE_RUN);
+    assert.equal(offline.sender.address, SENDER, 'the recorded value is written the same way');
+    assert.equal(offline.derived.address, SENDER);
+  });
+
+  it('still compares without regard to case', async () => {
     const proof = await proveProvenance(fakeChain().rpc, LIVE_RUN);
-    assert.equal(proof.sender.address, SENDER.toLowerCase());
-    assert.notEqual(proof.sender.address, proof.derived.address);
-    assert.equal(allThreeMatch(proof, proof.recoveries[0]!.recovery), true);
+    const recovery = proof.recoveries[0]!.recovery;
+    assert.equal(allThreeMatch({ ...proof, sender: { ...proof.sender, address: SENDER.toLowerCase() } }, recovery), true);
+    assert.equal(allThreeMatch({ ...proof, derived: { ...proof.derived, address: SENDER.toUpperCase().replace('0X', '0x') } }, recovery), true);
+    assert.equal(allThreeMatch({ ...proof, sender: { ...proof.sender, address: '0x000000000000000000000000000000000000dEaD' } }, recovery), false);
+  });
+
+  it('leaves a string that is not an address as it is, so it fails the comparison instead of throwing', async () => {
+    const answers = chainAnswers();
+    answers.get_evm_config = () => ({ signer_id: 'v1.signer-prod.testnet', derivation_path: 'minder-evm-1', sender: 'not an address' });
+    const proof = await proveProvenance(fakeChain(answers).rpc, LIVE_RUN);
+    assert.equal(proof.sender.address, 'not an address');
+    assert.equal(allThreeMatch(proof, proof.recoveries[0]!.recovery), false);
   });
 });
 
@@ -1017,7 +1059,15 @@ describe('the real run on the page', () => {
       if (payment.sepoliaTxHash) assert.ok(html.includes(`href="${sepoliaTxUrl(payment.sepoliaTxHash)}"`), 'the Sepolia transaction');
     }
     assert.equal((html.match(/<span class="is-verified">Succeeded<\/span>/g) ?? []).length, 3);
-    assert.equal((html.match(/rel="noopener noreferrer"/g) ?? []).length, 5, 'three NEAR links and two Sepolia links, all external');
+    for (const payment of LIVE_RUN.payments) {
+      const count = (url: string) => html.split(`href="${url}"`).length - 1;
+      assert.equal(count(nearTxUrl(payment.nearTxHash)), 1, 'a NEAR transaction is linked once');
+      if (payment.sepoliaTxHash) assert.equal(count(sepoliaTxUrl(payment.sepoliaTxHash)), 3, 'on the card, in the proof, and with the raw transaction');
+    }
+    for (const link of html.match(/<a [^>]*href="https:\/\/(testnet\.nearblocks\.io|sepolia\.etherscan\.io)[^>]*>/g) ?? []) {
+      assert.match(link, /target="_blank"/);
+      assert.match(link, /rel="noopener noreferrer"/);
+    }
   });
 
   it('draws the three addresses as a matching chain and concludes the contract is the sole signer', async () => {
@@ -1115,5 +1165,170 @@ describe('the framing and the headline facts', () => {
   it('keeps the view-call names as quiet tags, not headings', async () => {
     const html = renderLive(await readyStore());
     assert.ok(html.includes('<span class="facts__source">get_asset_policies, get_headroom, get_budget_usage</span>'));
+  });
+});
+
+/* ---------- the amount hint ---------- */
+
+describe('the amount hint', () => {
+  it('says the visitor types whole units and the contract receives base units, per asset', () => {
+    assert.deepEqual(METHODS.map(amountHint), [
+      'You enter NEAR; the contract receives yoctoNEAR (24 decimals).',
+      'You enter ETH; the contract receives wei (18 decimals).',
+      'You enter USDC; the contract receives base units, 1 USDC = 1,000,000 (6 decimals).',
+    ]);
+  });
+
+  it('is what the panel shows, and no longer says the amount is sent in base units', () => {
+    const store = createConsoleStore(fakeChain().rpc);
+    const words = text(renderToString(<AgentPanel store={store} state={store.getState()} />));
+    assert.ok(words.includes('You enter NEAR; the contract receives yoctoNEAR (24 decimals).'));
+    assert.ok(!words.includes('Sent to the contract in base units'));
+  });
+});
+
+/* ---------- the live settlement check ---------- */
+
+describe('the settlement check', () => {
+  const hashes = LIVE_RUN.payments.flatMap((payment) => (payment.sepoliaTxHash ? [payment.sepoliaTxHash] : []));
+
+  it('asks a Sepolia node for the receipt of each Ethereum payment and reads the status', async () => {
+    const evm = fakeEvm((hash) => receipt('0x1', hash));
+    const byHash = await confirmSettlement(evm, LIVE_RUN);
+    assert.deepEqual(evm.asked, hashes, 'one receipt per Sepolia transaction, none for the NEAR payment');
+    assert.equal(hashes.length, 2);
+    for (const hash of hashes) assert.deepEqual(byHash[hash], { state: 'success', blockNumber: 0xb920f8 });
+  });
+
+  it('reports a revert as a revert, whatever the record says', async () => {
+    const byHash = await confirmSettlement(fakeEvm((hash) => receipt('0x0', hash)), LIVE_RUN);
+    for (const hash of hashes) assert.equal(byHash[hash]!.state, 'reverted');
+  });
+
+  it('reports a missing receipt, a different transaction, an odd status and a dead node without throwing', async () => {
+    assert.deepEqual((await confirmSettlement(fakeEvm(() => null), LIVE_RUN))[hashes[0]!], { state: 'not-found' });
+    const other = (await confirmSettlement(fakeEvm(() => receipt('0x1', '0x' + '1'.repeat(64))), LIVE_RUN))[hashes[0]!];
+    assert.ok(other?.state === 'unread' && /different transaction/.test(other.reason));
+    const odd = (await confirmSettlement(fakeEvm((hash) => ({ ...receipt('0x1', hash), status: '0x2' })), LIVE_RUN))[hashes[0]!];
+    assert.ok(odd?.state === 'unread' && /status/.test(odd.reason));
+    const dead: JsonRpc = {
+      async call() {
+        throw new RpcFailure('unreachable', 'Could not reach the Sepolia RPC (a.test: HTTP 503)');
+      },
+    };
+    const down = (await confirmSettlement(dead, LIVE_RUN))[hashes[0]!];
+    assert.ok(down?.state === 'unread' && /Could not reach the Sepolia RPC/.test(down.reason));
+  });
+
+  it('fails over between Sepolia nodes like any other node', async () => {
+    const seen: string[] = [];
+    const evm = createJsonRpc({
+      endpoints: SEPOLIA_RPC_ENDPOINTS,
+      label: 'Sepolia RPC',
+      fetchImpl: (async (url: string) => {
+        seen.push(url);
+        if (url.includes('publicnode')) throw new TypeError('down');
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 'minder', result: receipt('0x1', hashes[0]!) }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    assert.equal((await confirmSettlement(evm, LIVE_RUN))[hashes[0]!]?.state, 'success');
+    assert.ok(seen[0]!.includes('publicnode') && seen.some((url) => url.includes('1rpc.io')));
+    await assert.rejects(
+      createJsonRpc({ endpoints: ['https://a.test'], label: 'Sepolia RPC', fetchImpl: (async () => new Response('', { status: 503 })) as unknown as typeof fetch }).call('x', []),
+      /Could not reach the Sepolia RPC/,
+    );
+  });
+
+  it('is kept by the store: asked once, shared while in flight, again only when forced, and never rejects', async () => {
+    const evm = fakeEvm((hash) => receipt('0x1', hash));
+    const store = createConsoleStore(fakeChain().rpc, Date.now, LIVE_RUN, evm);
+    await Promise.all([store.confirm(), store.confirm()]);
+    assert.equal(evm.asked.length, 2);
+    await store.confirm();
+    assert.equal(evm.asked.length, 2);
+    await store.confirm(true);
+    assert.equal(evm.asked.length, 4);
+    const broken = createConsoleStore(fakeChain().rpc, Date.now, LIVE_RUN, {
+      async call() {
+        throw new Error('boom');
+      },
+    });
+    await assert.doesNotReject(broken.confirm());
+    assert.equal(broken.getState().settlement.phase, 'done');
+  });
+});
+
+describe('the settlement on the page', () => {
+  const draw = (store: ReturnType<typeof createConsoleStore>) =>
+    renderToString(
+      <StaticRouter location="/app">
+        <RealRun run={LIVE_RUN} state={store.getState()} store={store} />
+      </StaticRouter>,
+    );
+  const confirmed = async (answer: (hash: string) => unknown) => {
+    const store = createConsoleStore(fakeChain().rpc, Date.now, LIVE_RUN, fakeEvm(answer));
+    await store.confirm();
+    return text(draw(store));
+  };
+
+  it('says each Ethereum payment was confirmed on Sepolia just now, with its block', async () => {
+    const words = await confirmed((hash) => receipt('0x1', hash));
+    assert.equal((words.match(/confirmed on Sepolia just now, block 12,132,600/g) ?? []).length, 2);
+    assert.ok(!words.includes('checking Sepolia now'));
+  });
+
+  it('marks the NEAR payment as recorded: only the Ethereum ones are checked live', async () => {
+    const words = await confirmed((hash) => receipt('0x1', hash));
+    assert.equal((words.match(/Succeeded recorded/g) ?? []).length, 1);
+  });
+
+  it('says it is checking, and shows the recorded status meanwhile, before the check lands', () => {
+    const store = createConsoleStore(fakeChain().rpc, Date.now, LIVE_RUN, fakeEvm(() => null));
+    const words = text(draw(store));
+    assert.equal((words.match(/Succeeded recorded; checking Sepolia now…/g) ?? []).length, 2);
+    assert.ok(!words.includes('confirmed on Sepolia just now'));
+  });
+
+  it('reports a live revert as a revert, and does not show it as succeeded', async () => {
+    const words = await confirmed((hash) => receipt('0x0', hash));
+    assert.equal((words.match(/Reverted on Sepolia confirmed just now/g) ?? []).length, 2);
+    assert.ok(!words.includes('confirmed on Sepolia just now'));
+  });
+
+  it('falls back to the recorded status, with the reason, when the node cannot say, and the page still renders', async () => {
+    const store = createConsoleStore(fakeChain().rpc, Date.now, LIVE_RUN, {
+      async call() {
+        throw new RpcFailure('unreachable', 'Could not reach the Sepolia RPC (a.test: HTTP 503)');
+      },
+    });
+    await store.confirm();
+    const html = draw(store);
+    const words = text(html);
+    assert.equal((words.match(/Succeeded recorded; the live check failed: Could not reach the Sepolia RPC/g) ?? []).length, 2);
+    assert.ok(!words.includes('confirmed on Sepolia just now'));
+    assert.ok(words.includes('Not a simulation') && words.includes('The agent requested it'), 'the rest of the page is unaffected');
+  });
+
+  it('says the node has no receipt, not that the payment failed, when none is found', async () => {
+    const words = await confirmed(() => null);
+    assert.equal((words.match(/recorded; Sepolia has no receipt for it just now/g) ?? []).length, 2);
+  });
+});
+
+describe('the proof on the page, in one case with a way out to Etherscan', () => {
+  it('writes the three addresses identically, and links the transaction beside them', async () => {
+    const store = createConsoleStore(fakeChain().rpc);
+    await store.verify();
+    const html = renderToString(
+      <StaticRouter location="/app">
+        <RealRun run={LIVE_RUN} state={store.getState()} store={store} />
+      </StaticRouter>,
+    );
+    const shown = [...html.matchAll(/<p class="chain__address"><code[^>]*>(0x[0-9a-fA-F]{40})<\/code>/g)].map((match) => match[1]);
+    assert.equal(shown.length, 6, 'three addresses for each of the two Ethereum payments');
+    assert.ok(shown.every((address) => address === SENDER), `all in EIP-55 case, found ${[...new Set(shown)].join(', ')}`);
+    assert.ok(!html.includes(SENDER.toLowerCase()), 'no lowercase copy of the address');
+    assert.equal((html.match(/open on Etherscan/g) ?? []).length, 2);
+    assert.ok(text(html).includes('on Sepolia Etherscan'));
   });
 });

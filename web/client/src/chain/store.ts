@@ -8,7 +8,8 @@
 import { dryRun, type DryRunInput, type DryRunResult } from './contract';
 import { LIVE_RUN, type LiveRun } from './liverun';
 import { proveProvenance, type Proof } from './provenance';
-import { RpcFailure, createRpc, type Rpc } from './rpc';
+import { RpcFailure, createJsonRpc, createRpc, type JsonRpc, type Rpc } from './rpc';
+import { SEPOLIA_RPC_ENDPOINTS, confirmSettlement, type Settlement } from './settlement';
 import { readSnapshot, type Snapshot } from './snapshot';
 
 export type RunState =
@@ -19,6 +20,8 @@ export type RunState =
 
 export type ProofState = { phase: 'idle' } | { phase: 'running'; previous: Proof | null } | { phase: 'done'; proof: Proof };
 
+export type SettlementState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; byHash: Record<string, Settlement> };
+
 export interface ConsoleState {
   /** `loading` with a snapshot present is a refresh: the old reading stays until the new one lands. */
   reading: 'idle' | 'loading' | 'ready';
@@ -26,6 +29,8 @@ export interface ConsoleState {
   run: RunState;
   /** The provenance proof of the recorded real run. */
   proof: ProofState;
+  /** What a Sepolia node says about the run's Ethereum payments, asked now. */
+  settlement: SettlementState;
 }
 
 export interface ConsoleStore {
@@ -36,6 +41,8 @@ export interface ConsoleStore {
   dryRun(input: DryRunInput): Promise<void>;
   /** Computes the provenance proof unless it has been computed; `force` computes it again. */
   verify(force?: boolean): Promise<void>;
+  /** Asks Sepolia for the receipts unless it has; `force` asks again. Never rejects. */
+  confirm(force?: boolean): Promise<void>;
 }
 
 /**
@@ -44,13 +51,19 @@ export interface ConsoleStore {
  */
 export const NEAR_RPC_ENDPOINTS = ['https://rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org'] as const;
 
-const IDLE: ConsoleState = { reading: 'idle', snapshot: null, run: { phase: 'idle' }, proof: { phase: 'idle' } };
+const IDLE: ConsoleState = { reading: 'idle', snapshot: null, run: { phase: 'idle' }, proof: { phase: 'idle' }, settlement: { phase: 'idle' } };
 
-export function createConsoleStore(rpc: Rpc, now: () => number = Date.now, run: LiveRun = LIVE_RUN): ConsoleStore {
+export function createConsoleStore(
+  rpc: Rpc,
+  now: () => number = Date.now,
+  run: LiveRun = LIVE_RUN,
+  evm: JsonRpc = createJsonRpc({ endpoints: SEPOLIA_RPC_ENDPOINTS, label: 'Sepolia RPC' }),
+): ConsoleStore {
   let state: ConsoleState = IDLE;
   const listeners = new Set<() => void>();
   let loading: Promise<void> | null = null;
   let proving: Promise<void> | null = null;
+  let confirming: Promise<void> | null = null;
 
   const set = (next: Partial<ConsoleState>) => {
     state = { ...state, ...next };
@@ -84,6 +97,17 @@ export function createConsoleStore(rpc: Rpc, now: () => number = Date.now, run: 
           proving = null;
         });
       return proving;
+    },
+    confirm(force = false) {
+      if (confirming) return confirming;
+      if (state.settlement.phase === 'done' && !force) return Promise.resolve();
+      set({ settlement: { phase: 'running' } });
+      confirming = confirmSettlement(evm, run)
+        .then((byHash) => set({ settlement: { phase: 'done', byHash } }))
+        .finally(() => {
+          confirming = null;
+        });
+      return confirming;
     },
     async dryRun(input) {
       if (state.run.phase === 'running') return;

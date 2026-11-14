@@ -9,6 +9,7 @@ export function useConsole(): { store: ConsoleStore; state: ConsoleState } {
   useEffect(() => {
     void store.load();
     void store.verify();
+    void store.confirm();
   }, [store]);
   return { store, state };
 }

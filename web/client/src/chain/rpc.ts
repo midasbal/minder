@@ -1,5 +1,6 @@
 /*
-  A small JSON-RPC client for the NEAR `query` method, used straight from the browser.
+  A small JSON-RPC client, used straight from the browser: for NEAR's `query` method, and for reading a transaction
+  receipt from an Ethereum node.
 
   It tries the endpoints in order, remembers the one that last worked, and moves to the next on a network
   failure, a timeout, a non-2xx answer or a node-side error that another node may not share. An error that
@@ -32,11 +33,18 @@ export interface Rpc {
   query(params: Record<string, unknown>): Promise<{ result: unknown; trace: RpcTrace }>;
 }
 
+/** Any JSON-RPC method, for nodes that are not NEAR's. */
+export interface JsonRpc {
+  call(method: string, params: unknown): Promise<{ result: unknown; trace: RpcTrace }>;
+}
+
 export interface RpcOptions {
   endpoints: readonly string[];
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxConcurrent?: number;
+  /** What the nodes are called in an error message. */
+  label?: string;
 }
 
 /** Node-side conditions that say "this node could not answer", as opposed to "the chain says no". */
@@ -50,8 +58,9 @@ function describeRpcError(error: unknown): { message: string; retryable: boolean
   return { message, retryable: cause !== undefined && RETRYABLE_CAUSES.has(cause) };
 }
 
-export function createRpc(options: RpcOptions): Rpc {
-  const { endpoints, timeoutMs = 8000, maxConcurrent = 4 } = options;
+/** A client for any JSON-RPC node, trying the endpoints in order. */
+export function createJsonRpc(options: RpcOptions): JsonRpc {
+  const { endpoints, timeoutMs = 8000, maxConcurrent = 4, label = 'RPC' } = options;
   if (endpoints.length === 0) throw new Error('at least one RPC endpoint is required');
   const fetchImpl = options.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
 
@@ -112,8 +121,8 @@ export function createRpc(options: RpcOptions): Rpc {
   }
 
   return {
-    async query(params) {
-      const request = { jsonrpc: '2.0', id: 'minder', method: 'query', params };
+    async call(method, params) {
+      const request = { jsonrpc: '2.0', id: 'minder', method, params };
       await acquire();
       try {
         const failures: string[] = [];
@@ -130,10 +139,16 @@ export function createRpc(options: RpcOptions): Rpc {
           lastKind = outcome.kind;
           failures.push(`${new URL(endpoint).host}: ${outcome.message}`);
         }
-        throw new RpcFailure(lastKind, `Could not reach the NEAR RPC (${failures.join('; ')})`);
+        throw new RpcFailure(lastKind, `Could not reach the ${label} (${failures.join('; ')})`);
       } finally {
         release();
       }
     },
   };
+}
+
+/** A client for NEAR's `query` method. */
+export function createRpc(options: RpcOptions): Rpc {
+  const rpc = createJsonRpc({ label: 'NEAR RPC', ...options });
+  return { query: (params) => rpc.call('query', params) };
 }

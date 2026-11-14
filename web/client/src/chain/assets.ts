@@ -51,6 +51,8 @@ export interface MethodSpec {
   symbol: string;
   decimals: number;
   recipient: 'near' | 'evm';
+  /** What the contract receives, as the page converts what the visitor types. */
+  baseUnit: string;
   /** The view that answers it, and the placeholder for the recipient. */
   view: 'dry_run' | 'dry_run_evm' | 'dry_run_evm_token';
   placeholder: string;
@@ -63,6 +65,7 @@ export const METHODS: readonly MethodSpec[] = [
     symbol: 'NEAR',
     decimals: 24,
     recipient: 'near',
+    baseUnit: 'yoctoNEAR',
     view: 'dry_run',
     placeholder: 'account.testnet',
   },
@@ -72,6 +75,7 @@ export const METHODS: readonly MethodSpec[] = [
     symbol: 'ETH',
     decimals: 18,
     recipient: 'evm',
+    baseUnit: 'wei',
     view: 'dry_run_evm',
     placeholder: '0x…',
   },
@@ -81,10 +85,16 @@ export const METHODS: readonly MethodSpec[] = [
     symbol: 'USDC',
     decimals: 6,
     recipient: 'evm',
+    baseUnit: 'base units, 1 USDC = 1,000,000',
     view: 'dry_run_evm_token',
     placeholder: '0x…',
   },
 ];
+
+/** What the amount box means: the visitor types whole units; the contract is sent base units. */
+export function amountHint(spec: MethodSpec): string {
+  return `You enter ${spec.symbol}; the contract receives ${spec.baseUnit} (${spec.decimals} decimals).`;
+}
 
 export function methodSpec(id: MethodId): MethodSpec {
   const spec = METHODS.find((method) => method.id === id);

@@ -9,7 +9,7 @@ The pages are `/` (the overview), `/app` (the live console: dry runs against the
 `GET /health` today. Any other GET that is not under `/api/` and does not name a file is answered with the app's
 `index.html`, so a deep link or a reload on `/app` or `/docs` works; an unknown `/api/*` path or a missing asset is a JSON
 404. The relay itself touches no key, chain or contract. The `/app` console does not use the relay: the browser calls public NEAR
-RPC nodes directly, with views only (no signing, no keys; viem is used only to read a signature), so there is nothing server-side to compromise.
+RPC nodes directly, with views only (no signing, no keys; viem is used only to read a signature), and a public Sepolia node for the receipts of the recorded run, so there is nothing server-side to compromise.
 
 ```
 web/

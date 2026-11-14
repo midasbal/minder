@@ -81,24 +81,34 @@ export interface Proof {
   recoveries: Array<{ index: number; recovery: Recovery }>;
 }
 
+/** The address in EIP-55 checksum case, so the three shown are written alike. A string that is not an address is left as it is. */
+async function checksum(address: string): Promise<string> {
+  const { getAddress } = await import('viem');
+  try {
+    return getAddress(address);
+  } catch {
+    return address;
+  }
+}
+
 const reasonOf = (error: unknown) => (error instanceof RpcFailure ? error.message : `unexpected answer (${(error as Error).message})`);
 
 export async function proveProvenance(rpc: Rpc, run: LiveRun): Promise<Proof> {
   const recorded = run.recordedProvenance;
   let signer = recorded.signer;
   let path = recorded.derivationPath;
-  let sender: Sourced = { address: recorded.configuredSender, source: 'recorded', reason: null };
+  let sender: Sourced = { address: await checksum(recorded.configuredSender), source: 'recorded', reason: null };
   try {
     const config = (await callView<{ sender: string; signer_id: string; derivation_path: string } | null>(rpc, 'get_evm_config')).value;
     if (config === null) throw new RpcFailure('rpc', 'the contract has no EVM configuration');
     signer = config.signer_id;
     path = config.derivation_path;
-    sender = { address: config.sender, source: 'live', reason: null };
+    sender = { address: await checksum(config.sender), source: 'live', reason: null };
   } catch (error) {
     sender = { ...sender, reason: reasonOf(error) };
   }
 
-  let derived: Sourced = { address: recorded.derivedAddress, source: 'recorded', reason: null };
+  let derived: Sourced = { address: await checksum(recorded.derivedAddress), source: 'recorded', reason: null };
   try {
     const key = (await callView<string>(rpc, 'derived_public_key', { path, predecessor: CONTRACT_ACCOUNT, domain_id: 0 }, signer)).value;
     derived = { address: await addressFromNearKey(key), source: 'live', reason: null };

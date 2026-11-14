@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 
-import { METHODS, assetOfMethod, methodSpec, recipientError, type MethodId } from '../../chain/assets';
+import { METHODS, amountHint, assetOfMethod, methodSpec, recipientError, type MethodId } from '../../chain/assets';
 import { CONTRACT_ACCOUNT } from '../../chain/contract';
 import { presetsFor, type Preset } from '../../chain/presets';
 import type { ConsoleState, ConsoleStore } from '../../chain/store';
@@ -118,7 +118,7 @@ export function AgentPanel({ store, state }: Props) {
             />
             <span className="amount__unit">{spec.symbol}</span>
           </div>
-          <p className="control__hint">Sent to the contract in base units ({spec.decimals} decimals).</p>
+          <p className="control__hint">{amountHint(spec)}</p>
         </div>
 
         {problem && (

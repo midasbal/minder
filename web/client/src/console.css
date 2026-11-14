@@ -824,3 +824,13 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.result__note,
+.proof__tx {
+  font-size: 0.78rem;
+  color: var(--ink-2);
+}
+
+.proof__tx a {
+  color: var(--ink);
+}

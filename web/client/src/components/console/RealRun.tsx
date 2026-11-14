@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { allThreeMatch, type Proof, type Sourced } from '../../chain/provenance';
 import { nearTxUrl, sepoliaTxUrl, type LiveRun, type RecordedPayment } from '../../chain/liverun';
 import { CONTRACT_ACCOUNT } from '../../chain/contract';
+import type { Settlement } from '../../chain/settlement';
 import type { ConsoleState, ConsoleStore } from '../../chain/store';
 import { ExternalLink } from '../ExternalLink';
 
@@ -11,9 +12,44 @@ const shortAddress = (address: string) => `${address.slice(0, 8)}…${address.sl
 
 const ASSET: Record<RecordedPayment['kind'], string> = { near_transfer: 'NEAR', evm_eth: 'ETH on Sepolia', evm_erc20: 'USDC on Sepolia' };
 
-function Settled({ payment }: { payment: RecordedPayment }) {
-  const ok = payment.status === 'success';
-  return ok ? <span className="is-verified">Succeeded</span> : <span>Status: {payment.status}</span>;
+/** How a payment ended: what a Sepolia node says now where it can, and otherwise the recorded status, said to be so. */
+function Settled({ payment, state }: { payment: RecordedPayment; state: ConsoleState }) {
+  const recorded = payment.status === 'success' ? <span className="is-verified">Succeeded</span> : <span>Status: {payment.status}</span>;
+  if (payment.sepoliaTxHash === null) {
+    return (
+      <>
+        {recorded} <span className="result__note">recorded</span>
+      </>
+    );
+  }
+  if (state.settlement.phase !== 'done') {
+    return (
+      <>
+        {recorded} <span className="result__note">recorded; checking Sepolia now…</span>
+      </>
+    );
+  }
+  const live: Settlement | undefined = state.settlement.byHash[payment.sepoliaTxHash];
+  if (live?.state === 'success') {
+    return (
+      <>
+        <span className="is-verified">Succeeded</span> <span className="result__note">confirmed on Sepolia just now, block {live.blockNumber.toLocaleString('en-US')}</span>
+      </>
+    );
+  }
+  if (live?.state === 'reverted') {
+    return (
+      <>
+        <span>Reverted on Sepolia</span> <span className="result__note">confirmed just now, block {live.blockNumber.toLocaleString('en-US')}; the record said {payment.status}</span>
+      </>
+    );
+  }
+  const why = live?.state === 'unread' ? `the live check failed: ${live.reason}` : 'Sepolia has no receipt for it just now';
+  return (
+    <>
+      {recorded} <span className="result__note">recorded; {why}</span>
+    </>
+  );
 }
 
 function Row({ name, children }: { name: string; children: ReactNode }) {
@@ -25,7 +61,7 @@ function Row({ name, children }: { name: string; children: ReactNode }) {
   );
 }
 
-function Payment({ payment }: { payment: RecordedPayment }) {
+function Payment({ payment, state }: { payment: RecordedPayment; state: ConsoleState }) {
   return (
     <li className="payment">
       <p className="payment__what">
@@ -49,7 +85,7 @@ function Payment({ payment }: { payment: RecordedPayment }) {
           </Row>
         )}
         <Row name="Result">
-          <Settled payment={payment} />
+          <Settled payment={payment} state={state} />
         </Row>
       </dl>
     </li>
@@ -90,6 +126,14 @@ function PaymentProof({ payment, index, proof }: { payment: RecordedPayment; ind
       <h4 className="proof__title">
         {ASSET[payment.kind]}, {payment.amountDisplay}
       </h4>
+      {payment.sepoliaTxHash !== null && (
+        <p className="proof__tx">
+          On Sepolia:{' '}
+          <ExternalLink href={sepoliaTxUrl(payment.sepoliaTxHash)}>
+            <code>{shortHash(payment.sepoliaTxHash)}</code>, open on Etherscan
+          </ExternalLink>
+        </p>
+      )}
       {!recovery.ok ? (
         <p className="unread">Couldn't check this payment: {recovery.error}</p>
       ) : (
@@ -141,6 +185,15 @@ function PaymentProof({ payment, index, proof }: { payment: RecordedPayment; ind
           </dl>
         )}
         <pre className="raw__code">{payment.rawTx}</pre>
+        {payment.sepoliaTxHash !== null && (
+          <p className="proof__tx">
+            This is the transaction{' '}
+            <ExternalLink href={sepoliaTxUrl(payment.sepoliaTxHash)}>
+              <code>{payment.sepoliaTxHash}</code>
+            </ExternalLink>{' '}
+            on Sepolia Etherscan.
+          </p>
+        )}
       </details>
     </li>
   );
@@ -197,7 +250,7 @@ export function RealRun({ run, state, store }: { run: LiveRun; state: ConsoleSta
       </p>
       <ol className="payments">
         {run.payments.map((payment) => (
-          <Payment key={payment.nearTxHash} payment={payment} />
+          <Payment key={payment.nearTxHash} payment={payment} state={state} />
         ))}
       </ol>
       <p className="run__note">
