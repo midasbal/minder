@@ -25,6 +25,8 @@ contract's own account (see Agent authority).
 | `src/guardian_tests.rs` | Unit tests of the guardian role |
 | `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs`, `src/mandate_tests.rs` | Unit tests under the mocked environment: reserve/dispatch/settlement, custody, the EVM gate, and the agent key's provisioning, revocation and authentication |
 | `src/test_support.rs` | Fixtures shared by those unit tests |
+| `deploy/deploy-keyless.sh` | The keyless deployment (one transaction, no `AddKey`) and a key audit, with near-cli-rs. Testnet only |
+| `tests/deploy.rs` | The keyless deployment against the production wasm in a sandbox |
 | `../test-contracts/mock-ft` | Test double for a NEP-141 token: records `ft_transfer`, can fail or stretch it over blocks, and `ft_transfer_call` drives a receiver's `ft_on_transfer`. Never deployed |
 | `../test-contracts/mock-signer` | Test double for Chain Signatures: enforces the real `sign` preconditions (1 yocto, 15 Tgas, domain 0), records requests, and returns a fixed valid signature, a bad one, valid JSON of the wrong shape, a non-JSON blob, a genuine signature padded past 4096 bytes, or fails; can stretch the answer over a fixed number of blocks (`set_slow_hops`) or hold a request, yielded, until the test calls `release_held` (`set_hold`), which is how a test keeps a request in flight without depending on timing. Never deployed |
 
@@ -233,7 +235,7 @@ the deployer's key and any other key on the account carry a different key and ne
 ```
 owner account (separate, init rejects owner == contract)   -- owner methods, own auth
 contract account  minder.near
-  full-access key ........ the deployer's; REMOVED after deploy + init (deployment step below)
+  full-access key ........ none, ever: the account is created keyless (see Keyless deployment)
   function-call key ...... the agent's; receiver = minder.near,
                             method_names = request_local_transfer, request_evm_payment, request_evm_token_payment,
                             allowance = 0.25 NEAR; added by grant_mandate, deleted by revoke_mandate
@@ -327,26 +329,21 @@ must attach what a request needs, not the 300 Tgas maximum; at the mainnet floor
 per gas) 0.25 NEAR covers eight 300 Tgas calls, and the sandbox price is ten times that. The allowance
 does not reset: re-issuing the key (revoke, then grant) is what restores it.
 
-**Deployment (required).** The containment claim holds only if no full-access key remains on the
-contract account. The contract does not delete its own key from a method; this is a deployment step:
+**Keyless deployment (required).** The containment claim holds only if the contract account has **no
+full-access key**, at any time. Minder is therefore deployed by **one transaction with exactly four actions
+and no `AddKey`**: `CreateAccount`, `Transfer`, `DeployContract` and the `init` `FunctionCall`, signed by the
+owner. There is no moment at which a key exists to be removed. See "Keyless deployment" below for what that
+guarantees, what it costs, and the proof; `deploy/deploy-keyless.sh` sends the sequence and `tests/deploy.rs`
+proves it in a sandbox.
 
-1. Deploy the wasm to a fresh account and call `init` (in one batched transaction, with the
-   deployer's key). `init` rejects an owner equal to the contract account, so the owner is always a
-   separate account.
-2. Remove the deployer's full-access key: `near account delete-keys <contract> --public-keys <key>`
-   (or a `DeleteKey` action signed by that key).
-3. Verify: `near account list-keys <contract>` shows no full-access key, and after the first grant
-   exactly one function-call key with the receiver, methods and allowance above.
-
-near-sdk exposes no host function to read an account's keys, so there is no on-chain view or assertion
-for this; step 3 is manual. `tests/agent_key.rs` demonstrates both sides: with the deployer key still
-on the account, its holder passes the `#[private]` guard of the callbacks (the guard only checks the
-predecessor), and after the removal the account holds only the agent's key while the owner keeps full
-control. Removing the key means the contract can no longer be redeployed or upgraded; the owner's
-recovery path is `owner_withdraw`.
+Before this, the deployment was three steps (deploy and `init` with the deployer's full-access key, then a
+`DeleteKey`, then a manual check), which left a full-access key on the account for the time in between and
+relied on the deployer remembering the second step. That path still works and is still covered by
+`tests/agent_key.rs` (`removing_the_deployer_key_leaves_only_the_agent_key_…`), but a keyless deployment never
+has the key to remove.
 
 **Residual risks.** (a) If the owner grants a key that already exists on the account, such as the
-deployer's own, the addition fails silently and that key is the agent: the owner supplies a fresh key.
+deployer's own (on a keyless account there is none), the addition fails silently and that key is the agent: the owner supplies a fresh key.
 (b) The agent key can burn its allowance on denied calls. (c) The runtime checks the allowance against prepaid gas at the current price (above), so a request attached with too much gas is refused before it runs.
 
 **State schema.** `Mandate` changed twice: `agent: AccountId` became `agent_key: PublicKey`, and it
@@ -360,6 +357,92 @@ an optional `reset_budget` (a call without it still works), and so did `AssetId`
 `on_sign_complete` arguments, now `(Vec<(AssetId, u128)>, Eip1559Tx)`), and `set_asset_policy` takes an optional `epoch_budget`; a call without it still
 works. The JSON of an existing `grant_mandate` call with a key still works unchanged (no `scope`
 means unscoped).
+
+### Keyless deployment
+
+**The property.** The contract account never holds a full-access key. It is created by a transaction whose
+actions are `CreateAccount`, `Transfer`, `DeployContract` and `FunctionCall(init)`, in that order, with no
+`AddKey`. As a consequence **nobody, the deployer included, can act as the account, redeploy it or change its
+code**: a transaction signed as the account needs a key of the account, and it has none, so the protocol refuses
+it before anything runs (the node's `AccessKeyNotFound`, or the client's own `UnknownAccessKey`). The contract is the sole authority over its own account. The only
+keys it ever holds are the **method-restricted function-call keys that the contract adds to itself** in
+`grant_mandate`: receiver the account itself, methods exactly `request_local_transfer`, `request_evm_payment` and
+`request_evm_token_payment`, a fixed 0.25 NEAR gas allowance. A function-call key cannot deploy, add or delete a
+key, or transfer (`RequiresFullAccess`), so the account only ever gains keys that are strictly less than full
+access, and `revoke_mandate` (or a re-grant) deletes them: after a revoke the account is keyless again.
+
+It also closes a smaller gap. The `#[private]` callbacks check only that the predecessor is the contract
+account; with a full-access key on the account, its holder is that predecessor and could call them
+(`tests/agent_key.rs` shows this). With no such key, only the contract's own promises reach them.
+
+**Owner governance is unaffected.** Owner methods authenticate by `predecessor_account_id == config.owner`
+(`assert_owner`), and the guardian's three methods by the guardian's account. Both are calls from the owner's
+and the guardian's own accounts, signed by their own keys. No key on the contract account takes part, so there
+is nothing for governance to lose: `freeze`, `unfreeze`, every policy change, the timelock, `grant_mandate`,
+`revoke_mandate` and the recovery withdrawals all work on a keyless account (`tests/deploy.rs` runs several of
+them, and a stranger is still refused).
+
+**What it costs, stated plainly.**
+
+- **The signer is the owner, permanently.** With no key on the new account, the only account that can call
+  `init` inside the batch is the batch's signer, and `init` requires its caller to be the owner it is given.
+  The owner is fixed in `Config` (there is no `set_owner`). So whoever signs the deployment is the owner for
+  good; naming another account as the owner makes `init`, and so the whole batch, fail. A multisig or DAO owner
+  has to be the signer (near-cli-rs can submit the transaction as a DAO proposal). The sandbox test
+  `only_the_batch_signer_can_be_the_owner_…` shows the refusal.
+- **No upgrade path.** Nobody can redeploy, so a bug cannot be fixed in place: the remedy is a new account and
+  moving funds with the owner's recovery methods (`owner_withdraw`, `owner_evm_withdraw`,
+  `owner_evm_token_withdraw`), which are independent of the agent and of the account's keys.
+- **Storage is funded up front.** The `Transfer` in the same batch pays the storage staking of the wasm (about
+  4.3 NEAR for the 428 KB production build at 1 NEAR per 100 KB) and leaves room for the agent key's allowance and
+  gas. Anyone can add more later (`deposit`, or a plain transfer), since no key is needed to receive.
+- **The account is a sub-account of the signer** (`minder.<owner>`): only a parent can create a sub-account.
+
+**Why a single batch, and why it is safe to rely on.** The actions of one transaction run in one receipt on the new
+account, so they succeed or fail together. A failing `init` therefore also undoes the account creation, the
+deployment and the transfer: no keyless, uninitialized account is left behind and the funding is refunded
+(`tests/deploy.rs::a_failed_init_in_the_batch_leaves_no_account_behind`). And there is no gap in which someone
+else could initialize the contract first (`init` lets any account claim ownership of an uninitialized
+contract, which is why `init` is single-use and why deploy and `init` must not be separate transactions).
+
+**Proved in a sandbox** (`tests/deploy.rs`, six tests, on the production wasm: no test feature, byte-compared with
+the wasm that was built):
+
+| Test | What it shows |
+| --- | --- |
+| `one_batch_with_no_add_key_deploys_an_initialized_contract_with_no_full_access_key` | The four-action batch succeeds; the account has **zero keys** (so zero full-access); it is initialized with the signer as owner; the code is the production wasm; the sandbox-only `test_record_spend` is absent |
+| `nobody_can_act_as_the_keyless_account_not_even_the_deployer` | The deployer's key signing as the account is refused (an unknown key) for a redeploy, an `AddKey` and a transfer; code and keys unchanged |
+| `the_account_only_ever_gains_function_call_keys_restricted_to_the_request_methods` | Positive control: after `grant_mandate` the account has exactly one key, a function-call key with receiver the account, the three request methods and the 0.25 NEAR allowance, not full access; that key cannot deploy or add a key; owner `freeze`, `unfreeze` and `set_asset_policy` work and a stranger is refused; after `revoke_mandate` the account has no key again |
+| `a_failed_init_in_the_batch_leaves_no_account_behind` | A batch whose `init` fails leaves no account and refunds the funding; the same names then deploy properly |
+| `only_the_batch_signer_can_be_the_owner_so_nobody_can_claim_a_keyless_contract` | Naming another owner fails, and no account is left |
+| `control_the_same_batch_with_an_add_key_leaves_a_full_access_key_so_the_check_can_fail` | Negative control: the same batch with one `AddKey` leaves a full-access key, which the same check sees, so the zero-key assertions are not vacuous |
+
+**The deploy script** `deploy/deploy-keyless.sh` sends the same sequence with near-cli-rs
+(`near transaction construct-transaction … add-action create-account add-action transfer add-action
+deploy-contract use-file … with-init-call init …`), taking the signer (the owner), the new account id, the funding
+amount and `init`'s arguments (`--window-len`, `--num-buckets`, and optionally `--timelock-delay`,
+`--near-treasury`, `--evm-treasury`, `--guardian`) as parameters:
+
+```
+deploy/deploy-keyless.sh deploy --signer owner.testnet --account minder.owner.testnet --fund "10 NEAR" \
+    --window-len 86400000000000 --num-buckets 24 [--timelock-delay NS] [--guardian ID] ...   # prints, sends nothing
+deploy/deploy-keyless.sh deploy ... --send                                                      # sends, then verifies
+deploy/deploy-keyless.sh verify --account minder.owner.testnet                                  # key audit only
+```
+
+It prints the full command and sends nothing unless `--send` is given. It refuses any network but `testnet`, a
+signer that is not the account's parent, a wasm built with the `test-helpers` feature (its export is a plain
+string in the wasm), a window that does not divide into its buckets, and a malformed treasury. `verify` reads the
+account's keys over RPC and fails unless they are only restricted keys: no full-access key, and every
+function-call key limited to the account itself, to exactly the three request methods, with a finite allowance.
+near-sdk exposes no host function to read an account's keys, so this audit is off-chain by necessity.
+
+What has and has not been checked of the script: its argument guards, the printed command and `verify` (against
+fixtures in the NEAR RPC format: no keys, a restricted key, a full-access key, a key with the wrong methods, an
+unlimited allowance and the wrong receiver) were run offline, and near-cli-rs 0.31.1 parses the printed command
+through to `send` (run with `--help`), reporting the action chain `create-account`, `transfer`, `deploy-contract`
+with `with-init-call` and no `add-key`. The **`--send` path has not been run against any network**; the
+sandbox test is what proves the action sequence, and a first run on testnet is what will prove the script.
 
 ## Owner timelock (asymmetric)
 
@@ -1098,7 +1181,7 @@ same checks without the recipient allowlist and without the scope. A request tha
 Unit tests are in `src/window.rs`, `src/policy.rs`, `src/evm.rs`, `src/gate.rs`,
 `src/lifecycle_tests.rs`, `src/custody_tests.rs`, `src/gate_tests.rs` and `src/mandate_tests.rs`.
 Integration tests are in `tests/invariants.rs` (policy), `tests/transfers.rs` (local transfer path),
-`tests/custody.rs` (custody), `tests/evm_gate.rs` (the gate) and `tests/agent_key.rs` (the agent key),
+`tests/custody.rs` (custody), `tests/evm_gate.rs` (the gate), `tests/agent_key.rs` (the agent key) and `tests/deploy.rs` (the keyless deployment),
 and run against a near-workspaces sandbox. In the sandbox the agent signs as the contract account
 with its real function-call key.
 
@@ -1130,6 +1213,7 @@ with its real function-call key.
 | Expiry denies through `evaluate` and leaves the key | unit `mandate_tests::an_expired_mandate_denies_even_for_its_own_key`; sandbox `agent_key::an_expired_mandate_denies_through_evaluate_while_the_key_stays_on_the_account` |
 | `init` rejects the contract account as owner | unit `mandate_tests::init_rejects_the_contract_account_as_owner`; sandbox `agent_key::init_rejects_the_contract_account_as_the_owner` |
 | Deployment step: with the deployer key removed the account holds only the agent key and owner control is intact | sandbox `agent_key::removing_the_deployer_key_leaves_only_the_agent_key_and_control_stays_with_the_owner` |
+| Keyless deployment: one batch with no `AddKey` leaves the account with no full-access key, nobody can act as it, it only ever gains the contract's own restricted keys, and a failed `init` leaves no account | sandbox `deploy::*` (six tests, see Keyless deployment) |
 | Non-owner calls to owner-only methods revert | `owner_only_methods_revert_for_everyone_else` |
 | Second `init` reverts; takeover by outsider reverts | `second_init_reverts`, `init_rejects_callers_other_than_owner_or_contract_and_bad_windows` |
 | Revoked stays revoked until an explicit new grant | `revoked_mandate_stays_revoked_until_a_new_grant`, `no_mandate_is_denied_and_revoking_nothing_reverts` |
@@ -1685,8 +1769,8 @@ readiness window, so the repository's `.cargo/config.toml` sets it to 90 seconds
 invocation under the repository (an environment variable you set yourself still wins). Waiting longer
 costs nothing when a node is quick, since the wait ends at its first answer. It was verified by three
 consecutive full runs of `contract/test.sh` when it was added, each exit 0 with no start-up failure and the
-default thread count (so no cap on test threads was needed). The most recent full run, after the budget and headroom views were added:
-297 unit, 17 `agent_key`, 11 `custody`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
+default thread count (so no cap on test threads was needed). The most recent full run, after the keyless deployment was added:
+297 unit, 17 `agent_key`, 11 `custody`, 6 `deploy`, 2 `evm_corpus`, 38 `evm_gate`, 15 `invariants`, 4
 `method_surface`, 9 `signing_confinement`, 11 `timelock` and 8 `transfers` tests passed. Before the setting, runs under load intermittently failed whole binaries
 (`custody`, `invariants`) at node start-up. The Kani proofs (`contract/kani`, see Formal verification) are separate and are not
 part of the suite.

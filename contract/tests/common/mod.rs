@@ -30,6 +30,7 @@ pub const PER_TX_CAP: u128 = 50;
 pub const WINDOW_LIMIT: u128 = 100;
 
 static WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
+static PRODUCTION_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
 static MOCK_FT_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
 static MOCK_SIGNER_WASM: OnceCell<Vec<u8>> = OnceCell::const_new();
 
@@ -67,6 +68,36 @@ async fn contract_wasm() -> &'static Vec<u8> {
         )
     })
     .await
+}
+
+/// The production contract exactly as `cargo near build non-reproducible-wasm
+/// --locked` produces it: no test feature, ABI embedded. It is built with the
+/// same command, target directory and output directory as the method-surface
+/// test, so the two share one cached build. For tests of the deployment itself,
+/// which must run the wasm that ships.
+pub async fn production_wasm() -> &'static Vec<u8> {
+    PRODUCTION_WASM
+        .get_or_init(|| async {
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            let out_dir = format!("{manifest_dir}/target/surface-wasm");
+            let output = Command::new("cargo")
+                .args(["near", "build", "non-reproducible-wasm", "--locked"])
+                .args(["--out-dir", &out_dir])
+                .env(
+                    "CARGO_TARGET_DIR",
+                    format!("{manifest_dir}/target/surface-build"),
+                )
+                .current_dir(manifest_dir)
+                .output()
+                .expect("cargo near must be installed");
+            assert!(
+                output.status.success(),
+                "building the production contract failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::read(format!("{out_dir}/minder.wasm")).expect("built wasm missing")
+        })
+        .await
 }
 
 async fn mock_ft_wasm() -> &'static Vec<u8> {

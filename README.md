@@ -5,6 +5,8 @@ a narrow, revocable, time-boxed authority; the contract is the only path to fund
 that breaks policy. Testnet only.
 
 - `contract/`: the contract (Rust, near-sdk). Start with `contract/DESIGN.md`.
+- `contract/deploy/`: the keyless deployment script (`deploy-keyless.sh`): the contract account is created with no full-access key,
+  so nobody can act as it or change its code. Testnet only; see `contract/DESIGN.md`, "Keyless deployment".
 - `test-contracts/`: test doubles used by the sandbox tests (a token and a signer). Never deployed.
 - `spikes/`: throwaway experiments that informed the design.
 
