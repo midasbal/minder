@@ -3,7 +3,9 @@ import { motion } from 'framer-motion';
 import { AgentPanel } from '../components/console/AgentPanel';
 import { LivePanel } from '../components/console/LivePanel';
 import { useConsole } from '../components/console/useConsole';
+import { FreezeDrill } from '../components/console/FreezeDrill';
 import { RealRun } from '../components/console/RealRun';
+import { RedTeam } from '../components/console/RedTeam';
 import { Rail } from '../components/Rail';
 import { LIVE_RUN } from '../chain/liverun';
 import { rise, stagger } from '../motion';
@@ -64,7 +66,11 @@ export function AppShell() {
         </motion.div>
       </motion.section>
 
+      <RedTeam />
+
       <RealRun run={LIVE_RUN} state={state} store={store} />
+
+      <FreezeDrill />
     </div>
   );
 }

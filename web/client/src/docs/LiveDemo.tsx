@@ -8,8 +8,10 @@ export function LiveDemo() {
       <Note title="Status">
         The surface at <Link to="/app">/app</Link> is live for everything that needs no key: it asks the deployed contract
         for dry runs, and reads its state, straight from your browser. Sending a new real request from the page, and the
-        guardian&rsquo;s freeze, are not wired yet; in their place the page shows a real run recorded on testnet (NEAR, ETH
-        and USDC payments the contract gated and signed), and checks in your browser that the contract signed it.
+        guardian&rsquo;s freeze, are not wired yet; in their place the page shows what was recorded on testnet: a red-team
+        log of real attacks the contract refused (most on chain, each with its failed transaction), a real run of NEAR, ETH
+        and USDC payments the contract gated and signed, with a check in your browser that it signed them, and a freeze
+        drill.
       </Note>
 
       <Sub id="scenarios" title="Scenarios and methods">
@@ -41,7 +43,7 @@ export function LiveDemo() {
               Deny, <code>PerTxCapExceeded</code>
             </td>
             <td>
-              The <em>Over the cap</em> preset
+              The <em>Over the cap</em> preset; the red-team log, as a real failed transaction
             </td>
           </tr>
           <tr>
@@ -53,7 +55,7 @@ export function LiveDemo() {
               Deny, <code>RecipientNotAllowed</code>
             </td>
             <td>
-              The <em>Unlisted recipient</em> preset
+              The <em>Unlisted recipient</em> preset; the red-team log, as a real failed transaction
             </td>
           </tr>
           <tr>
@@ -66,8 +68,9 @@ export function LiveDemo() {
             </td>
             <td>
               Not reachable in one dry run, which spends nothing: the window and the budget bind across payments. The
-              sandbox tests and the stateful harness cover it. The <em>Drain the window</em> preset asks for the whole
-              window in one request, and the per-transaction cap, checked first, refuses it
+              red-team log shows it for real: two 0.5 NEAR payments fill the window and the third is refused on chain. The
+              <em> Drain the window</em> preset asks for the whole window in one request, and the per-transaction cap,
+              checked first, refuses it
             </td>
           </tr>
           <tr>
@@ -119,8 +122,8 @@ export function LiveDemo() {
             <td>any other method, with the agent key</td>
             <td>Refused by the NEAR protocol before the contract runs</td>
             <td>
-              Not on the console, which never holds the agent&rsquo;s private key. Shown by the sandbox tests that sign with
-              the real key
+              The red-team log: the raw error the NEAR runtime returned. These never reach a block, so there is no
+              transaction to open. The console itself never holds the agent&rsquo;s private key
             </td>
           </tr>
           <tr>
@@ -131,7 +134,10 @@ export function LiveDemo() {
             <td>
               The agent&rsquo;s next request is denied, <code>Frozen</code>
             </td>
-            <td>Not wired: it is an operator action</td>
+            <td>
+              The freeze drill on the console: recorded on chain, from the freeze to the unfreeze. The freeze itself is an
+              operator action, not something a visitor can trigger
+            </td>
           </tr>
         </Table>
         <p>What the console reads from the chain, and what the contract provides for it:</p>

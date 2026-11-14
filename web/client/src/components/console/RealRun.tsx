@@ -235,7 +235,7 @@ function Provenance({ run, state, store }: { run: LiveRun; state: ConsoleState; 
 export function RealRun({ run, state, store }: { run: LiveRun; state: ConsoleState; store: ConsoleStore }) {
   return (
     <section className="run" aria-labelledby="run-title">
-      <p className="label">03 / The real run</p>
+      <p className="label">04 / The real run</p>
       <h2 className="run__title" id="run-title">
         Not a simulation. Real money moved, and the firewall gated every step.
       </h2>

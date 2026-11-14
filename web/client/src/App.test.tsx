@@ -208,7 +208,9 @@ describe('the app shell', () => {
     const text = visibleText(html);
     assert.ok(!text.includes('placeholder'));
     assert.ok(!text.includes('Read from the chain at'), 'no reading is claimed before one is made');
-    assert.ok(!text.includes('ALLOW') && !text.includes('DENY'), 'no verdict is shown before a request');
+    const consoleZone = html.slice(html.indexOf('zone zone--agent'), html.indexOf('zone zone--money'));
+    assert.ok(visibleText(consoleZone).includes('No request yet'));
+    assert.ok(!consoleZone.includes('stamp--'), 'the live console shows no verdict before a request');
   });
 });
 
@@ -395,7 +397,10 @@ describe('the docs, against what exists today', () => {
   it('says which scenarios the console covers and which it does not', () => {
     assert.ok(text.includes('Where to see it'));
     assert.ok(text.includes('Not reachable in one dry run'));
-    assert.ok(text.includes('Not wired: it is an operator action'));
+    assert.ok(text.includes('The red-team log shows it for real'));
+    assert.ok(text.includes('The freeze drill on the console'));
+    assert.ok(!text.includes('Not wired: it is an operator action'), 'the freeze is no longer unshown');
+    assert.ok(text.includes('These never reach a block, so there is no transaction to open'));
   });
 });
 

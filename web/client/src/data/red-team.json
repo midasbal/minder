@@ -130,7 +130,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded\"}}}}",
       "tx": "AWEyvti14d58haJYsSx6fhbVQWHxzvzeu5EEesLAFnu9",
       "explorer": "https://testnet.nearblocks.io/txns/AWEyvti14d58haJYsSx6fhbVQWHxzvzeu5EEesLAFnu9",
-      "sentAt": "2026-11-14T16:11:48.264Z"
+      "sentAt": "2026-11-14T16:11:48.264Z",
+      "blockTime": "2026-11-14T16:11:48.591Z",
+      "blockHeight": 277679913
     },
     {
       "id": "over-cap-eth",
@@ -170,7 +172,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded\"}}}}",
       "tx": "BT9ZdveNcqi4ves5qy9iN3AmBb1iunEoKapx6CJQQYBa",
       "explorer": "https://testnet.nearblocks.io/txns/BT9ZdveNcqi4ves5qy9iN3AmBb1iunEoKapx6CJQQYBa",
-      "sentAt": "2026-11-14T16:11:51.145Z"
+      "sentAt": "2026-11-14T16:11:51.145Z",
+      "blockTime": "2026-11-14T16:11:51.244Z",
+      "blockHeight": 277679918
     },
     {
       "id": "over-cap-usdc",
@@ -259,7 +263,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: PerTxCapExceeded (token transfer)\"}}}}",
       "tx": "Hgwk7SEhC4kgdEkFSfzA94GT5T1TC8fcw66c5se4w8kP",
       "explorer": "https://testnet.nearblocks.io/txns/Hgwk7SEhC4kgdEkFSfzA94GT5T1TC8fcw66c5se4w8kP",
-      "sentAt": "2026-11-14T16:11:53.961Z"
+      "sentAt": "2026-11-14T16:11:53.961Z",
+      "blockTime": "2026-11-14T16:11:54.252Z",
+      "blockHeight": 277679923
     },
     {
       "id": "unlisted-near",
@@ -296,7 +302,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed\"}}}}",
       "tx": "Bd7dXggBmo2fHpDskckh5YDSbypUnTedPt3ibwnvfboz",
       "explorer": "https://testnet.nearblocks.io/txns/Bd7dXggBmo2fHpDskckh5YDSbypUnTedPt3ibwnvfboz",
-      "sentAt": "2026-11-14T16:11:56.488Z"
+      "sentAt": "2026-11-14T16:11:56.488Z",
+      "blockTime": "2026-11-14T16:11:56.841Z",
+      "blockHeight": 277679928
     },
     {
       "id": "unlisted-eth",
@@ -336,7 +344,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed\"}}}}",
       "tx": "FSc8bEQcQrpPD9PhJ8naPa8Rmts4LhvLFk2Qn4LL4vTY",
       "explorer": "https://testnet.nearblocks.io/txns/FSc8bEQcQrpPD9PhJ8naPa8Rmts4LhvLFk2Qn4LL4vTY",
-      "sentAt": "2026-11-14T16:11:59.530Z"
+      "sentAt": "2026-11-14T16:11:59.530Z",
+      "blockTime": "2026-11-14T16:11:59.812Z",
+      "blockHeight": 277679933
     },
     {
       "id": "unlisted-usdc",
@@ -425,7 +435,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: RecipientNotAllowed (token transfer)\"}}}}",
       "tx": "3wuU7YNB2dQrAsYHwu3mFrka6tigWivkb9NXC6xENVky",
       "explorer": "https://testnet.nearblocks.io/txns/3wuU7YNB2dQrAsYHwu3mFrka6tigWivkb9NXC6xENVky",
-      "sentAt": "2026-11-14T16:12:02.491Z"
+      "sentAt": "2026-11-14T16:12:02.491Z",
+      "blockTime": "2026-11-14T16:12:02.680Z",
+      "blockHeight": 277679938
     },
     {
       "id": "no-policy-near-token",
@@ -468,7 +480,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: AssetNotAllowed\"}}}}",
       "tx": "4hH6uTsfouEtiStCi24R78dMke3SjYAxzoBUywkkJNYU",
       "explorer": "https://testnet.nearblocks.io/txns/4hH6uTsfouEtiStCi24R78dMke3SjYAxzoBUywkkJNYU",
-      "sentAt": "2026-11-14T16:12:05.155Z"
+      "sentAt": "2026-11-14T16:12:05.155Z",
+      "blockTime": "2026-11-14T16:12:05.328Z",
+      "blockHeight": 277679943
     },
     {
       "id": "no-policy-erc20",
@@ -557,7 +571,9 @@
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: AssetNotAllowed (token transfer)\"}}}}",
       "tx": "93zLPiHM82kbXrGkGKrZfPjsdB8TLr7ZtRHZ6WNpGDZ1",
       "explorer": "https://testnet.nearblocks.io/txns/93zLPiHM82kbXrGkGKrZfPjsdB8TLr7ZtRHZ6WNpGDZ1",
-      "sentAt": "2026-11-14T16:12:07.866Z"
+      "sentAt": "2026-11-14T16:12:07.866Z",
+      "blockTime": "2026-11-14T16:12:08.185Z",
+      "blockHeight": 277679948
     }
   ],
   "window": {
@@ -598,7 +614,9 @@
         "failureMessage": null,
         "tx": "9jnLqfsk8rvgCh4f5Ff4cVfii7LZgkpVxqvFsxjU28Vo",
         "explorer": "https://testnet.nearblocks.io/txns/9jnLqfsk8rvgCh4f5Ff4cVfii7LZgkpVxqvFsxjU28Vo",
-        "sentAt": "2026-11-14T16:12:11.052Z"
+        "sentAt": "2026-11-14T16:12:11.052Z",
+        "blockTime": "2026-11-14T16:12:11.271Z",
+        "blockHeight": 277679953
       },
       {
         "id": "window-2",
@@ -635,7 +653,9 @@
         "failureMessage": null,
         "tx": "DrrXE1ProgtrKSWNMNnugX8jypHryQV84XmmfPfGAMxX",
         "explorer": "https://testnet.nearblocks.io/txns/DrrXE1ProgtrKSWNMNnugX8jypHryQV84XmmfPfGAMxX",
-        "sentAt": "2026-11-14T16:12:15.213Z"
+        "sentAt": "2026-11-14T16:12:15.213Z",
+        "blockTime": "2026-11-14T16:12:15.700Z",
+        "blockHeight": 277679961
       },
       {
         "id": "window-3",
@@ -672,7 +692,9 @@
         "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: WindowLimitExceeded\"}}}}",
         "tx": "2Eouy2sVDw8dP7rd621ZhTxqDEPkvrW8Hi5FSNjDFT68",
         "explorer": "https://testnet.nearblocks.io/txns/2Eouy2sVDw8dP7rd621ZhTxqDEPkvrW8Hi5FSNjDFT68",
-        "sentAt": "2026-11-14T16:12:19.459Z"
+        "sentAt": "2026-11-14T16:12:19.459Z",
+        "blockTime": "2026-11-14T16:12:19.671Z",
+        "blockHeight": 277679968
       }
     ]
   },

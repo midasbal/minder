@@ -834,3 +834,205 @@
 .proof__tx a {
   color: var(--ink);
 }
+
+/* ---- The red-team log ---- */
+
+.run__lede {
+  max-width: 52rem;
+  font-size: 1.02rem;
+  color: var(--ink-2);
+}
+
+.rt-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 1.1rem;
+}
+
+.rt-group__title,
+.rt-window__title,
+.rt-refusals__title {
+  margin: 0 0 0.6rem;
+  font-size: 0.98rem;
+}
+
+.rt-group__title {
+  font-size: 0.74rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.rt-attacks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rt-attack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.8rem 0.9rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+}
+
+.rt-attack__what {
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.rt-attack__why {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+.rt-attack__tx,
+.rt-attack__note {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.rt-attack .more {
+  padding-block: 0.3rem 0;
+  border-bottom: 0;
+}
+
+.rt-window {
+  padding: 1.1rem 1.2rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--line-2);
+}
+
+.rt-window__lede,
+.rt-window__why,
+.rt-refusals__lede {
+  max-width: 52rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.rt-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.7rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+
+.rt-step {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.8rem 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.rt-step__n {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.rt-step__what {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.rt-step__tx {
+  margin-top: auto;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.rt-refusals {
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+}
+
+/* ---- Containment and recovery ---- */
+
+.fd-steps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fd-step {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0 1rem;
+  padding: 0.9rem 0 0.9rem 1rem;
+  border-left: 2px solid var(--line-2);
+}
+
+.fd-step + .fd-step {
+  border-top: 1px solid var(--line);
+}
+
+.fd-step__time {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.fd-step__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.fd-step__what {
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.fd-step__desc {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+.fd-step__out {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.fd-step__tx {
+  font-size: 0.84rem;
+  color: var(--ink-2);
+}
+
+@media (max-width: 40rem) {
+  .fd-step {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.3rem;
+  }
+}

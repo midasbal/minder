@@ -24,7 +24,9 @@
       "decisionEvent": null,
       "failureMessage": null,
       "tx": "3Gp6QTJSEuWrXZWA14hsfgS9HXt9iPDorafDEQwVPGAs",
-      "explorer": "https://testnet.nearblocks.io/txns/3Gp6QTJSEuWrXZWA14hsfgS9HXt9iPDorafDEQwVPGAs"
+      "explorer": "https://testnet.nearblocks.io/txns/3Gp6QTJSEuWrXZWA14hsfgS9HXt9iPDorafDEQwVPGAs",
+      "blockTime": "2026-11-14T16:06:59.647Z",
+      "blockHeight": 277679407
     },
     {
       "id": "denied-while-frozen",
@@ -61,7 +63,9 @@
       },
       "failureMessage": "{\"ActionError\":{\"index\":0,\"kind\":{\"FunctionCallError\":{\"ExecutionError\":\"Smart contract panicked: Denied: Frozen\"}}}}",
       "tx": "655ira2u368ZRke3XEfsCTfXj9Mp5oyx8toWxbWNWCsQ",
-      "explorer": "https://testnet.nearblocks.io/txns/655ira2u368ZRke3XEfsCTfXj9Mp5oyx8toWxbWNWCsQ"
+      "explorer": "https://testnet.nearblocks.io/txns/655ira2u368ZRke3XEfsCTfXj9Mp5oyx8toWxbWNWCsQ",
+      "blockTime": "2026-11-14T16:07:09.959Z",
+      "blockHeight": 277679424
     },
     {
       "id": "propose-unfreeze",
@@ -79,7 +83,9 @@
         "proposed_at": "1794672439567725173",
         "ready_at": "1794672559567725173"
       },
-      "delaySeconds": 120
+      "delaySeconds": 120,
+      "blockTime": "2026-11-14T16:07:19.062Z",
+      "blockHeight": 277679439
     },
     {
       "id": "execute-unfreeze",
@@ -90,7 +96,9 @@
         "id": "9"
       },
       "tx": "2aWxhRR1oMvoUPKCtewHQdFF63Zcx6jaAgu1UzCsCeDb",
-      "explorer": "https://testnet.nearblocks.io/txns/2aWxhRR1oMvoUPKCtewHQdFF63Zcx6jaAgu1UzCsCeDb"
+      "explorer": "https://testnet.nearblocks.io/txns/2aWxhRR1oMvoUPKCtewHQdFF63Zcx6jaAgu1UzCsCeDb",
+      "blockTime": "2026-11-14T16:09:34.350Z",
+      "blockHeight": 277679663
     }
   ],
   "stateAfter": {

@@ -392,6 +392,18 @@ Chain Signatures derives for this contract account and path. The `/app` console 
 browser; the same computation was run against the live chain for this review and all three addresses matched
 (`0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F`).
 
+### Red-team log and freeze drill
+
+Recorded against the live contract on 2026-11-14 and shown on `/app` (`web/client/src/data/red-team.json`,
+`freeze-drill.json`). With the agent's real key: eight attacks refused on chain (over the cap on NEAR, ETH and USDC;
+an unlisted recipient on all three; an asset with no policy, NEP-141 and ERC-20), each a failed transaction whose
+log carries the contract's own decision event; a window burst (two allowed 0.5 NEAR payments, then a third refused
+`WindowLimitExceeded`), which one dry run cannot show; and five calls the NEAR runtime refused before any contract
+code ran, recorded as raw RPC errors because they never reach a block (an owner method, `AddKey`, `Transfer`,
+`DeployContract` and a direct call to the signer). The freeze drill: the guardian froze the contract, the agent was
+refused `Frozen` on chain, and the owner could resume only by proposing the unfreeze and waiting out the 120-second
+timelock. The contract ended Active, and `scripts/verify-deployment.sh` still passed on the keys and the code.
+
 ## 7. Reproducing this review
 
 ```
