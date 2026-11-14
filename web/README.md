@@ -21,6 +21,7 @@ web/
     index.html
     vite.config.ts        dev server proxies /health and /api to the relay
     public/favicon.svg
+    public/llms.txt       an index of the project's artifacts for AI readers, served at /llms.txt (the repository's llms.txt links here)
     src/
       main.tsx            entry: router, fonts, styles
       App.tsx             layout and routes

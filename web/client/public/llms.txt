@@ -1,0 +1,58 @@
+# Minder
+
+> A policy firewall between an AI agent and money, built as a NEAR smart contract and deployed on NEAR testnet. The agent holds only a restricted function-call access key, and the contract decides every payment request with one deterministic policy.
+
+Minder is a hackathon project (tracks: AI Security, Real-World Money). It runs on testnet only and has never been deployed to mainnet. Its security review, AUDIT.md, was written by the project's author and is not an independent audit. The facts below are taken from the README, AUDIT.md, DESIGN.md, the contract source and the deployed contract.
+
+## What it is
+
+- The contract is `gate.minder-gate-owner-bf5fcd.testnet` on NEAR testnet. The Rust source is in `contract/` (near-sdk 5.29.1, MIT licence).
+- The agent is a NEAR function-call access key on the contract's own account. The NEAR protocol limits it to three methods: `request_local_transfer`, `request_evm_payment` and `request_evm_token_payment`. It has a fixed gas allowance of 0.25 NEAR and cannot transfer, deploy, or add or delete keys.
+- Every request is decided by one pure function, `policy::evaluate`, using a per-transaction cap, a sliding spend window, a lifetime budget per budget period, separate NEAR and EVM recipient allowlists, and a mandate scope that can only narrow the policy. A denial carries a reason code such as `PerTxCapExceeded`, `RecipientNotAllowed`, `WindowLimitExceeded` or `MandateBudgetExceeded`.
+- Changes that loosen authority (a higher cap, a new recipient, a longer mandate) wait out a configurable delay, and tightening is instant. A guardian account can only freeze the contract, revoke the mandate, or cancel a pending change. The deployed delay is 120 seconds.
+- For ETH and ERC-20 tokens on Sepolia, the contract builds the EIP-1559 transaction itself and asks NEAR Chain Signatures (`v1.signer-prod.testnet`) to sign its hash. It checks that the signature recovers to the contract's own EVM address, `0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F`, and only then emits the signed transaction as a log event that anyone can broadcast. The only calldata the contract builds is an ERC-20 `transfer`.
+
+## Custody: keyless
+
+- The contract account was created by one transaction with no `AddKey` action, so it holds zero full-access keys. Its only key is the agent's restricted function-call key. This can be read from the chain with the `view_access_key_list` RPC call.
+- DESIGN.md states the costs: there is no upgrade path, and the account that signed the deployment is the owner permanently.
+
+## Verification and its bounds
+
+- Kani 0.68.0 bounded model checking: 43 proof harnesses covering the firewall decision, the timelock classifier, the sliding window and signature normalization. Each holds for every input within its stated bounds. The bounds, and the parts that are not proved (such as panic-freedom of the signed-transaction encoder, the EVM recipient scope, and the reserve and settle accounting), are listed in AUDIT.md and DESIGN.md.
+- Mutation testing with cargo-mutants 27.1.0: 259 mutants measured, 247 viable, 241 killed by tests, and 6 documented as behaviourally equivalent. The measurement predates the move of the timelock classifier into its own module; AUDIT.md states the current status.
+- A differential corpus of 1,743 cases compares the EVM transaction encoder with viem 2.57.16 byte for byte.
+- The deployed wasm has sha256 `2fdd044411312fba8bc18b91ce06138b0c933cdb32bbb5296964f6b35ba54d09`. A script rebuilds the contract from a clean checkout and compares hashes. The build is not reproducible by construction, and the contract's on-chain metadata carries no build information, so the link from source to deployed code rests on the documented toolchain pins.
+
+## Known limitations
+
+- A freeze or revoke stops new payments but cannot recall an EVM transaction that is already signed. The loss is bounded by the limits in force at signing.
+- Spend is booked when a payment is signed, not when it settles on the destination chain.
+- In the demo deployment, one operator holds both the owner and the guardian keys.
+- The review is a self-audit, and the deployment is testnet only.
+
+## Live deployment
+
+- [Live console](https://minder-near.up.railway.app/app): dry runs against the deployed contract, its limits read from the chain in the browser, a red-team log, a recorded real run with a check of who signed each Ethereum transaction, and a freeze drill.
+- [Documentation](https://minder-near.up.railway.app/docs): threat model, architecture, proofs, the live demo, and an FAQ.
+- [Contract on the explorer](https://testnet.nearblocks.io/address/gate.minder-gate-owner-bf5fcd.testnet): the deployed account on NEAR testnet.
+
+## Repository
+
+- [README](https://github.com/midasbal/minder/blob/main/README.md): overview, how to adopt the contract for an agent, and how to build and test.
+- [AUDIT.md](https://github.com/midasbal/minder/blob/main/AUDIT.md): the self-audit, with scope, trust model, a threat, mechanism and test matrix, findings, limitations and a proof ledger.
+- [DESIGN.md](https://github.com/midasbal/minder/blob/main/contract/DESIGN.md): the contract design and the source of every figure above.
+- [scripts/verify-deployment.sh](https://github.com/midasbal/minder/blob/main/scripts/verify-deployment.sh): a read-only check of the deployed code hash and of the account's keys.
+- [contract/](https://github.com/midasbal/minder/tree/main/contract): the contract source, its tests, the Kani proofs in `contract/kani/`, and the reference vectors in `contract/vectors/`.
+- [LICENSE](https://github.com/midasbal/minder/blob/main/LICENSE): MIT.
+
+## Recorded evidence
+
+- [live-run.json](https://github.com/midasbal/minder/blob/main/web/client/src/data/live-run.json): three payments recorded on testnet (0.05 NEAR, 0.0002 ETH and 0.5 USDC) with transaction hashes and the signer check.
+- [red-team.json](https://github.com/midasbal/minder/blob/main/web/client/src/data/red-team.json): eight attacks refused on chain, a window burst of two allowed payments followed by a refused third, and five calls refused by the NEAR runtime before reaching a block.
+- [freeze-drill.json](https://github.com/midasbal/minder/blob/main/web/client/src/data/freeze-drill.json): a guardian freeze, an agent request refused as `Frozen`, and the owner's unfreeze after the 120-second delay.
+
+## Optional
+
+- [web/](https://github.com/midasbal/minder/tree/main/web): the source of the site, including its tests.
+- [Twitter/X profile of the author](https://x.com/wjmdiary)

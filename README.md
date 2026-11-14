@@ -172,6 +172,8 @@ derives for this contract.
   [Build and test](#build-and-test)): the page reads the live testnet contract straight from your browser, so a
   local run shows the same live data.
 - **Design and evidence:** [`contract/DESIGN.md`](contract/DESIGN.md) is the source for the guarantees and figures above.
+- **For AI readers:** [`llms.txt`](llms.txt), also served at `/llms.txt` on the live site, is a plain index of the
+  artifacts and the facts about them, with the same bounds as this README.
 - **Security self-audit:** [`AUDIT.md`](AUDIT.md): scope and method, trust model, a threat-to-mechanism-to-test
   matrix, findings from our own tooling, known limitations and the proof ledger. It is the author's own review, not an
   independent audit.

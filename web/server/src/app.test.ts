@@ -17,6 +17,7 @@ describe('the relay with a frontend build', () => {
     mkdirSync(join(dir, 'assets'));
     writeFileSync(join(dir, 'index.html'), '<!doctype html><title>minder</title>');
     writeFileSync(join(dir, 'assets', 'app-abc123.js'), 'export {};');
+    writeFileSync(join(dir, 'llms.txt'), '# Minder\n\n> An index.\n');
     app = await buildApp({ clientDir: dir, logger: false });
   });
 
@@ -42,6 +43,27 @@ describe('the relay with a frontend build', () => {
     const response = await app.inject({ method: 'GET', url: '/assets/app-abc123.js' });
     assert.equal(response.statusCode, 200);
     assert.equal(response.headers['cache-control'], 'public, max-age=31536000, immutable');
+  });
+
+  it('serves /llms.txt as the file itself, as plain text, never as the HTML shell', async () => {
+    for (const method of ['GET', 'HEAD'] as const) {
+      const response = await app.inject({ method, url: '/llms.txt' });
+      assert.equal(response.statusCode, 200, method);
+      assert.match(response.headers['content-type'] as string, /^text\/plain/, method);
+      assert.equal(response.headers['cache-control'], 'no-cache', method);
+      if (method === 'GET') {
+        assert.equal(response.body, '# Minder\n\n> An index.\n');
+        assert.ok(!response.body.includes('<title>'), 'not the app shell');
+      }
+    }
+  });
+
+  it('answers a missing file with a 404, not with the HTML shell', async () => {
+    for (const url of ['/llms-full.txt', '/robots.txt', '/missing.md']) {
+      const response = await app.inject({ method: 'GET', url });
+      assert.equal(response.statusCode, 404, url);
+      assert.deepEqual(response.json(), { error: 'not found' }, url);
+    }
   });
 
   it('sets the basic hardening headers', async () => {
