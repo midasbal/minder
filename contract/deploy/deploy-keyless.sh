@@ -10,13 +10,27 @@
 # same order: CreateAccount, Transfer, DeployContract, FunctionCall(init).
 #
 #   deploy/deploy-keyless.sh deploy --signer OWNER --account OWNER_SUB \
-#       --fund "10 NEAR" --window-len NS --num-buckets N [options]
+#       --fund "10 NEAR" --window-len 24h --num-buckets N [options]
 #   deploy/deploy-keyless.sh verify --account ACCOUNT
+#
+# Units are explicit, because `init`'s window and delay are frozen by the
+# keyless deployment and a wrong unit cannot be repaired:
+#   --window-len, --timelock-delay  a whole number and one unit, s, m, h or d
+#                                   (60s, 2m, 24h, 7d), at least 1s. The script
+#                                   converts to the nanoseconds the contract
+#                                   counts. A bare number is refused.
+#   --fund                          an amount with a token unit ("7 NEAR"). A
+#                                   bare number is refused.
+# --timelock-delay is optional; omit it for no timelock.
+#
+# The wasm is built fresh from the source (cargo near build non-reproducible-
+# wasm --locked) unless --wasm PATH is given, and a given wasm is refused if
+# any source file is newer than it, so a stale build is never deployed.
 #
 # Testnet only: any other network is refused. Without --send, `deploy` only
 # prints the command it would run and sends nothing.
 #
-# Needs: near-cli-rs (`near`), jq, and for `verify` curl. Credentials come from
+# Needs: near-cli-rs (`near`), jq, cargo-near (to build), and for `verify` curl. Credentials come from
 # the signer's key in the keychain (see --signing); nothing secret is read,
 # printed or stored by this script.
 set -euo pipefail
@@ -36,6 +50,83 @@ usage() {
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+# ---- units ----
+
+# Prints the nanoseconds of a duration written as a whole number and one unit
+# (s, m, h, d), or dies. A bare number, a unit under a second, anything below one
+# second and anything that would overflow are refused with the reason.
+duration_ns() {
+    local flag="$1" text="$2" number unit per max
+    if [[ "$text" =~ ^([0-9]+)(s|m|h|d)$ ]]; then
+        number="${BASH_REMATCH[1]}"
+        unit="${BASH_REMATCH[2]}"
+    elif [[ "$text" =~ ^[0-9]+$ ]]; then
+        die "$flag: '$text' has no unit. Write it as 60s, 2m, 24h or 7d: the contract counts nanoseconds, the value is frozen at deploy and a wrong unit cannot be repaired"
+    elif [[ "$text" =~ ^[0-9]+(ms|us|ns)$ ]]; then
+        die "$flag: '$text' is under 1 second, which is refused (the value is frozen at deploy). Use s, m, h or d"
+    else
+        die "$flag: '$text' is not a duration. Use a whole number and one unit: s, m, h or d (60s, 2m, 24h, 7d)"
+    fi
+    [ "${#number}" -le 15 ] || die "$flag: '$text' is too large"
+    number=$((10#$number))
+    [ "$number" -ge 1 ] || die "$flag: '$text' is under 1 second, which is refused"
+    case "$unit" in
+        s) per=1000000000 ;;
+        m) per=60000000000 ;;
+        h) per=3600000000000 ;;
+        d) per=86400000000000 ;;
+    esac
+    max=$((9223372036854775807 / per))
+    [ "$number" -le "$max" ] || die "$flag: '$text' is too large"
+    echo $((number * per))
+}
+
+# Dies unless the funding carries a token unit and is positive. The text is used
+# as given (near-cli-rs reads "7 NEAR").
+check_fund() {
+    local text="$1"
+    if [[ "$text" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        die "--fund: '$text' has no unit. Write an amount with a token unit, e.g. \"7 NEAR\""
+    fi
+    local restore
+    restore="$(shopt -p nocasematch || true)" # prints the setting, and fails when it is off
+    shopt -s nocasematch
+    local ok=1
+    [[ "$text" =~ ^([0-9]+([.][0-9]+)?)[[:space:]]*(near|n|millinear|micronear|yoctonear|ynear|yn)$ ]] || ok=0
+    local amount="${BASH_REMATCH[1]:-}"
+    eval "$restore"
+    [ "$ok" -eq 1 ] || die "--fund: '$text' is not an amount with a token unit. Write e.g. \"7 NEAR\""
+    [[ "$amount" =~ ^0+([.]0+)?$ ]] && die "--fund: '$text' must be positive"
+    return 0
+}
+
+# ---- wasm ----
+
+# Dies if any file the build depends on is newer than the wasm: the sources, the
+# manifest, the lockfile and the cargo and toolchain settings.
+refuse_stale_wasm() {
+    local wasm="$1" root="$here/.." candidate newer
+    local inputs=()
+    for candidate in "$root/src" "$root/Cargo.toml" "$root/Cargo.lock" "$root/.cargo" \
+        "$root/../.cargo" "$root/rust-toolchain" "$root/rust-toolchain.toml"; do
+        [ -e "$candidate" ] && inputs+=("$candidate")
+    done
+    newer="$(find "${inputs[@]}" -type f -newer "$wasm" | head -n 1)"
+    [ -z "$newer" ] || die "$wasm is older than its sources (for example $newer): refusing a stale wasm. Omit --wasm to build it fresh"
+}
+
+# Builds the production wasm from the current sources, the documented way, and
+# prints its path. Build output goes to stderr.
+build_fresh_wasm() {
+    need cargo
+    local out="$here/../target/near"
+    echo "building the production wasm (cargo near build non-reproducible-wasm --locked)..." >&2
+    (cd "$here/.." && cargo near build non-reproducible-wasm --locked --out-dir "$out") >&2 \
+        || die "the production build failed"
+    [ -f "$out/minder.wasm" ] || die "the build produced no $out/minder.wasm"
+    echo "$out/minder.wasm"
+}
 
 # ---- verify ----
 
@@ -105,7 +196,7 @@ cmd_verify() {
 cmd_deploy() {
     local signer="" account="" fund="" window_len="" num_buckets=""
     local timelock_delay="" near_treasury="" evm_treasury="" guardian=""
-    local wasm="$here/../target/near/minder.wasm" network="testnet"
+    local wasm="" network="testnet"
     local signing="legacy-keychain" send=0
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -141,27 +232,38 @@ cmd_deploy() {
         keychain|legacy-keychain) ;;
         *) die "--signing must be keychain or legacy-keychain" ;;
     esac
-    [[ "$window_len" =~ ^[0-9]+$ && "$window_len" -gt 0 ]] || die "--window-len must be a positive number of nanoseconds"
     [[ "$num_buckets" =~ ^[0-9]+$ && "$num_buckets" -ge 1 && "$num_buckets" -le 64 ]] || die "--num-buckets must be 1 to 64"
-    [ -z "$timelock_delay" ] || [[ "$timelock_delay" =~ ^[0-9]+$ ]] || die "--timelock-delay must be a number of nanoseconds"
     [ -z "$evm_treasury" ] || [[ "$evm_treasury" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "--evm-treasury must be 0x and 40 hex digits"
-    [ "$window_len" -gt 0 ] && [ $((window_len % num_buckets)) -eq 0 ] || die "--window-len must be divisible by --num-buckets"
+    check_fund "$fund"
+    # Durations in, nanoseconds out. Nothing below sees a bare number.
+    local window_ns timelock_ns=""
+    window_ns="$(duration_ns --window-len "$window_len")"
+    [ -z "$timelock_delay" ] || timelock_ns="$(duration_ns --timelock-delay "$timelock_delay")"
+    [ $((window_ns % num_buckets)) -eq 0 ] || die "--window-len ($window_len = $window_ns ns) must be divisible by --num-buckets ($num_buckets)"
     need jq
     need near
-    [ -f "$wasm" ] || die "no wasm at $wasm (build it: cargo near build non-reproducible-wasm --locked)"
+    if [ -z "$wasm" ]; then
+        wasm="$(build_fresh_wasm)"
+    else
+        [ -f "$wasm" ] || die "no wasm at $wasm"
+        refuse_stale_wasm "$wasm"
+    fi
+    wasm="$(realpath "$wasm")"
     # The sandbox build carries an owner-only seeding method that must never be
     # deployed; its export name is a plain string in the wasm.
     if grep -aq "test_record_spend" "$wasm"; then
         die "$wasm was built with the test-helpers feature; deploy the production build"
     fi
+    local wasm_sha
+    wasm_sha="$(sha256sum "$wasm" | cut -d' ' -f1)"
 
     # `init`'s arguments. `owner` is the signer: with no key on the new account,
     # the only account that can call `init` in this transaction is the signer,
     # and `init` requires its caller to be the owner.
     local init_args
     init_args="$(jq -cn \
-        --arg owner "$signer" --arg window_len "$window_len" --argjson num_buckets "$num_buckets" \
-        --arg timelock_delay "$timelock_delay" --arg near_treasury "$near_treasury" \
+        --arg owner "$signer" --arg window_len "$window_ns" --argjson num_buckets "$num_buckets" \
+        --arg timelock_delay "$timelock_ns" --arg near_treasury "$near_treasury" \
         --arg evm_treasury "$evm_treasury" --arg guardian "$guardian" \
         '{owner: $owner, window_len: $window_len, num_buckets: $num_buckets}
          + (if $timelock_delay != "" then {timelock_delay: $timelock_delay} else {} end)
@@ -188,7 +290,10 @@ cmd_deploy() {
     echo "contract account : $account (a keyless sub-account of $signer)"
     echo "owner            : $signer"
     echo "funding          : $fund"
+    echo "window           : $window_len = $window_ns ns, in $num_buckets buckets"
+    [ -z "$timelock_ns" ] || echo "timelock delay   : $timelock_delay = $timelock_ns ns"
     echo "wasm             : $wasm"
+    echo "wasm sha256      : $wasm_sha"
     echo "init arguments   : $init_args"
     echo "network          : $network"
     echo "actions          : CreateAccount, Transfer, DeployContract, FunctionCall(init); no AddKey"

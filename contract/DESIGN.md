@@ -424,25 +424,37 @@ amount and `init`'s arguments (`--window-len`, `--num-buckets`, and optionally `
 `--near-treasury`, `--evm-treasury`, `--guardian`) as parameters:
 
 ```
-deploy/deploy-keyless.sh deploy --signer owner.testnet --account minder.owner.testnet --fund "10 NEAR" \
-    --window-len 86400000000000 --num-buckets 24 [--timelock-delay NS] [--guardian ID] ...   # prints, sends nothing
-deploy/deploy-keyless.sh deploy ... --send                                                      # sends, then verifies
-deploy/deploy-keyless.sh verify --account minder.owner.testnet                                  # key audit only
+deploy/deploy-keyless.sh deploy --signer owner.testnet --account minder.owner.testnet --fund "7 NEAR" \
+    --window-len 24h --num-buckets 24 --timelock-delay 24h [--guardian ID] ...   # prints, sends nothing
+deploy/deploy-keyless.sh deploy ... --send                                       # sends, then verifies
+deploy/deploy-keyless.sh verify --account minder.owner.testnet                   # key audit only
 ```
 
+`--window-len` and `--timelock-delay` take a whole number and one unit (`s`, `m`, `h` or `d`; at least 1 s) and the
+script converts them to the nanoseconds the contract counts; `--fund` takes a token unit (`"7 NEAR"`). A bare number is
+refused for all three, because the window and the delay are frozen at deploy and a wrong unit cannot be repaired.
+
 It prints the full command and sends nothing unless `--send` is given. It refuses any network but `testnet`, a
-signer that is not the account's parent, a wasm built with the `test-helpers` feature (its export is a plain
-string in the wasm), a window that does not divide into its buckets, and a malformed treasury. `verify` reads the
-account's keys over RPC and fails unless they are only restricted keys: no full-access key, and every
-function-call key limited to the account itself, to exactly the three request methods, with a finite allowance.
-near-sdk exposes no host function to read an account's keys, so this audit is off-chain by necessity.
+signer that is not the account's parent, a wasm built with the `test-helpers` feature (its export is a plain string
+in the wasm), a window that does not divide into its buckets, and a malformed treasury. It also refuses a bare
+number for `--window-len`, `--timelock-delay` or `--fund`, a duration under one second or zero, a zero `--fund`,
+and a `--fund` without a token unit. By default it builds the production wasm fresh (`cargo near build
+non-reproducible-wasm --locked`), so a stale build cannot be deployed; an explicit `--wasm` is refused if any
+source file, the manifest, the lockfile or a cargo setting is newer than it; and it prints the sha256 of the wasm
+it will deploy. `verify` reads the account's keys over RPC and fails unless they are only restricted keys: no
+full-access key, and every function-call key limited to the account itself, to exactly the three request methods,
+with a finite allowance. near-sdk exposes no host function to read an account's keys, so this audit is off-chain by
+necessity.
 
 What has and has not been checked of the script: its argument guards, the printed command and `verify` (against
 fixtures in the NEAR RPC format: no keys, a restricted key, a full-access key, a key with the wrong methods, an
 unlimited allowance and the wrong receiver) were run offline, and near-cli-rs 0.31.1 parses the printed command
 through to `send` (run with `--help`), reporting the action chain `create-account`, `transfer`, `deploy-contract`
-with `with-init-call` and no `add-key`. The **`--send` path has not been run against any network**; the
-sandbox test is what proves the action sequence, and a first run on testnet is what will prove the script.
+with `with-init-call` and no `add-key`. The unit guards (a bare number, a sub-second or zero duration, an oversized
+duration, a window that does not divide into its buckets, a `--fund` with no unit, a wrong unit or a zero amount)
+and the stale-wasm and `test-helpers` refusals were exercised offline in print-only runs. The **`--send` path has
+not been run against any network**; the sandbox test is what proves the action sequence, and a first run on testnet
+is what will prove the script.
 
 ## Owner timelock (asymmetric)
 
