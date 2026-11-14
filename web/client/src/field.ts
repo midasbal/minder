@@ -7,11 +7,10 @@
   probe (a field around a point), lengthens, brightens and is pushed slightly outward,
   with every effect falling off smoothly to nothing at the edge of the radius. A dash
   the probe has touched relaxes back to rest over a fraction of a second, so the probe
-  leaves a brief wake. At the exact pointer position is a single 1px crosshair, the
-  only yellow in the effect.
+  leaves a brief wake.
 
-  Hairlines only: no blur, no gradients, no glow. Colours are the page's own ink and
-  live tokens, read from CSS.
+  Hairlines only: no blur, no gradients, no glow. The colour is the page's own ink
+  token, read from CSS.
 
   Cost: nothing while idle. A frame is requested only when the pointer moves or a
   dash is still relaxing, and the loop ends as soon as nothing changes. For a touch or
@@ -35,9 +34,6 @@ const PUSH = 7;
 export const RELAX_MS = 240;
 /** Below this a dash counts as at rest. */
 const AT_REST = 0.012;
-
-const CROSSHAIR_ARM = 9;
-const CROSSHAIR_GAP = 4;
 
 /** How many levels of opacity the active dashes are drawn in (one stroke per level). */
 const ALPHA_LEVELS = 8;
@@ -102,7 +98,6 @@ export function attachField(canvas: HTMLCanvasElement, win: Window): () => void 
   if (!context) throw new Error('a 2d canvas is not available');
 
   const ink = readColour(win, '--ink');
-  const live = readColour(win, '--live');
   const finePointer = win.matchMedia('(pointer: fine)');
   const motionOk = win.matchMedia('(prefers-reduced-motion: no-preference)');
   const root = win.document.documentElement;
@@ -190,23 +185,6 @@ export function attachField(canvas: HTMLCanvasElement, win: Window): () => void 
       }
       context.stroke();
     });
-
-    // The probe: one precise crosshair, the only yellow.
-    if (present) {
-      const px = snap(pointerX);
-      const py = snap(pointerY);
-      context.strokeStyle = rgba(live, 1);
-      context.beginPath();
-      context.moveTo(px - CROSSHAIR_GAP - CROSSHAIR_ARM, py);
-      context.lineTo(px - CROSSHAIR_GAP, py);
-      context.moveTo(px + CROSSHAIR_GAP, py);
-      context.lineTo(px + CROSSHAIR_GAP + CROSSHAIR_ARM, py);
-      context.moveTo(px, py - CROSSHAIR_GAP - CROSSHAIR_ARM);
-      context.lineTo(px, py - CROSSHAIR_GAP);
-      context.moveTo(px, py + CROSSHAIR_GAP);
-      context.lineTo(px, py + CROSSHAIR_GAP + CROSSHAIR_ARM);
-      context.stroke();
-    }
   };
 
   /** Advances every dash by `elapsed` ms. Returns whether anything changed. */

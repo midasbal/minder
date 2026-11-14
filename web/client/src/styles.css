@@ -2,7 +2,7 @@
   The theme: a dark instrument. Three roles for colour, and they do not mix.
   - Ink and the greys carry structure and text.
   - Green and rust are the firewall's verdicts (allow, deny) and verified values, nothing else.
-  - Yellow is interaction and liveness (hover, focus, the active route, live dots, the cursor probe).
+  - Yellow is interaction and liveness (hover, focus, the active route, live dots).
   --ink-3 is for lines, leaders and glyphs only: it does not reach 4.5:1 on the dark surfaces, so no
   text that matters is set in it.
 */
@@ -452,13 +452,30 @@ code {
 .stage {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) 3.5rem minmax(0, 1fr);
-  align-items: stretch;
+  grid-template-rows: auto auto auto 1fr;
+  row-gap: 1rem;
 }
 
+/* Each zone spans the stage's four rows (label, title, text, slot) as a subgrid, so
+   the two columns share their row lines and line up across the boundary whatever
+   their text does. Without subgrid support they are plain stacks from the same top. */
 .zone {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+@supports (grid-template-rows: subgrid) {
+  .zone {
+    display: grid;
+    grid-row: 1 / span 4;
+    grid-template-rows: subgrid;
+    row-gap: 1rem;
+  }
+
+  .rail {
+    grid-row: 1 / span 4;
+  }
 }
 
 .zone--agent {
@@ -467,7 +484,6 @@ code {
 
 .zone--money {
   padding-left: clamp(0.5rem, 2.5vw, 2.5rem);
-  padding-top: clamp(0rem, 5vw, 4.5rem);
 }
 
 .zone__title {
@@ -562,21 +578,32 @@ code {
   transform-origin: top;
 }
 
+/* Crisp text: no transform (a fractional or rotated layer is resampled, which blurs
+   glyphs). It is centred with auto margins and sized in whole pixels, and the
+   vertical reading direction comes from writing-mode, not from a rotation. */
 .rail__label {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) rotate(180deg);
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
   writing-mode: vertical-rl;
-  padding: 1rem 0.4rem;
+  padding: 16px 6px;
   white-space: nowrap;
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 12px;
+  line-height: 16px;
   font-weight: 500;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-2);
   background: var(--bg);
+}
+
+@supports (writing-mode: sideways-lr) {
+  .rail__label {
+    writing-mode: sideways-lr;
+  }
 }
 
 /* ---- Narrow screens ---- */
@@ -602,6 +629,16 @@ code {
 
   .stage {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+
+  .zone {
+    display: flex;
+    grid-row: auto;
+  }
+
+  .rail {
+    grid-row: auto;
   }
 
   .zone--agent,
@@ -632,7 +669,6 @@ code {
 
   .rail__label {
     writing-mode: horizontal-tb;
-    transform: translate(-50%, -50%);
-    padding: 0.35rem 1rem;
+    padding: 6px 16px;
   }
 }

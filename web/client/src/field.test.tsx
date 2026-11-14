@@ -68,8 +68,6 @@ interface Stroke {
   segments: Segment[];
 }
 
-const YELLOW = 'rgba(255, 201, 60, 1)';
-
 function fakeEnvironment({ fine = true, calm = true, width = 640, height = 400, ratio = 1 } = {}) {
   const media = new Map<string, { matches: boolean; listeners: Set<() => void> }>([
     ['(pointer: fine)', { matches: fine, listeners: new Set() }],
@@ -83,7 +81,7 @@ function fakeEnvironment({ fine = true, calm = true, width = 640, height = 400, 
   const cancelled: number[] = [];
 
   const env = { width, height, ratio };
-  const colours: Record<string, string> = { '--ink': '#e4e6da', '--live': '#ffc93c' };
+  const colours: Record<string, string> = { '--ink': '#e4e6da' };
 
   const win = {
     get innerWidth() {
@@ -202,14 +200,12 @@ function fakeEnvironment({ fine = true, calm = true, width = 640, height = 400, 
   };
 }
 
-const inkStrokes = (frame: Stroke[]) => frame.filter((stroke) => stroke.style !== YELLOW);
-const yellowStrokes = (frame: Stroke[]) => frame.filter((stroke) => stroke.style === YELLOW);
 const segmentsOf = (strokes: Stroke[]) => strokes.reduce((total, stroke) => total + stroke.segments.length, 0);
 const length = (s: Segment) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
 const alpha = (stroke: Stroke) => Number(/, ([\d.]+)\)$/.exec(stroke.style)![1]);
 
 describe('the still plane', () => {
-  it('is drawn once at rest: every dash, one stroke, no yellow, and no frame waiting', () => {
+  it('is drawn once at rest: every dash, one stroke, and no frame waiting', () => {
     const env = fakeEnvironment();
     attachField(env.canvas, env.win);
     const { count } = layoutLattice(640, 400);
@@ -217,7 +213,6 @@ describe('the still plane', () => {
     assert.equal(env.drawn[0]!.length, 1);
     assert.equal(env.drawn[0]![0]!.segments.length, count);
     assert.equal(alpha(env.drawn[0]![0]!), 0.1, 'near-invisible');
-    assert.equal(yellowStrokes(env.drawn[0]!).length, 0);
     assert.equal(env.pending(), 0, 'nothing runs while idle');
   });
 
@@ -235,7 +230,6 @@ describe('the still plane', () => {
       env.move(100, 100);
       assert.equal(env.pending(), 0);
       assert.equal(env.drawn.length, 1, 'drawn once and never again');
-      assert.equal(yellowStrokes(env.drawn[0]!).length, 0);
     }
   });
 
@@ -260,22 +254,14 @@ describe('the surface under the probe', () => {
     assert.equal(env.drawn.length, before + 1, 'one redraw for the frame');
   });
 
-  it('draws every dash exactly once, and the crosshair as the only yellow', () => {
+  it('draws every dash exactly once', () => {
     const env = fakeEnvironment();
     attachField(env.canvas, env.win);
     const { count } = layoutLattice(640, 400);
     env.move(320, 200);
     env.tick();
     const frame = env.drawn[env.drawn.length - 1]!;
-    assert.equal(segmentsOf(inkStrokes(frame)), count, 'no dash is missing or doubled');
-    const yellow = yellowStrokes(frame);
-    assert.equal(yellow.length, 1);
-    assert.equal(yellow[0]!.segments.length, 4, 'a crosshair: four arms');
-    // The arms are centred on the pointer, with a gap, horizontal and vertical.
-    const [left, right, up, down] = yellow[0]!.segments as [Segment, Segment, Segment, Segment];
-    assert.ok(left.y1 === left.y2 && right.y1 === right.y2 && up.x1 === up.x2 && down.x1 === down.x2);
-    assert.ok(Math.abs((left.x2 + right.x1) / 2 - 320.5) < 1, 'centred on the pointer');
-    assert.ok(right.x1 - left.x2 > 0, 'with a gap at the centre');
+    assert.equal(segmentsOf(frame), count, 'no dash is missing or doubled');
   });
 
   it('turns dashes onto the field around the probe, longer and brighter the closer they are', () => {
@@ -285,7 +271,7 @@ describe('the surface under the probe', () => {
     env.move(probe.x, probe.y);
     env.tick();
     const frame = env.drawn[env.drawn.length - 1]!;
-    const active = inkStrokes(frame)
+    const active = frame
       .filter((stroke) => stroke.segments.length < layoutLattice(640, 400).count)
       .flatMap((stroke) => stroke.segments.map((segment) => ({ segment, alpha: alpha(stroke) })));
     const measured = active.map(({ segment, alpha: a }) => {
@@ -311,7 +297,7 @@ describe('the surface under the probe', () => {
     env.move(320, 200);
     env.tick();
     const frame = env.drawn[env.drawn.length - 1]!;
-    const centres = inkStrokes(frame).flatMap((s) => s.segments.map((g) => [(g.x1 + g.x2) / 2, (g.y1 + g.y2) / 2] as const));
+    const centres = frame.flatMap((s) => s.segments.map((g) => [(g.x1 + g.x2) / 2, (g.y1 + g.y2) / 2] as const));
     // Every resting position that has a dash nearby (within the push) moved away or stayed.
     let pushed = 0;
     for (let i = 0; i < rest.count; i += 1) {
@@ -335,9 +321,6 @@ describe('the surface under the probe', () => {
     const after = env.drawn.length;
     env.tick();
     assert.equal(env.drawn.length, after, 'and nothing is drawn');
-    // A still pointer keeps the field lit and the crosshair drawn.
-    const last = env.drawn[env.drawn.length - 1]!;
-    assert.equal(yellowStrokes(last).length, 1);
   });
 
   it('leaves a brief wake: a dash relaxes over about a quarter of a second, not at once', () => {
@@ -348,14 +331,14 @@ describe('the surface under the probe', () => {
     env.move(500, 300);
     env.tick();
     const frame = env.drawn[env.drawn.length - 1]!;
-    const nearOld = inkStrokes(frame).flatMap((s) => s.segments.map((g) => ({ g, a: alpha(s) })));
+    const nearOld = frame.flatMap((s) => s.segments.map((g) => ({ g, a: alpha(s) })));
     const touched = nearOld.filter(({ g }) => Math.hypot((g.x1 + g.x2) / 2 - 100, (g.y1 + g.y2) / 2 - 100) < 60);
     assert.ok(touched.some(({ a }) => a > 0.1), 'the old position is still registering one frame later');
     const ticks = env.settle();
     assert.ok(ticks * 16.7 > RELAX_MS * 0.5, 'and takes a while to relax');
   });
 
-  it('returns to the still plane when the pointer leaves: no yellow, every dash at rest', () => {
+  it('returns to the still plane when the pointer leaves: every dash at rest', () => {
     const env = fakeEnvironment();
     attachField(env.canvas, env.win);
     const { count } = layoutLattice(640, 400);
@@ -364,13 +347,12 @@ describe('the surface under the probe', () => {
     env.leave();
     env.settle();
     const last = env.drawn[env.drawn.length - 1]!;
-    assert.equal(yellowStrokes(last).length, 0);
     assert.equal(last.length, 1, 'one stroke: all dashes at rest');
     assert.equal(last[0]!.segments.length, count);
     assert.equal(env.pending(), 0);
   });
 
-  it('uses yellow only for the crosshair, and neither verdict colour', () => {
+  it('draws only in the ink colour: no yellow, and neither verdict colour', () => {
     const env = fakeEnvironment();
     attachField(env.canvas, env.win);
     for (const [x, y] of [[50, 50], [320, 200], [600, 380], [10, 390]] as const) {
@@ -380,8 +362,7 @@ describe('the surface under the probe', () => {
     env.settle();
     for (const frame of env.drawn) {
       for (const stroke of frame) {
-        if (stroke.style === YELLOW) assert.equal(stroke.segments.length, 4, 'yellow is the crosshair');
-        else assert.match(stroke.style, /^rgba\(228, 230, 218, /, 'everything else is the ink colour');
+        assert.match(stroke.style, /^rgba\(228, 230, 218, /, 'every stroke is the ink colour');
       }
     }
   });
@@ -403,7 +384,6 @@ describe('following the settings and the window', () => {
     assert.equal(env.listeners(), 0, 'switched off');
     assert.equal(env.cancelled.length, 1, 'the waiting frame was cancelled');
     assert.equal(env.drawn.length, before + 1, 'the still plane is drawn again');
-    assert.equal(yellowStrokes(env.drawn[env.drawn.length - 1]!).length, 0);
   });
 
   it('redraws for a new window size, once per frame however many resize events arrive', () => {
@@ -452,7 +432,8 @@ describe('what the effect is not', () => {
       assert.ok(!source.includes(banned), banned);
     }
     assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(source), 'no colour literal: the colours come from the page tokens');
-    assert.ok(source.includes("'--ink'") && source.includes("'--live'"));
+    assert.ok(source.includes("'--ink'"), 'the ink comes from the page token');
+    assert.ok(!source.includes("'--live'"), 'the effect has no yellow');
     assert.ok(!/--(allow|deny)/.test(source), 'the verdict colours are not touched');
   });
 });

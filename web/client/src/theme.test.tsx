@@ -184,3 +184,36 @@ describe('where each colour may appear', () => {
     }
   });
 });
+
+describe('the app shell layout', () => {
+  const shell = rules.filter((rule) => rule.file === 'styles.css');
+  const forSelector = (pattern: RegExp) => shell.filter((rule) => pattern.test(rule.selector));
+
+  it('sets the boundary label without a transform, filter or layer that would blur it', () => {
+    const label = forSelector(/^\.rail__label$/);
+    assert.ok(label.length >= 2, 'the label has its rules');
+    for (const rule of label) {
+      assert.ok(!/(^|[\s;])(transform|filter|backdrop-filter|will-change|perspective|opacity)\s*:/.test(rule.body), rule.selector);
+    }
+  });
+
+  it('sizes the boundary label in whole pixels', () => {
+    const main = forSelector(/^\.rail__label$/)[0]!.body;
+    for (const property of ['font-size', 'line-height', 'padding']) {
+      const value = new RegExp(`${property}:\\s*([^;]+);`).exec(main)?.[1];
+      assert.ok(value, property);
+      assert.match(value, /^(\d+px\s*)+$/, `${property} is whole pixels, found ${value}`);
+    }
+  });
+
+  it('starts both zones at the same height, as rows of one shared grid', () => {
+    for (const rule of forSelector(/^\.zone(--agent|--money)?$/)) {
+      assert.ok(!/(^|[\s;])(padding-top|margin-top|padding-block|transform|align-self)\s*:/.test(rule.body), rule.selector);
+    }
+    const stage = forSelector(/^\.stage$/)[0]!.body;
+    assert.match(stage, /grid-template-rows:\s*auto auto auto 1fr/);
+    const subgrid = forSelector(/^\.zone$/).find((rule) => rule.body.includes('subgrid'));
+    assert.ok(subgrid, 'the zones share the stage rows through a subgrid');
+    assert.match(subgrid.body, /grid-row:\s*1 \/ span 4/);
+  });
+});
