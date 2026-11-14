@@ -1737,13 +1737,22 @@ a documented equivalent. It complements the ad-hoc check of reintroducing a know
   `src/loosening.rs` (see "Owner timelock"); the table's mutants are in `loosens` now, and its line numbers no
   longer apply. `contract/.cargo/mutants.toml` now scopes `src/loosening.rs` (all of it: `loosens`,
   `policy_loosens`, `is_safe_destination`) and, in `src/timelock.rs`, the `LooseningState` implementation,
-  `is_loosening`, `is_timelocked`, `validate_change` and the treasury helpers: 294 mutants with the same filters
-  (64 in `loosening.rs`, 44 in `timelock.rs`). That scope has **not** been re-run; the score above is the one
-  measured. The six mutants were re-proved against the new file, by the same unit tests and by the Kani proofs
-  (see the table under the classifier proofs).
+  `is_loosening`, `is_timelocked`, `validate_change` and the treasury helpers: 295 mutants with the same filters
+  (31 in `policy.rs`, 17 in `window.rs`, 64 in `loosening.rs`, 44 in `timelock.rs`, 26 in `gate.rs`, 113 in
+  `evm.rs`; `policy.rs` has one more than in the first run, for `headroom`). The six mutants were re-proved
+  against the new file, by the same unit tests and by the Kani proofs (see the table under the classifier proofs).
   **The classification logic is now covered by the Kani proofs** ("The timelock classifier: `loosening::loosens`"),
   **which supersede the mutation score for it**: soundness and completeness over every input, not a sample. What the
   proofs do not reach, the lookups in the `LooseningState` implementation for `Minder`, stays in the mutation scope.
+
+- **Result on the current scope** (run on 2026-11-14, 3 h 1 min, the same command and test set, `-j 1`, rustc
+  1.94.1): **295 mutants: 270 caught, 6 missed, 19 unviable, 0 timed out.** 276 are viable, so 270 of 276 are killed.
+  The 6 survivors are exactly the six documented equivalents listed below (`evm.rs:61` three times, `evm.rs:237`,
+  `evm.rs:291` and `advance_nonce_past` in `gate.rs`); none is new, and there is no survivor in `policy.rs`,
+  `window.rs`, `loosening.rs` or `timelock.rs`. The six `is_loosening` mutants that the first run found
+  under-pinned are caught in their new home. (`cargo mutants` exits with status 2 when any mutant is missed, as
+  here.) The first measurement above, 259 mutants and 241 of 247 viable killed, was made before the classifier
+  moved and is kept as published.
 
 - **Equivalent mutants** (cannot change observable behaviour):
 
@@ -1769,9 +1778,9 @@ contract/test.sh                                  # the whole test suite: the ca
 **The canonical test command** is `contract/test.sh` (equivalently `cargo test-all` in `contract/`, an
 alias for `cargo test --no-fail-fast`). It runs every test binary even if one fails, so one failure never
 hides the rest; prints one line per binary and its result; and exits non-zero on any failure. Extra
-arguments go to `cargo test` (`contract/test.sh --test evm_gate`). It needs Rust 1.93 or newer and
-`cargo-near` (`cargo install --locked cargo-near`), which the sandbox tests use to build the contract and
-the test doubles; the first run downloads the near-sandbox binary. A full run takes about ten minutes.
+arguments go to `cargo test` (`contract/test.sh --test evm_gate`). It needs rustc 1.94.1 (selected by the repository's
+`rust-toolchain.toml`) and `cargo-near` 0.23.0 (`cargo install --locked --version 0.23.0 cargo-near`), which the sandbox tests use to build the contract and
+the test doubles; the first run downloads the near-sandbox binary. A full run takes about 10 to 14 minutes.
 
 **Why the settings in `.cargo/config.toml` matter.** The sandbox integration tests start one near-sandbox
 node per test, several at once. Under CPU load a node could take longer than the default 10 seconds to

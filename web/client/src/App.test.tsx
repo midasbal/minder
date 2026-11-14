@@ -256,8 +256,10 @@ describe('the docs', () => {
 
   it('keeps the exact mutation figures, with their caveat, that the landing page rounds', () => {
     const text = visibleText(html);
-    assert.ok(text.includes('241 of the 247 viable mutants are killed by tests'));
-    assert.ok(text.includes('that new scope has not been re-run through the mutation tool'));
+    assert.ok(text.includes('270 of the 276 viable mutants are killed by tests'));
+    assert.ok(text.includes('The current scope is 295 mutants'));
+    assert.ok(text.includes('The first measurement, before the classifier moved into its own module, was 259 mutants: 241 of 247 viable killed'));
+    assert.ok(!text.includes('has not been re-run'), 'the run has been done');
   });
 
   it('says what the live demo does, and that it holds no key and sends no real request', () => {
@@ -329,7 +331,7 @@ describe('the FAQ', () => {
       'This is the documented boundary called G2',
       'machine-checked within stated bounds, not complete formal verification',
       '43 harnesses',
-      '241 of 247 viable mutants killed, the other 6 documented as equivalent',
+      '270 of 276 viable mutants killed on the current scope, the other 6 documented as equivalent',
       'a 1,743-case differential corpus',
       'one mandate is active per contract',
       'there is no packaged client library',

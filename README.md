@@ -73,13 +73,13 @@ by limits it cannot change, enforced by code it does not control.
   Anything that loosens authority (raising a cap, adding a recipient, extending a mandate, raising fees) waits a
   configurable delay, and a separate **guardian** account can only tighten (`freeze`, `revoke_mandate`,
   `cancel_change`). The delay is the in-contract window in which someone other than the owner can react to a
-  compromised owner key; defending the owner key itself is still best done with a multisig owner (`DESIGN.md`).
+  compromised owner key; defending the owner key itself is still best done with a multisig owner (`contract/DESIGN.md`).
 - **Every request is logged.** Allowed or denied, each request emits a `decision` event (NEP-297) with the
   reason.
 
 What this does not do, stated up front: `freeze` and `revoke_mandate` stop new payments but cannot recall an
 EVM transaction the contract has already signed (a signed EIP-1559 transaction has no expiry). The loss is
-bounded by the limits that applied at signing, and the owner has a manual replacement path. See `DESIGN.md`,
+bounded by the limits that applied at signing, and the owner has a manual replacement path. See `contract/DESIGN.md`,
 "G2". The owner's own recovery methods (`owner_withdraw` and its EVM forms) are deliberately outside the policy:
 Minder contains the agent, not the owner.
 
@@ -93,7 +93,7 @@ keys**: nobody, the deployer included, can sign as it, redeploy it or change its
 holds are the agent's restricted function-call key, which it adds to itself. Anyone can read the key list from
 the chain (`view_access_key_list`), and the verification script and the live console both do.
 
-The cost, from `DESIGN.md`: there is no upgrade path (a bug is fixed by moving to a new account with the owner's
+The cost, from `contract/DESIGN.md`: there is no upgrade path (a bug is fixed by moving to a new account with the owner's
 recovery methods), and whoever signs the deployment is the owner permanently.
 
 ### Provable, within stated bounds
@@ -105,10 +105,10 @@ The guarantees are machine-checked, with the bounds written down next to each re
   per variant), the sliding window and the EVM signature normalization. A proof holds for every input *within its
   stated bounds*; the bounds, and what is deliberately not proved (for example, end-to-end panic-freedom of
   `encode_signed`, which exhausted the model checker's memory), are listed in "Formal verification (Kani)".
-- **Mutation testing** with `cargo-mutants` 27.1.0: of 259 mutants measured, 247 were viable and **241 were
-  killed**; the other 6 are documented equivalents (they cannot change behaviour), none unexplained. The
-  classifier has since moved to `src/loosening.rs`, where the Kani proofs supersede the score; that new scope
-  (294 mutants) has not been re-run.
+- **Mutation testing** with `cargo-mutants` 27.1.0 on the current scope: of 295 mutants, 276 are viable and **270
+  were killed**; the other 6 are documented equivalents (they cannot change behaviour), none unexplained. The first
+  measurement, before the timelock classifier moved to `src/loosening.rs`, was 259 mutants, 247 viable, 241 killed
+  and the same 6 equivalents. The Kani proofs also cover the classifier.
 - **A 1,743-case differential corpus**: the EVM encoder checked byte for byte against viem
   (`contract/vectors/`), alongside a stateful model-based harness that compares the contract against a shadow
   model.
@@ -135,7 +135,7 @@ behind it, and the agent never has to hold funds.
 2. **Set the policy** (owner): `set_asset_policy(asset, per_tx_cap, window_limit, epoch_budget)` per asset,
    `set_recipient` for NEAR recipients, `set_evm_recipient` and `set_evm_config` for EVM payments, and fund the
    account with `deposit`. A timelock delay of zero means every change is instant, which is how a deployment is
-   armed; then `set_timelock_delay` switches the delay on (`DESIGN.md`, "Owner timelock").
+   armed; then `set_timelock_delay` switches the delay on (`contract/DESIGN.md`, "Owner timelock").
 
 3. **Grant the agent a mandate.** `grant_mandate(agent_key, expiry, scope, reset_budget)` with the agent's
    ed25519 public key. The contract adds it as the restricted function-call key described above. The private key
@@ -177,7 +177,7 @@ What it proves and does not: a match shows that this repository, built with the 
 exactly the bytes the chain runs. The build is not reproducible by construction (`cargo near build
 non-reproducible-wasm`), and the contract's on-chain metadata carries no build info (`"build_info": null`, which
 the script prints), so source-to-bytecode provenance rests on the documented pins: `Cargo.lock` with `--locked`,
-`near-sdk =5.29.1`, and rustc 1.94.1 (`DESIGN.md` does not pin cargo-near; the reproduction below used 0.23.0).
+`near-sdk =5.29.1`, and rustc 1.94.1 (`contract/DESIGN.md` does not pin cargo-near; the reproduction below used 0.23.0).
 Use the pinned compiler.
 
 One thing the wasm embeds is the absolute path of the cargo registry it was built under, so a different cargo
@@ -221,26 +221,33 @@ Sepolia.
 
 ## Build and test
 
-The contract (Rust 1.93 or newer; the documented results use rustc 1.94.1):
+The contract. Every result in this repository (the deployed hash, the tests, the proofs, the mutation run) was
+produced with **rustc 1.94.1**, and `cargo near` refuses some newer compilers for this `near-sdk`. The repository
+carries a [`rust-toolchain.toml`](rust-toolchain.toml) that selects 1.94.1 and the wasm target automatically:
 
 ```
+rustup toolchain install            # run in the repository: installs exactly what rust-toolchain.toml lists
+rustup target add wasm32-unknown-unknown   # only if your rustup did not add it (a no-op otherwise)
+cargo install --locked --version 0.23.0 cargo-near
 cd contract
-cargo near build non-reproducible-wasm --locked   # the production wasm (cargo install --locked cargo-near)
+cargo near build non-reproducible-wasm --locked   # the production wasm
 ./test.sh                                         # every test binary, with a per-binary summary
 ```
 
-`contract/test.sh` runs the unit tests, the sandbox integration tests and the model-based harness. The first
-run downloads the near-sandbox binary, and a full run takes about ten minutes (`DESIGN.md`, "Running").
+If you must use another compiler, `SKIP_RUST_VERSION_CHECK=1` skips cargo-near's compiler check; the bytes may then
+differ from the deployed ones. `contract/test.sh` runs the unit tests, the sandbox integration tests and the
+model-based harness. The first run downloads the near-sandbox binary, and a full run takes about 10 to 14 minutes
+(`contract/DESIGN.md`, "Running").
 
-The proofs (Kani installs its own nightly toolchain):
+The proofs (Kani installs its own nightly toolchain; the full run takes about 30 minutes):
 
 ```
-cargo install --locked kani-verifier && cargo kani setup     # once
+cargo install --locked --version 0.68.0 kani-verifier && cargo kani setup     # once
 cd contract/kani && cargo kani                               # all 43 harnesses
 cd contract/kani && cargo kani --harness normalize_s_is_total_and_always_low_s   # one
 ```
 
-The mutation tests (`cargo install --locked cargo-mutants`):
+The mutation tests (`cargo install --locked --version 27.1.0 cargo-mutants`; the full run takes about 3 hours):
 
 ```
 cd contract

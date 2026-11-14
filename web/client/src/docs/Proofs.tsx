@@ -103,15 +103,16 @@ export function Proofs() {
       <Sub id="mutation" title="Mutation testing">
         <p>
           cargo-mutants 27.1.0 injects small bugs into the deterministic logic and checks that the tests notice. The
-          scope was 259 mutants across the policy, the sliding window, the timelock classification, the nonce and
-          signature helpers, and the EVM encoder. In the first run 235 were caught, 12 survived and 12 would not compile.
-          After triage, <strong>241 of the 247 viable mutants are killed by tests, and the remaining 6 are documented
+          current scope is 295 mutants across the policy, the sliding window, the timelock classifier, the nonce and
+          signature helpers, and the EVM encoder. Run in full on 2026-11-14: 270 were caught, 6 survived and 19 would not
+          compile, so <strong>270 of the 276 viable mutants are killed by tests, and the remaining 6 are documented
           equivalents</strong> that cannot change observable behaviour. Nothing is left unexplained.
         </p>
         <p>
-          The run used the unit tests only, not the slower stateful harness. The six survivors that were real gaps were
-          all in the timelock classifier, and were closed with dedicated boundary tests. The classifier has since moved
-          into its own module, where Kani now proves it; that new scope has not been re-run through the mutation tool.
+          The first measurement, before the classifier moved into its own module, was 259 mutants: 241 of 247 viable
+          killed and the same 6 equivalents. Its 12 initial survivors included six real gaps, all in the timelock
+          classifier, which were closed with dedicated boundary tests and are caught in the current run. The runs used the
+          unit tests only, not the slower stateful harness, and Kani also proves the classifier.
         </p>
       </Sub>
 

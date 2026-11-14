@@ -5,3 +5,4 @@ node_modules/
 # Disposable spike with its own secrets; kept out of the real repository.
 spikes/
 CLAUDE.md
+contract/mutants.out/

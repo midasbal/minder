@@ -1,0 +1,8 @@
+# The compiler every result in this repository was produced with: the deployed code's hash, the tests and the
+# mutation run all used rustc 1.94.1. `cargo near` refuses some newer compilers for this version of near-sdk, so a
+# fresh clone uses this one automatically. `rustup toolchain install` (no arguments) installs exactly what is listed.
+# `cargo kani` is unaffected: it selects its own toolchain.
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]

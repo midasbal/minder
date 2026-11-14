@@ -10,7 +10,7 @@
 # binary and its result, and exits non-zero if anything failed. Extra arguments
 # go to `cargo test`, for example `contract/test.sh --test evm_gate`.
 #
-# Needs: Rust 1.93+, and `cargo-near` (cargo install --locked cargo-near), which
+# Needs: rustc 1.94.1 (rust-toolchain.toml), and `cargo-near` 0.23.0 (cargo install --locked --version 0.23.0 cargo-near), which
 # the sandbox tests use to build the contract and the test doubles. The first
 # run downloads the near-sandbox binary.
 set -u

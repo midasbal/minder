@@ -150,39 +150,47 @@ elif [ -n "$wasm" ]; then
     echo "  wasm supplied with --wasm: $wasm"
     echo "  its sha256: $built_hash"
 else
-    rustc_now="$(rustc --version | awk '{print $2}')"
-    echo "  toolchain: rustc $rustc_now; cargo-near: $(cargo near --version 2>/dev/null | head -n 1)"
-    echo "  documented pins: rustc $PINNED_RUSTC, near-sdk =5.29.1, Cargo.lock with --locked"
-    if [ "$rustc_now" != "$PINNED_RUSTC" ]; then
-        echo "  WARNING: rustc $rustc_now is not the documented $PINNED_RUSTC; a different compiler can produce different bytes"
-    fi
-    [ -z "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" ] || echo "  WARNING: RUSTFLAGS is set; it can change the bytes"
-    # The deployed wasm embeds the absolute path of the cargo registry it was built with (in the
-    # panic locations of dependencies). The deployment was built with cargo home /root/.cargo; if
-    # the deployed bytes really contain that path, map this machine's cargo home onto it, so the
-    # path alone cannot change the hash. Nothing is mapped if the deployed bytes do not contain it.
-    my_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-    build_env=()
-    if [ "$my_cargo_home" != "$DEPLOYED_CARGO_HOME" ] && [ -f "$workdir/onchain.wasm" ] &&
-       grep -a -q "$DEPLOYED_CARGO_HOME/registry/src/index.crates.io-" "$workdir/onchain.wasm"; then
-        echo "  the deployed code embeds the path $DEPLOYED_CARGO_HOME/registry/...; mapping yours ($my_cargo_home) onto it for the build"
-        # cargo-near replaces its default flags when given its own RUSTFLAGS, so the default one
-        # (strip, `-C link-arg=-s`) is repeated here; without it the wasm keeps two extra sections.
-        build_env=(--env "RUSTFLAGS=-C link-arg=-s --remap-path-prefix=$my_cargo_home=$DEPLOYED_CARGO_HOME")
-    fi
-    # A clean copy of what is committed, so build artifacts and local edits cannot leak in.
+    # A clean copy of what is committed, so build artifacts and local edits cannot leak in. It includes
+    # rust-toolchain.toml (when committed), so the build uses the pinned compiler whatever the caller's default is.
     if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
         build_note="this is not a git checkout, so there is no clean tree to build (pass --wasm instead)"
     else
         mkdir -p "$workdir/clean"
-        git -C "$repo" archive HEAD contract .cargo | tar -x -C "$workdir/clean"
-        echo "  building the production wasm from a clean copy of $(git -C "$repo" rev-parse --short HEAD) (a few minutes)..."
-        if (cd "$workdir/clean/contract" && cargo near build non-reproducible-wasm --locked ${build_env[@]+"${build_env[@]}"} --out-dir "$workdir/out") >"$workdir/build.log" 2>&1 &&
-           [ -f "$workdir/out/minder.wasm" ]; then
-            built_hash="$(sha256sum "$workdir/out/minder.wasm" | cut -d' ' -f1)"
-            echo "  built wasm: $(wc -c < "$workdir/out/minder.wasm" | tr -d ' ') bytes, sha256 $built_hash"
+        toolchain_file="$(git -C "$repo" ls-tree --name-only HEAD -- rust-toolchain.toml)"
+        # shellcheck disable=SC2086
+        git -C "$repo" archive HEAD contract .cargo $toolchain_file | tar -x -C "$workdir/clean"
+        # The compiler cargo will use in the copy: the pin if rustup honours rust-toolchain.toml, else the default.
+        if ! rustc_out="$(cd "$workdir/clean/contract" && rustc --version 2>&1)"; then
+            build_note="the Rust toolchain for this build is not installed: $(echo "$rustc_out" | head -n 1). Install the pinned one with: rustup toolchain install (run in the repository)"
         else
-            build_note="the build failed; the last lines of its log: $(tail -n 3 "$workdir/build.log" | tr '\n' ' ')"
+            rustc_now="$(echo "$rustc_out" | awk '{print $2}')"
+            echo "  toolchain: rustc $rustc_now; cargo-near: $(cargo near --version 2>/dev/null | head -n 1)"
+            echo "  documented pins: rustc $PINNED_RUSTC (rust-toolchain.toml), near-sdk =5.29.1, Cargo.lock with --locked"
+            if [ "$rustc_now" != "$PINNED_RUSTC" ]; then
+                echo "  WARNING: rustc $rustc_now is not the documented $PINNED_RUSTC; a different compiler can produce different bytes, and cargo-near may reject it (SKIP_RUST_VERSION_CHECK=1 skips its check)"
+            fi
+            [ -z "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" ] || echo "  WARNING: RUSTFLAGS is set; it can change the bytes"
+            # The deployed wasm embeds the absolute path of the cargo registry it was built with (in the
+            # panic locations of dependencies). The deployment was built with cargo home /root/.cargo; if
+            # the deployed bytes really contain that path, map this machine's cargo home onto it, so the
+            # path alone cannot change the hash. Nothing is mapped if the deployed bytes do not contain it.
+            my_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+            build_env=()
+            if [ "$my_cargo_home" != "$DEPLOYED_CARGO_HOME" ] && [ -f "$workdir/onchain.wasm" ] &&
+               grep -a -q "$DEPLOYED_CARGO_HOME/registry/src/index.crates.io-" "$workdir/onchain.wasm"; then
+                echo "  the deployed code embeds the path $DEPLOYED_CARGO_HOME/registry/...; mapping yours ($my_cargo_home) onto it for the build"
+                # cargo-near replaces its default flags when given its own RUSTFLAGS, so the default one
+                # (strip, `-C link-arg=-s`) is repeated here; without it the wasm keeps two extra sections.
+                build_env=(--env "RUSTFLAGS=-C link-arg=-s --remap-path-prefix=$my_cargo_home=$DEPLOYED_CARGO_HOME")
+            fi
+            echo "  building the production wasm from a clean copy of $(git -C "$repo" rev-parse --short HEAD) (a few minutes)..."
+            if (cd "$workdir/clean/contract" && cargo near build non-reproducible-wasm --locked ${build_env[@]+"${build_env[@]}"} --out-dir "$workdir/out") >"$workdir/build.log" 2>&1 &&
+               [ -f "$workdir/out/minder.wasm" ]; then
+                built_hash="$(sha256sum "$workdir/out/minder.wasm" | cut -d' ' -f1)"
+                echo "  built wasm: $(wc -c < "$workdir/out/minder.wasm" | tr -d ' ') bytes, sha256 $built_hash"
+            else
+                build_note="the build failed; the last lines of its log: $(tail -n 3 "$workdir/build.log" | tr '\n' ' ')"
+            fi
         fi
     fi
 fi

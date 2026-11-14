@@ -54,7 +54,7 @@ Every result is bounded by the limits in Section 5 (L9 for the proofs), not abso
 | --- | --- | --- |
 | Manual review | The author's own read of every module against the stated invariants, recorded in the "Choices that need your review" and "Decision log" sections of `DESIGN.md`. Not independent. | n/a |
 | Kani bounded model checking (0.68.0) | The pure logic: `evaluate`, the timelock classifier, the sliding window, EVM signature normalization. Holds for every input within stated bounds. | 43 harnesses |
-| Mutation testing (`cargo-mutants` 27.1.0) | Whether the unit tests notice a change to the pure logic | 241 of 247 viable mutants killed, 6 documented equivalents |
+| Mutation testing (`cargo-mutants` 27.1.0) | Whether the unit tests notice a change to the pure logic | Current scope: 270 of 276 viable mutants killed, the 6 survivors documented equivalents (first measurement: 241 of 247) |
 | Differential testing against viem 2.57.16 | The hand-written EIP-1559 encoder, byte for byte | 1,743 cases |
 | Stateful model-based harness (`proptest`) | The contract against an independently written shadow model, over every state reachable within depth 8, plus 4,000 random long sequences | 409,382 states |
 | Byte-level fuzz tests | Signature parsing and assembly never panic and accept exactly the acceptable inputs | 10,000 cases per property |
@@ -178,8 +178,9 @@ harness encodes the rule independently in its oracle. When the fix was temporari
 
 ### F3. Mutation testing: six real test gaps, six equivalents
 
-`cargo-mutants` generated 259 mutants over the pure logic. 12 were viable and missed by the tests (12 more do not
-compile and are unviable). Triage of the 12:
+Two runs. **The first measurement** (before the timelock classifier moved to `src/loosening.rs`): `cargo-mutants`
+generated 259 mutants over the pure logic. 12 were viable and missed by the tests (12 more do not compile and are
+unviable). Triage of the 12:
 
 - **Six were genuine test gaps**, all in the timelock classifier `is_loosening`: no test sat on these boundaries.
   They are now pinned by four dedicated tests in `src/timelock_tests.rs`. Each was proved against its own
@@ -200,8 +201,14 @@ compile and are unviable). Triage of the 12:
   (the byte is read through `as u8`, and 256 is zero modulo 256), and `>` to `>=` in `advance_nonce_past` (the
   only differing case re-inserts the value already stored).
 
-Result: of 247 viable mutants, **241 killed and 6 documented equivalents, none unexplained**. These were gaps in
-the tests, not defects in the contract's behaviour.
+Result of the first measurement: of 247 viable mutants, **241 killed and 6 documented equivalents, none
+unexplained**. These were gaps in the tests, not defects in the contract's behaviour.
+
+**The current scope** was run in full on 2026-11-14 (295 mutants, `-j 1`, 3 h 1 min, rustc 1.94.1): **270 caught, 6
+missed, 19 unviable, 0 timed out**, so 270 of 276 viable mutants are killed. The 6 survivors are exactly the six
+documented equivalents above (`evm.rs:61` three times, `evm.rs:237`, `evm.rs:291`, and `advance_nonce_past` in
+`gate.rs`). None is new, and none is in `policy.rs`, `window.rs`, `loosening.rs` or `timelock.rs`. The six test
+gaps of the first run are caught in their new home, `loosens`.
 
 ### F4. Faults deliberately injected, to show the tests would notice
 
@@ -285,9 +292,10 @@ reviewer does not have to find them.
 - **The accounting is not formally proved.** The reserve/settle/release logic in `lib.rs` and the booking rule are
   covered by the model harness, the sandbox tests and the unit tests, and 28 mutants of the accounting helpers in
   `lib.rs` are not scored by mutation testing (deferred to a separate pass against the harness).
-- **The mutation score is for a scope that has since changed.** It was measured before the classifier moved to
-  `src/loosening.rs`; the current scope (294 mutants) has not been re-run. The classifier's coverage is now the
-  Kani proofs.
+- **The mutation score does not cover everything.** It covers the pure logic and the classifier's state lookups
+  (295 mutants, run in full on the current source). The first measurement (259 mutants) predates the move of the
+  classifier to `src/loosening.rs`; the classifier's coverage is now also the Kani proofs. The mutants of the
+  accounting helpers in `lib.rs` are not in this scope, per the item above.
 - **Bounded model checking is not a proof for all inputs.** Every Kani result is a statement about the stated
   bounds; the stateful harness explores to depth 8 and samples beyond it.
 
@@ -315,6 +323,19 @@ with all 24 `kani::cover!` points satisfied (so no proof is vacuous) and none un
 
 ### Mutation testing: `cargo-mutants` 27.1.0, rustc 1.94.1
 
+**Current scope** (`contract/.cargo/mutants.toml`, run in full on 2026-11-14, 3 h 1 min):
+
+| | Count |
+| --- | --- |
+| Mutants | **295** (`policy.rs` 31, `window.rs` 17, `loosening.rs` 64, `timelock.rs` 44, `gate.rs` 26, `evm.rs` 113) |
+| Unviable (do not compile) | 19 |
+| Viable | **276** |
+| **Caught (killed)** | **270** |
+| **Missed** | **6**, all documented equivalents |
+| Timed out | 0 |
+
+**First measurement** (before the classifier moved to `src/loosening.rs`; kept as published):
+
 | | Count |
 | --- | --- |
 | Mutants measured | **259** (`policy.rs` 30, `window.rs` 17, `timelock.rs` 73, `gate.rs` 26, `evm.rs` 113) |
@@ -325,10 +346,8 @@ with all 24 `kani::cover!` points satisfied (so no proof is vacuous) and none un
 | **Killed after triage** | **241** (six gaps closed by four new tests) |
 | **Documented equivalents** | **6** (none unexplained) |
 
-Test set: `cargo test --lib -- --skip model_tests` (the unit tests, about 25 s). **Caveat:** this was measured before
-the classifier moved to `src/loosening.rs`. `contract/.cargo/mutants.toml` now scopes 294 mutants (64 in
-`loosening.rs`, 44 in `timelock.rs`); that scope has **not** been re-run. The classifier is now covered by the
-Kani proofs, which supersede the mutation score for it.
+Test set for both: `cargo test --lib -- --skip model_tests` (the unit tests, about 25 s). The classifier is also covered
+by the Kani proofs, which supersede the mutation score for it.
 
 ### Differential corpus: 1,743 cases
 
@@ -432,8 +451,8 @@ On 2026-11-14 (the Kani and test runs against commit `dfe065c`; the deployment c
 | `cd contract/kani && cargo kani` | 43 of 43 harnesses verified, 0 failures; 24 cover points satisfied |
 | `contract/test.sh` | all test binaries passed: 418 tests |
 | `scripts/verify-deployment.sh`, clean build from the committed tree | PASS (4 of 4): built wasm equals the on-chain code (`2fdd0444…`), the repository's recorded hash equals the on-chain code, no full-access key, one restricted key |
+| `cargo mutants` (the README command, current scope) | 295 mutants: 270 caught, 6 missed (the documented equivalents), 19 unviable, 0 timed out |
 | Citations in this document | every test and proof name cited in Section 3 and 4 was checked to exist as a function in `contract/` |
 
-**Not re-run for this review:** the mutation tests (the figures in Section 6 are `DESIGN.md`'s measured results,
-and the current 294-mutant scope has never been run) and the live Chain Signatures signing (the recorded run in
-`live-run.json` is from 2026-11-14 and is verifiable on the explorers).
+**Not re-run for this review:** the live Chain Signatures signing (the recorded run in `live-run.json` is from
+2026-11-14 and is verifiable on the explorers).

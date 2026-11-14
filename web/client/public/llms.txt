@@ -20,7 +20,7 @@ Minder is a hackathon project (tracks: AI Security, Real-World Money). It runs o
 ## Verification and its bounds
 
 - Kani 0.68.0 bounded model checking: 43 proof harnesses covering the firewall decision, the timelock classifier, the sliding window and signature normalization. Each holds for every input within its stated bounds. The bounds, and the parts that are not proved (such as panic-freedom of the signed-transaction encoder, the EVM recipient scope, and the reserve and settle accounting), are listed in AUDIT.md and DESIGN.md.
-- Mutation testing with cargo-mutants 27.1.0: 259 mutants measured, 247 viable, 241 killed by tests, and 6 documented as behaviourally equivalent. The measurement predates the move of the timelock classifier into its own module; AUDIT.md states the current status.
+- Mutation testing with cargo-mutants 27.1.0 on the current scope: 295 mutants, 276 viable, 270 killed by tests, and the 6 survivors documented as behaviourally equivalent. An earlier measurement, before the timelock classifier moved into its own module, found 259 mutants, 247 viable, 241 killed and the same 6 equivalents.
 - A differential corpus of 1,743 cases compares the EVM transaction encoder with viem 2.57.16 byte for byte.
 - The deployed wasm has sha256 `2fdd044411312fba8bc18b91ce06138b0c933cdb32bbb5296964f6b35ba54d09`. A script rebuilds the contract from a clean checkout and compares hashes. The build is not reproducible by construction, and the contract's on-chain metadata carries no build information, so the link from source to deployed code rests on the documented toolchain pins.
 

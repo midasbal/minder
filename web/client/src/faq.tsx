@@ -184,7 +184,7 @@ export const FAQ: FaqItem[] = [
           It is machine-checked within stated bounds, not complete formal verification. Kani does bounded model checking:
           43 harnesses prove properties of the firewall decision, the timelock classifier, the sliding window and
           signature normalization for <em>every</em> input within each harness&rsquo;s bounds. Alongside that sit mutation
-          testing (241 of 247 viable mutants killed, the other 6 documented as equivalent) and a 1,743-case differential
+          testing (270 of 276 viable mutants killed on the current scope, the other 6 documented as equivalent) and a 1,743-case differential
           corpus against viem.
         </p>
         <p>
