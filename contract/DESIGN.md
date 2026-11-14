@@ -703,8 +703,8 @@ in practice, `u64` holds nonce, gas and chain id.
 ### Rules
 
 - **No EIP-155.** A type-2 transaction carries its chain id inside the signed payload. `y_parity` is
-  the recovery id itself (0 or 1): never `+ 27`, never `chain_id * 2 + 35`. This matches what the
-  spike observed from chainsig.js (`yParity = v - 27`).
+  the recovery id itself (0 or 1): never `+ 27`, never `chain_id * 2 + 35`. This matches what an earlier
+  throwaway experiment (not kept in this repository) observed from chainsig.js (`yParity = v - 27`).
 - **Low-s.** Ethereum rejects `s > n/2` (EIP-2). `n/2` is rounded down, so `s == n/2` is already low.
   Negating `s` negates the recovered point, which is why the parity flips with it. `normalize_s` must
   run before `encode_signed`.
@@ -730,7 +730,7 @@ in practice, `u64` holds nonce, gas and chain id.
 The audit anchor is `vectors/gen-evm-vectors.mjs`, which uses viem 2.57.16 (an independent
 implementation) to serialize fixed field sets with fixed signatures, and prints the unsigned bytes,
 the signing hash and the signed bytes. The Rust tests hard-code those outputs and require byte-for-byte
-equality for all three. Run it from a directory with viem installed (the spike has it) to reproduce.
+equality for all three. Run it from a directory with viem 2.57.16 installed (`npm install viem@2.57.16`) to reproduce.
 
 | Vector | What it pins down |
 | --- | --- |
@@ -759,8 +759,8 @@ half-order comparison and the borrow in the subtraction each made the tests fail
 ## EVM signing gate (`src/gate.rs`)
 
 `request_evm_payment(recipient, amount)` is the same reserve/settle/release lifecycle as the local
-transfer, with a `sign` call to the Chain Signatures contract in place of the transfer. The spike
-(`spikes/yield-resume-sign`) showed the signer's `sign` is itself a yield, so a plain
+transfer, with a `sign` call to the Chain Signatures contract in place of the transfer. An earlier throwaway
+experiment (not kept in this repository) showed the signer's `sign` is itself a yield, so a plain
 `sign(...).then(callback)` suspends until the MPC answers, and the signer's timeout arrives as
 `Err(PromiseError::Failed)`. The gate uses exactly that; it creates no yield of its own.
 
@@ -1053,7 +1053,7 @@ until its nonce is mined or replaced, and anyone who holds it can broadcast it.
 ### Testnet capstone
 
 Production wasm deployed to `minder-spike-d5614e6c.testnet` (the account whose derived address for
-path `ethereum-1` was funded by the Sepolia spike), owner and agent as separate faucet-funded
+path `ethereum-1` had been funded in an earlier throwaway Sepolia experiment, also not kept in this repository), owner and agent as separate faucet-funded
 accounts, signer `v1.signer-prod.testnet`. Configuration: `Evm(11155111)` policy (cap 2e14 wei,
 limit 1e15), recipient `0x…dEaD`, `max_fee_per_gas` 1 gwei, tip 100 wei, `raise_evm_nonce` to 1.
 The agent's `request_evm_payment(…dEaD, 1e14)` returned in about 6 s of chain time (10 blocks), the

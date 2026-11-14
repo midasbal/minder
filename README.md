@@ -172,7 +172,9 @@ derives for this contract.
   [Build and test](#build-and-test)): the page reads the live testnet contract straight from your browser, so a
   local run shows the same live data.
 - **Design and evidence:** [`contract/DESIGN.md`](contract/DESIGN.md) is the source for the guarantees and figures above.
-- **Audit notes:** `AUDIT.md` is coming and is not in the repository yet.
+- **Security self-audit:** [`AUDIT.md`](AUDIT.md): scope and method, trust model, a threat-to-mechanism-to-test
+  matrix, findings from our own tooling, known limitations and the proof ledger. It is the author's own review, not an
+  independent audit.
 
 A real run, recorded on testnet: payments the contract gated, signed through Chain Signatures and settled on
 Sepolia.
