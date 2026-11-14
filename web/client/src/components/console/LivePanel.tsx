@@ -45,28 +45,55 @@ function Codes({ items }: { items: string[] | null }) {
   );
 }
 
-function Asset({ row, windowSeconds }: { row: AssetRow; windowSeconds: number | null }) {
+/** One row per asset: the policy and what is left of it, so the three assets read side by side. */
+function PolicyTable({ rows, windowSeconds }: { rows: AssetRow[]; windowSeconds: number | null }) {
+  const unread = rows.flatMap((row) => [row.headroom, row.usage]).find((section) => !section.ok);
   return (
-    <div className="asset">
-      <h4 className="asset__title">{row.label}</h4>
-      <dl className="kv">
-        <Row name="Per-transaction cap">{row.perTx}</Row>
-        <Row name={windowSeconds === null ? 'Window limit' : `Window limit (${windowSeconds} s)`}>{row.window}</Row>
-        <Row name="Budget for this grant">{row.budget ?? 'none'}</Row>
-        <Row name="Window left now">{row.headroom.ok ? row.headroom.value.windowRemaining : 'unread'}</Row>
-        <Row name="Budget left now">
-          {row.headroom.ok ? (row.headroom.value.budgetRemaining ?? 'no budget set') : 'unread'}
-        </Row>
-        <Row name="Committed / in flight">
-          {row.usage.ok ? `${row.usage.value.committed} / ${row.usage.value.reserved}` : 'unread'}
-        </Row>
-      </dl>
-      {(!row.headroom.ok || !row.usage.ok) && (
-        <p className="unread">
-          Couldn't read the headroom or usage for this asset. {!row.headroom.ok ? row.headroom.message : !row.usage.ok ? row.usage.message : ''}
-        </p>
-      )}
-    </div>
+    <>
+      <div className="ptable-wrap">
+        <table className="ptable">
+          <caption className="sr-only">Policy and headroom per asset, in whole units of each asset</caption>
+          <thead>
+            <tr>
+              <th scope="col">Asset</th>
+              <th scope="col">Per tx</th>
+              <th scope="col">{windowSeconds === null ? 'Window' : `${windowSeconds} s window`}, left / limit</th>
+              <th scope="col">Budget, left / total</th>
+              <th scope="col">Committed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <th scope="row" title={row.label}>
+                  {row.symbol}
+                </th>
+                <td>{row.perTx}</td>
+                <td>{row.headroom.ok ? `${row.headroom.value.windowRemaining} / ${row.window}` : 'unread'}</td>
+                <td>
+                  {row.headroom.ok
+                    ? row.headroom.value.budgetRemaining === null || row.budget === null
+                      ? 'none set'
+                      : `${row.headroom.value.budgetRemaining} / ${row.budget}`
+                    : 'unread'}
+                </td>
+                <td>{row.usage.ok ? row.usage.value.committed : 'unread'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {unread && !unread.ok && <p className="unread">Couldn't read part of this table from the chain. {unread.message}</p>}
+    </>
+  );
+}
+
+function More({ summary, children }: { summary: string; children: ReactNode }) {
+  return (
+    <details className="more">
+      <summary>{summary}</summary>
+      {children}
+    </details>
   );
 }
 
@@ -74,126 +101,125 @@ function Body({ snapshot }: { snapshot: Snapshot }) {
   const windowSeconds = snapshot.contract.ok ? snapshot.contract.value.windowSeconds : null;
   return (
     <>
-      <Facts title="Keyless" source="view_access_key_list">
-        <Read section={snapshot.keys}>
-          {(keys) => (
-            <>
-              <p className="headline">
-                <span className={keys.fullAccess === 0 ? 'is-verified' : undefined}>
-                  {keys.fullAccess} full-access {keys.fullAccess === 1 ? 'key' : 'keys'}
-                </span>
-                , {keys.restricted} restricted {keys.restricted === 1 ? 'key' : 'keys'}
-              </p>
-              <p className="facts__note">
-                No full-access key exists on the contract account, so no one can sign as it or change its code.{' '}
-                <ExternalLink href={EXPLORER_URL}>Check on the explorer</ExternalLink>
-              </p>
-              {keys.keys.map((key) => (
-                <dl className="kv" key={key.publicKey}>
-                  <Row name="Key">
-                    <code>{key.publicKey}</code>
-                  </Row>
-                  <Row name="May call only">
-                    <Codes items={key.methods} />
-                  </Row>
-                  <Row name="On">
-                    <code>{key.receiver}</code>
-                  </Row>
-                  <Row name="Allowance left">{key.allowance}</Row>
-                </dl>
-              ))}
-            </>
-          )}
-        </Read>
-      </Facts>
-
-      <Facts title="Deployed code" source="view_code, hashed in this browser">
-        <Read section={snapshot.code}>
-          {(code) => (
-            <>
-              <p className="headline">
-                <code className="break">{code.sha256}</code>
-              </p>
-              <p className="facts__note">
-                SHA-256 of the {code.bytes.toLocaleString('en-US')} bytes of wasm the chain holds for this account.{' '}
-                {code.matches ? (
-                  <span className="is-verified">It matches the build recorded in this repository.</span>
-                ) : (
-                  <span>It does NOT match the build recorded in this repository ({code.expected}).</span>
+      <div className="vitals">
+        <Facts title="Keyless" source="view_access_key_list">
+          <Read section={snapshot.keys}>
+            {(keys) => (
+              <>
+                <p className="headline">
+                  <span className={keys.fullAccess === 0 ? 'is-verified' : undefined}>
+                    {keys.fullAccess} full-access {keys.fullAccess === 1 ? 'key' : 'keys'}
+                  </span>
+                  , {keys.restricted} restricted {keys.restricted === 1 ? 'key' : 'keys'}
+                </p>
+                <p className="facts__note">
+                  No one can sign as the contract or change its code. <ExternalLink href={EXPLORER_URL}>Explorer</ExternalLink>
+                </p>
+                {keys.keys.length > 0 && (
+                  <More summary="The restricted key">
+                    {keys.keys.map((key) => (
+                      <dl className="kv" key={key.publicKey}>
+                        <Row name="Key">
+                          <code>{key.publicKey}</code>
+                        </Row>
+                        <Row name="May call only">
+                          <Codes items={key.methods} />
+                        </Row>
+                        <Row name="On">
+                          <code>{key.receiver}</code>
+                        </Row>
+                        <Row name="Allowance left">{key.allowance}</Row>
+                      </dl>
+                    ))}
+                  </More>
                 )}
-              </p>
-            </>
-          )}
-        </Read>
-      </Facts>
+              </>
+            )}
+          </Read>
+        </Facts>
+
+        <Facts title="Deployed code" source="view_code, hashed in this browser">
+          <Read section={snapshot.code}>
+            {(code) => (
+              <>
+                <p className="headline headline--hash">
+                  <code className="break">{code.sha256}</code>
+                </p>
+                <p className="facts__note">
+                  SHA-256 of the {code.bytes.toLocaleString('en-US')}-byte wasm the chain holds.{' '}
+                  {code.matches ? (
+                    <span className="is-verified">Matches the repository build.</span>
+                  ) : (
+                    <span>Does NOT match the repository build ({code.expected}).</span>
+                  )}
+                </p>
+              </>
+            )}
+          </Read>
+        </Facts>
+      </div>
 
       <Facts title="State" source="get_config, get_status">
         <Read section={snapshot.contract}>
           {(contract) => (
-            <dl className="kv">
-              <Row name="Status">{contract.status}</Row>
-              <Row name="Owner">
-                <code>{contract.owner}</code>
-              </Row>
-              <Row name="Guardian">{contract.guardian === null ? 'none' : <code>{contract.guardian}</code>}</Row>
-              <Row name="Spend window">
-                {contract.windowSeconds} s, in {contract.buckets} buckets
-              </Row>
-              <Row name="Timelock on loosening">{contract.timelockSeconds} s</Row>
-            </dl>
+            <p className="headline">
+              {contract.status} · {contract.windowSeconds} s spend window · {contract.timelockSeconds} s timelock on loosening
+            </p>
           )}
         </Read>
       </Facts>
 
-      <Facts title="Mandate" source="get_mandate">
+      <Facts title="Policy and headroom" source="get_asset_policies, get_headroom, get_budget_usage">
+        <Read section={snapshot.assets}>{(rows) => <PolicyTable rows={rows} windowSeconds={windowSeconds} />}</Read>
+      </Facts>
+
+      <div className="expanders">
         <Read section={snapshot.mandate}>
           {(mandate) =>
             mandate === null ? (
               <p className="facts__note">No mandate is granted: the agent can do nothing.</p>
             ) : (
-              <dl className="kv">
-                <Row name="Agent key">
-                  <code>{mandate.agentKey}</code>
-                </Row>
-                <Row name="Expires">{mandate.expiry} (UTC)</Row>
-                <Row name="Revoked">{mandate.revoked ? 'yes' : 'no'}</Row>
-                <Row name="Grant">#{mandate.epoch}</Row>
-                <Row name="Assets in scope">{mandate.assets.join(', ') || 'none'}</Row>
-                <Row name="NEAR recipients in scope">
-                  <Codes items={mandate.nearRecipients} />
-                </Row>
-                <Row name="EVM recipients in scope">
-                  <Codes items={mandate.evmRecipients} />
-                </Row>
-                <Row name="Extra cap, in base units">{mandate.perTxCap ?? 'none'}</Row>
-              </dl>
+              <More summary={`Mandate · grant #${mandate.epoch} · expires ${mandate.expiry} UTC · ${mandate.revoked ? 'revoked' : 'not revoked'}`}>
+                <dl className="kv">
+                  <Row name="Agent key">
+                    <code>{mandate.agentKey}</code>
+                  </Row>
+                  <Row name="Assets in scope">{mandate.assets.join(', ') || 'none'}</Row>
+                  <Row name="NEAR recipients in scope">
+                    <Codes items={mandate.nearRecipients} />
+                  </Row>
+                  <Row name="EVM recipients in scope">
+                    <Codes items={mandate.evmRecipients} />
+                  </Row>
+                  <Row name="Extra cap, in base units">{mandate.perTxCap ?? 'none'}</Row>
+                </dl>
+              </More>
             )
           }
         </Read>
-      </Facts>
-
-      <Facts title="Policy and headroom" source="get_asset_policies, get_headroom, get_budget_usage">
-        <Read section={snapshot.assets}>
-          {(rows) => (
-            <div className="assets">
-              {rows.map((row) => (
-                <Asset key={row.key} row={row} windowSeconds={windowSeconds} />
-              ))}
-            </div>
-          )}
-        </Read>
-      </Facts>
-
-      <Facts title="Allowlists" source="get_recipients, get_evm_recipients">
-        <dl className="kv">
-          <Row name="NEAR recipients">
-            {snapshot.nearRecipients.ok ? <Codes items={snapshot.nearRecipients.value} /> : <>unread: {snapshot.nearRecipients.message}</>}
-          </Row>
-          <Row name="EVM recipients">
-            {snapshot.evmRecipients.ok ? <Codes items={snapshot.evmRecipients.value} /> : <>unread: {snapshot.evmRecipients.message}</>}
-          </Row>
-        </dl>
-      </Facts>
+        {snapshot.contract.ok && (
+          <More summary="Roles · owner and guardian">
+            <dl className="kv">
+              <Row name="Owner">
+                <code>{snapshot.contract.value.owner}</code>
+              </Row>
+              <Row name="Guardian">
+                {snapshot.contract.value.guardian === null ? 'none' : <code>{snapshot.contract.value.guardian}</code>}
+              </Row>
+            </dl>
+          </More>
+        )}
+        <More summary="Allowlists · who the agent may pay">
+          <dl className="kv">
+            <Row name="NEAR recipients">
+              {snapshot.nearRecipients.ok ? <Codes items={snapshot.nearRecipients.value} /> : <>unread: {snapshot.nearRecipients.message}</>}
+            </Row>
+            <Row name="EVM recipients">
+              {snapshot.evmRecipients.ok ? <Codes items={snapshot.evmRecipients.value} /> : <>unread: {snapshot.evmRecipients.message}</>}
+            </Row>
+          </dl>
+        </More>
+      </div>
     </>
   );
 }

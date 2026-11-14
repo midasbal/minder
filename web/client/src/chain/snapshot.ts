@@ -5,7 +5,7 @@
   show. Nothing here is a default or a stand-in: a value is either what the chain returned or an error.
 */
 
-import { assetKey, describeAsset, formatAsset, type AssetId } from './assets';
+import { assetKey, describeAsset, formatAmount, type AssetId } from './assets';
 import { CONTRACT_ACCOUNT, callView } from './contract';
 import { RpcFailure, type Rpc } from './rpc';
 import { WASM_SHA256 } from '../links';
@@ -58,10 +58,12 @@ export interface AssetRow {
   key: string;
   asset: AssetId;
   label: string;
+  /** The unit the figures below are in. */
+  symbol: string;
   perTxCap: bigint;
   windowLimit: bigint;
   epochBudget: bigint | null;
-  headroom: Section<{ perTxCap: string; windowRemaining: string; budgetRemaining: string | null }>;
+  headroom: Section<{ windowRemaining: string; budgetRemaining: string | null }>;
   usage: Section<{ committed: string; reserved: string }>;
   perTx: string;
   window: string;
@@ -183,28 +185,28 @@ export async function readSnapshot(rpc: Rpc, { now = Date.now, expectedWasmSha25
             );
             if (room === null) throw new RpcFailure('rpc', 'the contract has no headroom for this asset');
             return {
-              perTxCap: formatAsset(asset, BigInt(room.per_tx_cap)),
-              windowRemaining: formatAsset(asset, BigInt(room.window_remaining)),
-              budgetRemaining: room.budget_remaining === null ? null : formatAsset(asset, BigInt(room.budget_remaining)),
+              windowRemaining: formatAmount(asset, BigInt(room.window_remaining)),
+              budgetRemaining: room.budget_remaining === null ? null : formatAmount(asset, BigInt(room.budget_remaining)),
             };
           }),
           section(async () => {
             const spent = await view<{ committed: string; reserved: string }>('get_budget_usage', { asset });
-            return { committed: formatAsset(asset, BigInt(spent.committed)), reserved: formatAsset(asset, BigInt(spent.reserved)) };
+            return { committed: formatAmount(asset, BigInt(spent.committed)), reserved: formatAmount(asset, BigInt(spent.reserved)) };
           }),
         ]);
         return {
           key: assetKey(asset),
           asset,
           label: describeAsset(asset).label,
+          symbol: describeAsset(asset).symbol,
           perTxCap,
           windowLimit,
           epochBudget,
           headroom,
           usage,
-          perTx: formatAsset(asset, perTxCap),
-          window: formatAsset(asset, windowLimit),
-          budget: epochBudget === null ? null : formatAsset(asset, epochBudget),
+          perTx: formatAmount(asset, perTxCap),
+          window: formatAmount(asset, windowLimit),
+          budget: epochBudget === null ? null : formatAmount(asset, epochBudget),
         };
       }),
     );

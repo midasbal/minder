@@ -33,6 +33,11 @@ export function formatAsset(asset: AssetId, value: bigint): string {
   return `${formatUnits(value, decimals)} ${symbol}`;
 }
 
+/** The amount without its unit, for a table whose column or row already names the asset. */
+export function formatAmount(asset: AssetId, value: bigint): string {
+  return formatUnits(value, describeAsset(asset).decimals);
+}
+
 export function assetKey(asset: AssetId): string {
   return JSON.stringify(asset);
 }

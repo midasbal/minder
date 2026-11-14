@@ -399,20 +399,20 @@ describe('the live reading', () => {
     assert.equal(snapshot.contract.ok && snapshot.contract.value.timelockSeconds, 120);
 
     const rows = snapshot.assets.ok ? snapshot.assets.value : [];
-    assert.deepEqual(rows.map((row) => [row.label, row.perTx, row.window, row.budget]), [
-      ['NEAR', '0.5 NEAR', '1 NEAR', '2 NEAR'],
-      ['ETH on Sepolia', '0.005 ETH', '0.015 ETH', '0.03 ETH'],
-      ['USDC on Sepolia', '5 USDC', '10 USDC', null],
+    assert.deepEqual(rows.map((row) => [row.label, row.symbol, row.perTx, row.window, row.budget]), [
+      ['NEAR', 'NEAR', '0.5', '1', '2'],
+      ['ETH on Sepolia', 'ETH', '0.005', '0.015', '0.03'],
+      ['USDC on Sepolia', 'USDC', '5', '10', null],
     ]);
     const near = rows[0]!;
     assert.ok(near.headroom.ok && near.usage.ok);
-    assert.equal(near.headroom.value.windowRemaining, '1 NEAR');
-    assert.equal(near.usage.value.committed, '0.05 NEAR');
+    assert.equal(near.headroom.value.windowRemaining, '1');
+    assert.equal(near.usage.value.committed, '0.05');
     const usdc = rows[2]!;
     assert.ok(usdc.headroom.ok && usdc.usage.ok);
-    assert.equal(usdc.headroom.value.windowRemaining, '10 USDC');
+    assert.equal(usdc.headroom.value.windowRemaining, '10');
     assert.equal(usdc.headroom.value.budgetRemaining, null, 'a policy with no budget has no budget headroom');
-    assert.equal(usdc.usage.value.committed, '0.5 USDC');
+    assert.equal(usdc.usage.value.committed, '0.5');
 
     assert.equal(snapshot.mandate.ok && snapshot.mandate.value?.expiry, '2026-12-14');
     assert.deepEqual(snapshot.nearRecipients, { ok: true, value: [VENDOR] });
@@ -460,7 +460,7 @@ describe('the live reading', () => {
     const snapshot = await readSnapshot(fakeChain(answers).rpc);
     assert.ok(snapshot.assets.ok);
     assert.equal(snapshot.assets.value[0]!.headroom.ok, false);
-    assert.equal(snapshot.assets.value[0]!.perTx, '0.5 NEAR');
+    assert.equal(snapshot.assets.value[0]!.perTx, '0.5');
   });
 
   it('says it reached nothing when every call fails', async () => {
@@ -695,13 +695,39 @@ describe('the live panel', () => {
     assert.ok(words.includes('Read from the chain at 09:30:05 UTC, block 102.'));
     assert.ok(words.includes('0 full-access keys'));
     assert.ok(words.includes('1 restricted key'));
-    assert.ok(words.includes('May call only'));
-    assert.ok(words.includes('request_evm_token_payment'));
-    assert.ok(words.includes('Check on the explorer'));
+    assert.ok(words.includes('Explorer'));
     assert.ok(words.includes('Active'));
-    assert.ok(words.includes('0.5 NEAR') && words.includes('0.005 ETH') && words.includes('5 USDC'));
-    assert.ok(words.includes(VENDOR) && words.includes(EVM_VENDOR));
+    assert.ok(words.includes('Policy and headroom'));
+    assert.match(words, /NEAR 0\.5 1 \/ 1 2 \/ 2 0\.05/);
+    assert.match(words, /ETH 0\.005 0\.015 \/ 0\.015 0\.03 \/ 0\.03 0\.0005/);
+    assert.match(words, /USDC 5 10 \/ 10 none set 0\.5/);
     assert.ok(words.includes('Refresh'));
+  });
+
+  it('keeps the secondary detail in expanders, closed, and the headline items outside them', async () => {
+    const store = await readyStore();
+    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    const summaries = [...html.matchAll(/<details class="more"><summary>(.*?)<\/summary>/g)].map((match) => text(match[1]!).trim());
+    assert.deepEqual(summaries, [
+      'The restricted key',
+      'Mandate · grant #2 · expires 2026-12-14 UTC · not revoked',
+      'Roles · owner and guardian',
+      'Allowlists · who the agent may pay',
+    ]);
+    assert.ok(!/<details[^>]*\bopen\b/.test(html), 'folded until asked for');
+    const outside = text(html.replace(/<details class="more">[\s\S]*?<\/details>/g, ''));
+    for (const headline of ['0 full-access keys', '401d99935ad4229f', 'Active', 'Policy and headroom']) assert.ok(outside.includes(headline), headline);
+    for (const detail of ['request_evm_token_payment', VENDOR, EVM_VENDOR, 'guardian.testnet']) assert.ok(!outside.includes(detail), detail);
+    const inside = text(html);
+    for (const detail of ['request_evm_token_payment', VENDOR, EVM_VENDOR, 'guardian.testnet']) assert.ok(inside.includes(detail), detail);
+  });
+
+  it('lays the three assets out as one table, not three cards', async () => {
+    const store = await readyStore();
+    const html = renderToString(<LivePanel store={store} state={store.getState()} />);
+    assert.equal((html.match(/<table class="ptable"/g) ?? []).length, 1);
+    assert.equal((html.match(/<tbody>[\s\S]*?<\/tbody>/)![0].match(/<tr>/g) ?? []).length, 3);
+    assert.ok(!html.includes('asset__title'));
   });
 
   it('marks the keyless count verified only when there really are no full-access keys', async () => {
@@ -720,7 +746,7 @@ describe('the live panel', () => {
     const store = await readyStore();
     const words = text(renderToString(<LivePanel store={store} state={store.getState()} />));
     assert.ok(words.includes(CODE_SHA256));
-    assert.ok(words.includes('does NOT match'), 'the stand-in wasm is not the repository build, and the page says so');
+    assert.ok(words.includes('Does NOT match the repository build'), 'the stand-in wasm is not the repository build, and the page says so');
   });
 
   it('says it could not read a section, in place, and shows the others', async () => {

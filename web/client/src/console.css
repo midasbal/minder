@@ -3,7 +3,7 @@
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1rem;
   min-width: 0;
   margin-top: 0.5rem;
   padding: clamp(1rem, 2vw, 1.5rem);
@@ -50,7 +50,7 @@
   gap: 1.1rem;
 }
 
-.field {
+.control {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -60,7 +60,7 @@
   border: 0;
 }
 
-.field__label {
+.control__label {
   padding: 0;
   font-family: var(--mono);
   font-size: 0.74rem;
@@ -70,7 +70,7 @@
   color: var(--ink-2);
 }
 
-.field__hint {
+.control__hint {
   font-size: 0.84rem;
   color: var(--ink-2);
 }
@@ -354,8 +354,8 @@
 .facts {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  padding-top: 1rem;
+  gap: 0.45rem;
+  padding-top: 0.85rem;
   border-top: 1px solid var(--line);
 }
 
@@ -398,24 +398,93 @@
   gap: 0.3rem;
 }
 
-.assets {
+/* Keyless and the code hash side by side when there is room. */
+.vitals {
   display: grid;
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0 1.5rem;
 }
 
-.asset {
-  padding: 0.8rem 0.9rem;
-  background: var(--bg-inset);
-  border: 1px solid var(--line);
+.headline--hash {
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 
-.asset__title {
-  margin: 0 0 0.4rem;
+/* The policy of every asset in one table, so the three read across. */
+.ptable-wrap {
+  overflow-x: auto;
+}
+
+.ptable {
+  width: 100%;
+  border-collapse: collapse;
   font-family: var(--mono);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ptable th,
+.ptable td {
+  padding: 0.5rem 0.6rem;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.ptable th:first-child,
+.ptable td:first-child {
+  text-align: left;
+  padding-left: 0;
+}
+
+.ptable thead th {
+  font-size: 0.68rem;
   font-weight: 500;
   letter-spacing: 0.06em;
-  text-transform: uppercase;
+  white-space: normal;
+  color: var(--ink-2);
+}
+
+.ptable tbody th {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.ptable tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.ptable tbody tr:hover {
+  background: var(--live-bg);
+}
+
+/* Secondary detail, folded away. */
+.expanders {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  border-top: 1px solid var(--line);
+}
+
+.more {
+  padding-block: 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.more[open] > :not(summary) {
+  margin-top: 0.6rem;
+}
+
+.more summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.03em;
+  color: var(--ink-2);
+}
+
+.more summary:hover {
+  color: var(--live);
 }
 
 @media (max-width: 40rem) {

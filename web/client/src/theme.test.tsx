@@ -217,3 +217,45 @@ describe('the app shell layout', () => {
     assert.match(subgrid.body, /grid-row:\s*1 \/ span 4/);
   });
 });
+
+describe('the stylesheets do not collide', () => {
+  const standalone = (pattern: RegExp) =>
+    rules.filter((rule) => rule.file !== undefined && pattern.test(rule.selector) && !rule.selector.includes(','));
+
+  it('define no class more than once across files: one file cannot restyle another file\'s element', () => {
+    const owner = new Map<string, string>();
+    for (const rule of rules) {
+      for (const selector of rule.selector.split(',').map((part) => part.trim())) {
+        const match = /^\.([a-z][a-z0-9_-]*)$/.exec(selector);
+        if (!match) continue;
+        const previous = owner.get(match[1]!);
+        assert.ok(previous === undefined || previous === rule.file, `.${match[1]} is styled in both ${previous} and ${rule.file}`);
+        owner.set(match[1]!, rule.file);
+      }
+    }
+    assert.ok(standalone(/^\.[a-z]/).length > 50, 'the check saw the stylesheets');
+  });
+
+  it('puts nothing outside the flow except what is meant to be', () => {
+    // Every rule that positions an element absolutely or fixed. An element that is not here cannot leave its
+    // container and pile up over the header; a new one has to be added here on purpose.
+    const outOfFlow = rules
+      .filter((rule) => /(^|[\s;])position:\s*(absolute|fixed)/.test(rule.body))
+      .map((rule) => rule.selector)
+      .sort();
+    assert.deepEqual(outOfFlow, [
+      '.field',
+      '.live-dot::after',
+      '.method input',
+      '.rail__label',
+      '.rail__ticks',
+      '.skip',
+      '.sr-only',
+    ]);
+  });
+
+  it('keeps the one fixed element the sensing canvas', () => {
+    const fixed = rules.filter((rule) => /(^|[\s;])position:\s*fixed/.test(rule.body)).map((rule) => rule.selector);
+    assert.deepEqual(fixed, ['.field']);
+  });
+});

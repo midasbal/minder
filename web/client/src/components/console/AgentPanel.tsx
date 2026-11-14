@@ -62,8 +62,8 @@ export function AgentPanel({ store, state }: Props) {
       </p>
 
       <form className="compose" onSubmit={submit} noValidate>
-        <fieldset className="field">
-          <legend className="field__label">Method the agent calls</legend>
+        <fieldset className="control">
+          <legend className="control__label">Method the agent calls</legend>
           <div className="methods">
             {METHODS.map((candidate) => (
               <label key={candidate.id} className="method">
@@ -78,13 +78,13 @@ export function AgentPanel({ store, state }: Props) {
               </label>
             ))}
           </div>
-          <p className="field__hint">
+          <p className="control__hint">
             <code>{spec.id}</code>
           </p>
         </fieldset>
 
-        <div className="field">
-          <label className="field__label" htmlFor="recipient">
+        <div className="control">
+          <label className="control__label" htmlFor="recipient">
             Recipient
           </label>
           <input
@@ -100,8 +100,8 @@ export function AgentPanel({ store, state }: Props) {
           />
         </div>
 
-        <div className="field">
-          <label className="field__label" htmlFor="amount">
+        <div className="control">
+          <label className="control__label" htmlFor="amount">
             Amount
           </label>
           <div className="amount">
@@ -118,7 +118,7 @@ export function AgentPanel({ store, state }: Props) {
             />
             <span className="amount__unit">{spec.symbol}</span>
           </div>
-          <p className="field__hint">Sent to the contract in base units ({spec.decimals} decimals).</p>
+          <p className="control__hint">Sent to the contract in base units ({spec.decimals} decimals).</p>
         </div>
 
         {problem && (
@@ -127,10 +127,10 @@ export function AgentPanel({ store, state }: Props) {
           </p>
         )}
 
-        <div className="field">
-          <p className="field__label">Attack presets</p>
+        <div className="control">
+          <p className="control__label">Attack presets</p>
           {presets.unavailable !== null ? (
-            <p className="field__hint">{presets.unavailable}</p>
+            <p className="control__hint">{presets.unavailable}</p>
           ) : (
             <ul className="presets">
               {presets.presets.map((preset) => (
@@ -143,7 +143,7 @@ export function AgentPanel({ store, state }: Props) {
               ))}
             </ul>
           )}
-          <p className="field__hint">
+          <p className="control__hint">
             A preset only fills the form; the verdict is read from the contract when you submit. The window and budget limits bind
             across several payments, so one dry run reaches them only once spending has accumulated.
           </p>
