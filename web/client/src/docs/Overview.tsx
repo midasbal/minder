@@ -1,3 +1,7 @@
+import { Link } from 'react-router';
+
+import { ExternalLink } from '../components/ExternalLink';
+import { AUDIT_URL, VERIFY_SCRIPT_URL } from '../links';
 import { DocSection } from './parts';
 
 export function Overview() {
@@ -25,15 +29,36 @@ export function Overview() {
           payment the policy denies is never signed.
         </li>
         <li>
-          <strong>Provable, not asserted.</strong> The policy core is formally proved with Kani (within stated
-          bounds), mutation-tested, and checked against a differential corpus built from an independent
-          implementation, viem.
+          <strong>Checked, not asserted.</strong> The policy core is machine-checked with Kani bounded model checking
+          (within stated bounds, which are documented), mutation-tested, and checked against a differential corpus built
+          from an independent implementation, viem. This is not a claim of complete formal verification.
         </li>
       </ul>
       <p>
         The rest of this page says who is trusted, what is guaranteed and what is not, how the system works, and how
         each claim is checked.
       </p>
+      <h3 className="doc-h3 doc-h3--plain">Check it yourself</h3>
+      <ul>
+        <li>
+          <Link to="/app">The live console</Link> attacks the deployed contract with dry runs, reads its limits from the
+          chain in your browser, and checks who signed each payment of a recorded real run.
+        </li>
+        <li>
+          <ExternalLink href={VERIFY_SCRIPT_URL}>
+            <code>scripts/verify-deployment.sh</code>
+          </ExternalLink>{' '}
+          builds the contract from a clean checkout, compares its hash with the deployed code, and checks the
+          account&rsquo;s keys.
+        </li>
+        <li>
+          <ExternalLink href={AUDIT_URL}>
+            <code>AUDIT.md</code>
+          </ExternalLink>{' '}
+          is the author&rsquo;s security review: scope, trust model, a threat-to-test matrix, findings and limits. It is a
+          self-audit, not an independent one.
+        </li>
+      </ul>
     </DocSection>
   );
 }

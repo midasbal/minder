@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
   the tokens, contrast, and where each colour is allowed to appear.
 */
 
-const FILES = ['styles.css', 'landing.css', 'docs.css', 'console.css'] as const;
+const FILES = ['styles.css', 'landing.css', 'docs.css', 'console.css', 'faq.css'] as const;
 const sources = Object.fromEntries(
   FILES.map((name) => [name, readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')]),
 ) as Record<(typeof FILES)[number], string>;

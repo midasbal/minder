@@ -1,5 +1,7 @@
 import { Link } from 'react-router';
 
+import { ExternalLink } from '../components/ExternalLink';
+import { AUDIT_URL } from '../links';
 import { DocSection, Note, Sub, Table } from './parts';
 
 export function ThreatModel() {
@@ -11,16 +13,25 @@ export function ThreatModel() {
             <th scope="row">The contract code</th>
             <td>Trusted</td>
             <td>
-              Enforces the policy. The pure decision function is proved (within bounds), mutation-tested and
-              exercised by a stateful harness.
+              Enforces the policy. The pure decision function is checked with Kani (within stated bounds),
+              mutation-tested and exercised by a stateful harness. It has not been independently audited.</td>
+          </tr>
+          <tr>
+            <th scope="row">The NEAR runtime</th>
+            <td>Trusted to enforce access keys</td>
+            <td>
+              The restrictions on the agent&rsquo;s key (three methods, the contract as receiver, no deposit, no transfer,
+              deploy or key changes) are enforced by the protocol before any contract code runs, not by the contract. The
+              contract relies on that.
             </td>
           </tr>
           <tr>
             <th scope="row">The owner</th>
             <td>Trusted, offline, operator-run</td>
             <td>
-              A separate account, never the contract account. Sets policy, recipients and EVM configuration, grants and
-              revokes the agent&rsquo;s mandate, and recovers funds. Minder contains the untrusted agent, not the owner.
+              A separate account, never the contract account, and the owner for good: it is fixed at deployment and cannot be
+              changed. Sets policy, recipients and EVM configuration, grants and revokes the agent&rsquo;s mandate, and
+              recovers funds. Minder contains the untrusted agent, not the owner.
               The owner should be a NEAR multisig account; that mitigation is external and not built into the
               contract.
             </td>
@@ -31,7 +42,8 @@ export function ThreatModel() {
             <td>
               Tighten-only. It may call exactly <code>freeze</code>, <code>revoke_mandate</code> and{' '}
               <code>cancel_change</code> (not a change to the guardian itself), and nothing else. It can never widen
-              anything or move funds; a compromised guardian can at worst deny service.
+              anything or move funds; a compromised guardian can at worst deny service. It is designed to be held by a
+              party separate from the owner, such as an independent monitor.
             </td>
           </tr>
           <tr>
@@ -39,7 +51,8 @@ export function ThreatModel() {
             <td>Trusted to sign what it is asked</td>
             <td>
               The contract does not take its signature on faith: before emitting a transaction it checks, with{' '}
-              <code>ecrecover</code>, that the signature recovers to the contract&rsquo;s own configured EVM address.
+              <code>ecrecover</code>, that the signature recovers to the contract&rsquo;s own configured EVM address. It
+              does rely on the signer being available and deriving keys per calling account, which it cannot prove.
             </td>
           </tr>
           <tr>
@@ -133,6 +146,25 @@ export function ThreatModel() {
             <strong>A failed signing leaves a nonce gap.</strong> The nonce is taken when the request is made. If
             signing then fails, later transactions from that address queue behind the missing nonce until the owner
             fills it. This is an accepted liveness limit.
+          </li>
+          <li>
+            <strong>Spend is booked when a payment is signed, not when it settles.</strong> The contract is outbound-only and
+            cannot see the destination chain. A transaction that is signed but never broadcast, or that reverts there, still
+            counts against the budget. That over-counts and never under-counts, and a gas limit too low for the destination
+            makes it happen: the recorded run began with two such reverts on Sepolia, which the{' '}
+            <ExternalLink href={AUDIT_URL}>self-audit</ExternalLink> describes.
+          </li>
+          <li>
+            <strong>One mandate is active per contract</strong>, so one agent key per deployed gate.
+          </li>
+          <li>
+            <strong>In the demo deployment one operator holds both the owner and the guardian keys</strong>, with a
+            120-second delay. The design supports separate holders; here the reaction window is demonstrated, not an
+            independent defence.
+          </li>
+          <li>
+            <strong>It is testnet only and not independently audited.</strong> The{' '}
+            <ExternalLink href={AUDIT_URL}>self-audit</ExternalLink> is the author&rsquo;s own review.
           </li>
           <li>
             <strong>A signed transaction is public.</strong> It is in an event log, so anyone can broadcast it. Doing so

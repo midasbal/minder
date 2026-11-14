@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { LinkButton } from '../components/Buttons';
 import { Datasheet } from '../components/Datasheet';
 import { PolicyGate } from '../components/PolicyGate';
+import { FAQ, FaqList } from '../faq';
 
 /** The guarantees as datasheets. Static values: the footnotes say how to verify them live. */
 function Guarantees() {
@@ -89,6 +90,18 @@ export function Landing() {
           Through NEAR Chain Signatures the contract is the sole signer for its own EVM address. A cross-chain payment
           is never approved off-chain and relayed: the firewall decides whether the transaction gets signed at all. The
           output is a real EIP-1559 transaction, broadcast to Sepolia.
+        </p>
+      </section>
+
+      <section className="section" aria-labelledby="questions">
+        <p className="section__label">04 · QUESTIONS</p>
+        <h2 className="section__title" id="questions">
+          The questions you are about to ask.
+        </h2>
+        <FaqList items={FAQ.filter((item) => item.landing)} />
+        <p className="section__lead">
+          More, including what the catch of &ldquo;keyless&rdquo; is and what happens if the owner is malicious, in the{' '}
+          <Link to="/docs#faq">docs FAQ</Link>.
         </p>
       </section>
 

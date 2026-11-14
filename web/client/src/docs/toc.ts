@@ -44,6 +44,7 @@ export const TOC: TocEntry[] = [
       { id: 'public-vs-operator', title: 'Public and operator-run' },
     ],
   },
+  { id: 'faq', title: 'FAQ' },
   { id: 'reference', title: 'Reference' },
 ];
 

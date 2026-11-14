@@ -7,6 +7,7 @@ import './styles.css';
 import './landing.css';
 import './docs.css';
 import './console.css';
+import './faq.css';
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';

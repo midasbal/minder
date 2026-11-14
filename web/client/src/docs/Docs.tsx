@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 
 import { rise, stagger } from '../motion';
 import { Architecture } from './Architecture';
+import { Faq } from './Faq';
 import { LiveDemo } from './LiveDemo';
 import { Overview } from './Overview';
 import { Proofs } from './Proofs';
@@ -57,6 +58,7 @@ export function Docs() {
         <Architecture />
         <Proofs />
         <LiveDemo />
+        <Faq />
         <Reference />
       </article>
     </div>

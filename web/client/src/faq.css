@@ -1,0 +1,67 @@
+/* The FAQ: question rows that open into plain answers. Used on the landing page and in the docs. */
+
+.faq {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.faq__item {
+  border-bottom: 1px solid var(--line);
+}
+
+.faq__q {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1rem 0.25rem;
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 0.98rem;
+  line-height: 1.4;
+  color: var(--ink);
+  transition: color 0.18s ease;
+}
+
+.faq__q::-webkit-details-marker {
+  display: none;
+}
+
+.faq__q::after {
+  content: '+';
+  flex: none;
+  color: var(--ink-2);
+}
+
+.faq__item[open] > .faq__q::after {
+  content: '\2212';
+}
+
+.faq__q:hover {
+  color: var(--live);
+}
+
+.faq__a {
+  max-width: 46rem;
+  padding: 0 0.25rem 1.25rem;
+}
+
+.faq__a p {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.faq__a a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line-2);
+  text-underline-offset: 0.2em;
+}
+
+.faq__a a:hover {
+  color: var(--live);
+  text-decoration-color: var(--live);
+}

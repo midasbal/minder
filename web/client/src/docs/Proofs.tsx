@@ -1,5 +1,7 @@
-import { DESIGN_URL } from '../links';
+import { Link } from 'react-router';
+
 import { ExternalLink } from '../components/ExternalLink';
+import { AUDIT_URL, DESIGN_URL, VERIFY_SCRIPT_URL } from '../links';
 import { DocSection, Note, Pre, Sub, Table } from './parts';
 
 export function Proofs() {
@@ -11,7 +13,12 @@ export function Proofs() {
         <ExternalLink href={DESIGN_URL}>
           <code>DESIGN.md</code>
         </ExternalLink>
-        .
+        , and the author&rsquo;s{' '}
+        <ExternalLink href={AUDIT_URL}>
+          <code>AUDIT.md</code>
+        </ExternalLink>{' '}
+        collects every result, with its bounds, in a proof ledger. None of this is a claim of complete formal
+        verification: each result holds within the bounds stated for it.
       </p>
 
       <Sub id="kani" title="Kani proofs">
@@ -159,8 +166,13 @@ export function Proofs() {
           <code>AddKey</code> leaves a full-access key that the same check sees.
         </p>
         <p>
-          Anyone can verify the property live. The account&rsquo;s key list is a plain RPC call, and the deployed code
-          can be read and hashed:
+          Anyone can verify the property live. The{' '}
+          <Link to="/app">console</Link> reads the key list and the deployed code and hashes the code in your browser, and{' '}
+          <ExternalLink href={VERIFY_SCRIPT_URL}>
+            <code>scripts/verify-deployment.sh</code>
+          </ExternalLink>{' '}
+          does the same from a terminal, and also builds the contract from a clean checkout and compares its hash with the
+          deployed code. The key list alone is a plain RPC call:
         </p>
         <Pre label="Verifying the keys on chain">{`curl -s -X POST https://archival-rpc.testnet.fastnear.com/ \\
   -H 'content-type: application/json' \\
@@ -170,6 +182,12 @@ export function Proofs() {
         <p>
           The result must contain no key with permission <code>FullAccess</code>. Every key in it must be a function-call
           key to the account itself with the three request methods and a finite allowance.
+        </p>
+        <p>
+          What the hash comparison does and does not show: the build is not reproducible by construction, and the
+          contract&rsquo;s on-chain metadata carries no build information, so a match shows that this repository, built
+          with the documented toolchain (rustc 1.94.1, <code>Cargo.lock</code>, <code>near-sdk</code> 5.29.1), produces the
+          deployed bytes; the chain itself does not record what source produced them.
         </p>
       </Sub>
     </DocSection>

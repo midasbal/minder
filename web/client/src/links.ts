@@ -1,6 +1,9 @@
 /** Where things live. The explorer address and the repository are given by the project. */
 export const REPO_URL = 'https://github.com/midasbal/minder';
 export const DESIGN_URL = `${REPO_URL}/blob/main/contract/DESIGN.md`;
+export const AUDIT_URL = `${REPO_URL}/blob/main/AUDIT.md`;
+export const README_URL = `${REPO_URL}#readme`;
+export const VERIFY_SCRIPT_URL = `${REPO_URL}/blob/main/scripts/verify-deployment.sh`;
 
 export const CONTRACT_ID = 'gate.minder-gate-owner-bf5fcd.testnet';
 export const OWNER_ID = 'minder-gate-owner-bf5fcd.testnet';

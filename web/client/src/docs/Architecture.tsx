@@ -1,3 +1,5 @@
+import { Link } from 'react-router';
+
 import { DocSection, Pre, Sub, Table } from './parts';
 
 export function Architecture() {
@@ -29,6 +31,10 @@ export function Architecture() {
           on the next call and also deletes the key). A mandate may carry a scope (allowed assets, allowed NEAR and EVM
           recipients, an extra per-transaction cap) that can only subtract from the global policy.
         </p>
+        <p>
+          <strong>One mandate is active per contract</strong>: granting a new one replaces the live one, so one agent key
+          per deployed gate. A re-grant replaces the scope rather than adding to it.
+        </p>
       </Sub>
 
       <Sub id="sole-path" title="The contract is the only path">
@@ -36,7 +42,9 @@ export function Architecture() {
           The contract holds the funds the agent may spend: NEAR in its own balance, and NEP-141 tokens in its account at
           each token contract. The agent never holds them. The only owner-side exit is recovery (<code>owner_withdraw</code>
           and its cross-chain counterparts), which is outside the agent policy: it is instant only to a pre-registered
-          treasury, and any other destination waits out the timelock.
+          treasury, and any other destination waits out the timelock. The EVM funds sit at the contract&rsquo;s derived
+          address, and move only in transactions the contract itself signs: the agent&rsquo;s, within policy, or the
+          owner&rsquo;s recovery.
         </p>
       </Sub>
 
@@ -45,7 +53,10 @@ export function Architecture() {
           For EVM chains the contract signs through NEAR Chain Signatures. It asks the signer contract for a secp256k1
           signature (domain 0) over a hash, under a derivation path. The EVM address that signature belongs to is the
           one the signer derives for this contract account and that path. Because the contract is the caller, only the
-          contract can request signatures for that address; the owner configures it once as <code>sender</code>.
+          contract can request signatures for that address; the owner configures it once as <code>sender</code>. The{' '}
+          <Link to="/app">live console</Link> checks this for a recorded real run: it recovers the signer from each signed
+          Sepolia transaction in your browser and compares it with the configured sender and with the address the signer
+          derives for this contract.
         </p>
         <p>
           A native payment, <code>request_evm_payment</code>, runs as follows. A token payment is the same flow with two
@@ -156,7 +167,7 @@ export function Architecture() {
           <code>execute_change</code> applies it once that time has come; <code>cancel_change</code> drops it, and the
           guardian may cancel too (except a change to the guardian). A delay of zero disables the timelock. The
           classification lives in one pure function, <code>loosens</code> (the &ldquo;is loosening&rdquo; classifier),
-          which is formally proved.
+          which is machine-checked with Kani within stated bounds (see <Link to="/docs#kani">the proofs</Link>).
         </p>
         <Table caption="How each owner change is classified" head={['Change', 'Instant when', 'Timelocked when']}>
           <tr>

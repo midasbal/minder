@@ -6,8 +6,10 @@ import { renderToString } from 'react-dom/server';
 import { StaticRouter } from 'react-router';
 
 import { App } from './App';
+import { LIVE_RUN, nearTxUrl, sepoliaTxUrl } from './chain/liverun';
 import { ALL_IDS, TOC } from './docs/toc';
-import { CONTRACT_ID, EXPLORER_URL, REPO_URL } from './links';
+import { FAQ } from './faq';
+import { AUDIT_URL, CONTRACT_ID, EXPLORER_URL, README_URL, REPO_URL, VERIFY_SCRIPT_URL } from './links';
 
 /** The server-rendered HTML of the whole app at a URL: the chrome and the page. */
 function render(url: string): string {
@@ -245,6 +247,155 @@ describe('the docs', () => {
     assert.ok(words.includes('live for everything that needs no key'));
     assert.ok(words.includes('are not wired yet'));
     assert.ok(!words.includes('is a placeholder'));
+  });
+});
+
+const QUESTIONS = [
+  "Can't the agent just be reprogrammed or jailbroken to bypass the firewall?",
+  "What if the agent's key is stolen?",
+  'Is this really deployed, or a mockup?',
+  'What does "keyless" mean, and what is the catch?',
+  'How can a NEAR contract move money on Ethereum without holding an EVM key?',
+  'What if the owner is malicious?',
+  'Can a payment be undone once it is signed?',
+  'Is "provable" real formal verification?',
+  'Can I use this for my own agent?',
+  'Why NEAR?',
+];
+
+const LANDING_QUESTIONS = [QUESTIONS[0], QUESTIONS[1], QUESTIONS[2], QUESTIONS[4], QUESTIONS[7], QUESTIONS[8]];
+
+/** The question rows of a page, in order, as plain text. */
+function questionsOf(html: string): string[] {
+  return [...html.matchAll(/<summary class="faq__q">([\s\S]*?)<\/summary>/g)].map((match) => visibleText(match[1]!).trim());
+}
+
+describe('the FAQ', () => {
+  const docs = render('/docs');
+  const landing = render('/');
+
+  it('answers all ten questions in the docs, each an expandable row with an answer', () => {
+    assert.deepEqual(questionsOf(docs), QUESTIONS);
+    assert.equal((docs.match(/<details class="faq__item"/g) ?? []).length, 10);
+    assert.equal(FAQ.length, 10);
+    for (const item of FAQ) assert.ok(visibleText(docs).length > 0 && docs.includes(`id="${item.id}"`), item.id);
+  });
+
+  it('is its own section in the contents, before the reference', () => {
+    const ids = TOC.map((entry) => entry.id);
+    assert.ok(ids.indexOf('faq') > ids.indexOf('live-demo') && ids.indexOf('faq') < ids.indexOf('reference'));
+    assert.match(docs, /<h2 id="faq" class="doc-h2"><span class="doc-h2__number">6<\/span>Frequently asked questions<\/h2>/);
+    assert.match(docs, /<h2 id="reference" class="doc-h2"><span class="doc-h2__number">7<\/span>Reference<\/h2>/);
+  });
+
+  it('shows the landing page the six most useful questions, between the cross-chain section and the closing band', () => {
+    assert.deepEqual(questionsOf(landing), LANDING_QUESTIONS);
+    const text = visibleText(landing);
+    assert.ok(text.indexOf('It gates the signature itself.') < text.indexOf('04 · QUESTIONS'));
+    assert.ok(text.indexOf('The questions you are about to ask.') < text.indexOf('See it refuse.'));
+    assert.match(landing, /<a[^>]*href="\/docs#faq"[^>]*>docs FAQ<\/a>/);
+    for (const left of [QUESTIONS[3], QUESTIONS[5], QUESTIONS[6], QUESTIONS[9]]) assert.ok(!questionsOf(landing).includes(left), left);
+  });
+
+  it('states what holds and what does not, with the figures the rest of the site uses', () => {
+    const text = visibleText(docs);
+    for (const claim of [
+      'the firewall is not in the agent',
+      'cannot transfer, deploy or add or delete keys',
+      "fixed 0.25 NEAR gas allowance",
+      'it has never been deployed to mainnet',
+      'there is no upgrade path',
+      'the account that signs the deployment is the owner permanently',
+      'a hostile owner and guardian acting together can still drain after the delay',
+      'one operator holds both keys with a 120-second delay',
+      'This is the documented boundary called G2',
+      'machine-checked within stated bounds, not complete formal verification',
+      '43 harnesses',
+      '241 of 247 viable mutants killed, the other 6 documented as equivalent',
+      'a 1,743-case differential corpus',
+      'one mandate is active per contract',
+      'there is no packaged client library',
+      'this page does not claim it could not be built elsewhere',
+    ]) {
+      assert.ok(text.includes(claim), claim);
+    }
+  });
+
+  it('does not claim more than it can: no absolutes about proofs, no promise to recall a signed payment', () => {
+    const text = visibleText(docs + landing);
+    for (const banned of ['formally proved', 'formally verified', 'fully verified', 'guaranteed safe', 'cannot be hacked', 'unhackable']) {
+      assert.ok(!text.toLowerCase().includes(banned.toLowerCase()), banned);
+    }
+  });
+
+  it('links to the evidence it cites', () => {
+    assert.ok(docs.includes(`href="${VERIFY_SCRIPT_URL}"`));
+    assert.ok(docs.includes(`href="${AUDIT_URL}"`));
+    assert.ok(docs.includes(`href="${README_URL}"`));
+    assert.ok(docs.includes(`href="${EXPLORER_URL}"`));
+    assert.match(docs, /<a[^>]*href="\/app"[^>]*>console<\/a>/);
+  });
+});
+
+describe('the docs, against what exists today', () => {
+  const html = render('/docs');
+  const text = visibleText(html);
+
+  it('points every internal link at a heading that exists', () => {
+    const targets = new Set([...html.matchAll(/href="\/docs#([a-z-]+)"/g)].map((match) => match[1]!));
+    assert.ok(targets.size > 8);
+    for (const target of targets) assert.ok(ALL_IDS.includes(target), `/docs#${target} has no heading`);
+  });
+
+  it('refers to the artifacts that now exist: the console, the self-audit, the verification script, the README', () => {
+    for (const link of [AUDIT_URL, VERIFY_SCRIPT_URL, README_URL]) assert.ok(html.includes(`href="${link}"`), link);
+    assert.match(html, /<a[^>]*href="\/app"[^>]*>The live console<\/a>/);
+    assert.ok(text.includes('self-audit, not an independent one'));
+    assert.ok(text.includes('builds the contract from a clean checkout'));
+  });
+
+  it('lists the recorded real run with a working explorer link for every hash', () => {
+    for (const payment of LIVE_RUN.payments) {
+      assert.ok(html.includes(`href="${nearTxUrl(payment.nearTxHash)}"`), payment.nearTxHash);
+      if (payment.sepoliaTxHash) assert.ok(html.includes(`href="${sepoliaTxUrl(payment.sepoliaTxHash)}"`), payment.sepoliaTxHash);
+    }
+    assert.ok(text.includes('The recorded real run'));
+  });
+
+  it('says what the proofs are, without calling them complete', () => {
+    assert.ok(text.includes('None of this is a claim of complete formal verification'));
+    assert.ok(text.includes('machine-checked with Kani bounded model checking'));
+    assert.ok(text.includes('which is machine-checked with Kani within stated bounds'));
+    assert.ok(!text.includes('formally proved'));
+  });
+
+  it('states the non-guarantees that came out of the live run and the audit', () => {
+    for (const claim of [
+      'Spend is booked when a payment is signed, not when it settles',
+      'One mandate is active per contract',
+      'In the demo deployment one operator holds both the owner and the guardian keys',
+      'It is testnet only and not independently audited',
+    ]) {
+      assert.ok(text.includes(claim), claim);
+    }
+  });
+
+  it('names the NEAR runtime as trusted to enforce the key, and the signer as relied on for availability', () => {
+    assert.ok(text.includes('The NEAR runtime'));
+    assert.ok(text.includes('Trusted to enforce access keys'));
+    assert.ok(text.includes('It does rely on the signer being available'));
+  });
+
+  it('says today\'s public site holds no key, and does not promise one', () => {
+    assert.ok(text.includes('Today the public site holds no key at all'));
+    assert.ok(!text.includes('will hold the agent key only'));
+    assert.ok(text.includes('the owner key is never held by a public service'));
+  });
+
+  it('says which scenarios the console covers and which it does not', () => {
+    assert.ok(text.includes('Where to see it'));
+    assert.ok(text.includes('Not reachable in one dry run'));
+    assert.ok(text.includes('Not wired: it is an operator action'));
   });
 });
 
