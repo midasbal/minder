@@ -38,7 +38,7 @@ const AT_REST = 0.012;
 /** How many levels of opacity the active dashes are drawn in (one stroke per level). */
 const ALPHA_LEVELS = 8;
 
-export interface Lattice {
+interface Lattice {
   count: number;
   x: Float32Array;
   y: Float32Array;

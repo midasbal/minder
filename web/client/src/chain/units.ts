@@ -2,7 +2,7 @@
 
 const U128_MAX = (1n << 128n) - 1n;
 
-export type Parsed = { ok: true; value: bigint } | { ok: false; error: string };
+type Parsed = { ok: true; value: bigint } | { ok: false; error: string };
 
 /** `"0.05"` with 24 decimals is 50000000000000000000000. Refuses more precision than the asset has. */
 export function parseUnits(text: string, decimals: number, symbol: string): Parsed {

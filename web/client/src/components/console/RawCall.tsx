@@ -14,17 +14,17 @@ export function RawCall({ trace }: { trace: RpcTrace & { args?: unknown; method?
         POST <code>{trace.endpoint}</code>, answered in {trace.milliseconds} ms
       </p>
       <p className="raw__title">Request</p>
-      <pre className="raw__code">{prettyJson(trace.request)}</pre>
+      <pre className="raw__code" tabIndex={0}>{prettyJson(trace.request)}</pre>
       {trace.args !== undefined && (
         <>
           <p className="raw__title">
             Arguments of <code>{trace.method}</code>, before base64
           </p>
-          <pre className="raw__code">{prettyJson(trace.args)}</pre>
+          <pre className="raw__code" tabIndex={0}>{prettyJson(trace.args)}</pre>
         </>
       )}
       <p className="raw__title">Response, as the node sent it</p>
-      <pre className="raw__code">{prettyJson(trace.response)}</pre>
+      <pre className="raw__code" tabIndex={0}>{prettyJson(trace.response)}</pre>
     </details>
   );
 }

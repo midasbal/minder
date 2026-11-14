@@ -6,7 +6,7 @@
 
 import recorded from '../data/live-run.json';
 
-export type PaymentKind = 'near_transfer' | 'evm_eth' | 'evm_erc20';
+type PaymentKind = 'near_transfer' | 'evm_eth' | 'evm_erc20';
 
 export interface RecordedPayment {
   kind: PaymentKind;
@@ -18,12 +18,9 @@ export interface RecordedPayment {
   rawTx: string | null;
   sepoliaTxHash: string | null;
   status: string;
-  sepoliaBlock: string | null;
-  timestamp: string;
 }
 
 export interface LiveRun {
-  contract: string;
   vendorEvmAddress: string;
   vendorNearAccount: string;
   recordedAt: string;
@@ -57,7 +54,6 @@ export function parseLiveRun(raw: unknown): LiveRun {
   if (!Array.isArray(payments) || payments.length === 0) throw new Error('live-run.json: no payments');
   const provenance = root.provenance as Record_;
   return {
-    contract: text(root, 'contract', 'run'),
     vendorEvmAddress: text(root, 'vendorEvmAddress', 'run'),
     vendorNearAccount: text(root, 'vendorNearAccount', 'run'),
     recordedAt: text(root, 'recordedAt', 'run'),
@@ -79,8 +75,6 @@ export function parseLiveRun(raw: unknown): LiveRun {
         rawTx,
         sepoliaTxHash,
         status: text(payment, 'status', where),
-        sepoliaBlock: optionalText(payment, 'sepoliaBlock'),
-        timestamp: text(payment, 'timestamp', where),
       };
     }),
     recordedProvenance: {

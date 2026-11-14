@@ -18,9 +18,9 @@ export type RunState =
   | { phase: 'done'; input: DryRunInput; result: DryRunResult }
   | { phase: 'failed'; input: DryRunInput; message: string };
 
-export type ProofState = { phase: 'idle' } | { phase: 'running'; previous: Proof | null } | { phase: 'done'; proof: Proof };
+type ProofState = { phase: 'idle' } | { phase: 'running'; previous: Proof | null } | { phase: 'done'; proof: Proof };
 
-export type SettlementState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; byHash: Record<string, Settlement> };
+type SettlementState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; byHash: Record<string, Settlement> };
 
 export interface ConsoleState {
   /** `loading` with a snapshot present is a refresh: the old reading stays until the new one lands. */
@@ -49,7 +49,7 @@ export interface ConsoleStore {
  * Public NEAR testnet nodes that answer cross-origin browser requests, in order of preference. FastNEAR answers in
  * about 0.1 s; the NEAR-hosted node adds a flat 3 s to every call (measured), so it is the fallback.
  */
-export const NEAR_RPC_ENDPOINTS = ['https://rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org'] as const;
+const NEAR_RPC_ENDPOINTS = ['https://rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org'] as const;
 
 const IDLE: ConsoleState = { reading: 'idle', snapshot: null, run: { phase: 'idle' }, proof: { phase: 'idle' }, settlement: { phase: 'idle' } };
 

@@ -36,6 +36,8 @@
 
 .gate-wrap {
   min-width: 0;
+  /* The gate's columns follow the width it is given, not the screen's: in the hero it is half a screen wide. */
+  container: gate / inline-size;
 }
 
 .gate-wrap__caption {
@@ -269,7 +271,7 @@
 .sheets {
   margin-top: 2rem;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
   gap: clamp(1rem, 2.5vw, 1.75rem);
 }
 
@@ -402,11 +404,8 @@
   }
 }
 
-@media (max-width: 40rem) {
-  .sheets {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
+/* A narrow gate (a phone, or the hero's half-width column): its three columns stack, and a verdict drops under its text. */
+@container gate (max-width: 34rem) {
   .gate__body {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -418,5 +417,11 @@
 
   .decision {
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 40rem) {
+  .gate__label {
+    font-size: 0.72rem;
   }
 }

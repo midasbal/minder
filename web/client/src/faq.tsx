@@ -10,7 +10,7 @@ import { Link } from 'react-router';
 import { ExternalLink } from './components/ExternalLink';
 import { AUDIT_URL, CONTRACT_ID, EXPLORER_URL, README_URL, VERIFY_SCRIPT_URL } from './links';
 
-export interface FaqItem {
+interface FaqItem {
   id: string;
   question: string;
   /** Whether the landing page shows it. */

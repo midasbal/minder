@@ -50,7 +50,7 @@ function PolicyTable({ rows, windowSeconds }: { rows: AssetRow[]; windowSeconds:
   const unread = rows.flatMap((row) => [row.headroom, row.usage]).find((section) => !section.ok);
   return (
     <>
-      <div className="ptable-wrap">
+      <div className="ptable-wrap" role="region" aria-label="Policy and headroom per asset" tabIndex={0}>
         <table className="ptable">
           <caption className="sr-only">Policy and headroom per asset, in whole units of each asset</caption>
           <thead>

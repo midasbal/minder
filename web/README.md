@@ -29,19 +29,26 @@ web/
       field.ts            the sensing surface: the lattice, the physics and the canvas drawing
       chain/              the browser's view of the live contract: rpc (failover, timeouts), contract (dry runs),
                           snapshot (the readings), presets, store, units, reasons,
-                          liverun (the recorded real run) and provenance (who signed it, checked in the browser)
+                          liverun (the recorded real run), provenance (who signed it, checked in the browser),
+                          settlement (Sepolia receipts) and evidence (the red-team log and the freeze drill)
       useRelayHealth.ts   the footer's relay status
       components/         Header, Footer, SensingField, PolicyGate, Datasheet, Rail, Buttons,
-                          ExternalLink, ScrollManager, console/ (the two /app panels)
+                          ExternalLink, ScrollManager, console/ (the /app panels, the red-team log, the real run and
+                          the freeze drill)
       pages/              Landing, AppShell, NotFound
       docs/               Docs and its sections (Overview ... Reference), contents, reading helpers
       styles.css          the dark theme: tokens, header, footer, buttons, the app shell
-      landing.css, docs.css, console.css
+      faq.tsx             the FAQ, one list shown in full in the docs and in part on the landing page
+      landing.css, docs.css, console.css, faq.css
       App.test.tsx        renders every route to HTML and checks the chrome and the content
       theme.test.tsx      the colour rules, enforced against the stylesheets: tokens, contrast, roles
-      data/live-run.json  the real payments the contract gated and signed, recorded on testnet
+      data/               live-run.json (the real payments), red-team.json and freeze-drill.json (the attacks the
+                          contract refused and the freeze drill), all recorded on testnet; no keys
       field.test.tsx      the sensing surface against a fake window and a recording canvas
       console.test.tsx    the console against a mocked RPC layer: units, failover, dry runs, readings, rendering
+      evidence.test.tsx   the red-team log and the freeze drill against their recorded evidence
+      responsive.test.tsx the layout rules, checked against the stylesheets: nothing wider than its box, a way down to
+                          one column, touch targets, and the sensing field for fine pointers only
   server/
     src/app.ts            /health, static files, the app catch-all, JSON 404
     src/index.ts          reads PORT and HOST, starts, shuts down on SIGTERM

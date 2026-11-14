@@ -8,7 +8,7 @@
   At most a few requests are in flight at once, so a page load does not hammer a public node.
 */
 
-export type RpcFailureKind = 'unreachable' | 'timeout' | 'rpc' | 'contract';
+type RpcFailureKind = 'unreachable' | 'timeout' | 'rpc' | 'contract';
 
 export class RpcFailure extends Error {
   readonly kind: RpcFailureKind;
@@ -38,7 +38,7 @@ export interface JsonRpc {
   call(method: string, params: unknown): Promise<{ result: unknown; trace: RpcTrace }>;
 }
 
-export interface RpcOptions {
+interface RpcOptions {
   endpoints: readonly string[];
   fetchImpl?: typeof fetch;
   timeoutMs?: number;

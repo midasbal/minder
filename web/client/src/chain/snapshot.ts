@@ -13,20 +13,20 @@ import { formatUnits } from './units';
 
 export type Section<T> = { ok: true; value: T } | { ok: false; message: string };
 
-export interface KeyRow {
+interface KeyRow {
   publicKey: string;
   receiver: string;
   methods: string[];
   allowance: string;
 }
 
-export interface KeySummary {
+interface KeySummary {
   fullAccess: number;
   restricted: number;
   keys: KeyRow[];
 }
 
-export interface CodeSummary {
+interface CodeSummary {
   bytes: number;
   sha256: string;
   expected: string;
@@ -34,16 +34,15 @@ export interface CodeSummary {
   matches: boolean | null;
 }
 
-export interface ContractFacts {
+interface ContractFacts {
   status: string;
   owner: string;
   guardian: string | null;
   windowSeconds: number;
-  buckets: number;
   timelockSeconds: number;
 }
 
-export interface MandateFacts {
+interface MandateFacts {
   agentKey: string;
   expiry: string;
   epoch: number;
@@ -62,7 +61,6 @@ export interface AssetRow {
   symbol: string;
   perTxCap: bigint;
   windowLimit: bigint;
-  epochBudget: bigint | null;
   headroom: Section<{ windowRemaining: string; budgetRemaining: string | null }>;
   usage: Section<{ committed: string; reserved: string }>;
   perTx: string;
@@ -89,7 +87,7 @@ const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16)
 const messageOf = (error: unknown): string =>
   error instanceof RpcFailure ? error.message : `Unexpected answer from the chain (${(error as Error).message})`;
 
-export async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
+async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) return null;
   return hex(new Uint8Array(await subtle.digest('SHA-256', bytes as BufferSource)));
@@ -100,7 +98,7 @@ interface Progress {
   endpoint: string;
 }
 
-export interface ReadOptions {
+interface ReadOptions {
   now?: () => number;
   /** The wasm hash the deployed code is compared with: this repository's build. */
   expectedWasmSha256?: string;
@@ -129,7 +127,7 @@ export async function readSnapshot(rpc: Rpc, { now = Date.now, expectedWasmSha25
 
   const contract = section<ContractFacts>(async () => {
     const [config, status] = await Promise.all([
-      view<{ owner: string; window_len: string; num_buckets: number; timelock_delay: string; guardian?: string | null }>('get_config'),
+      view<{ owner: string; window_len: string; timelock_delay: string; guardian?: string | null }>('get_config'),
       view<string>('get_status'),
     ]);
     return {
@@ -137,7 +135,6 @@ export async function readSnapshot(rpc: Rpc, { now = Date.now, expectedWasmSha25
       owner: config.owner,
       guardian: config.guardian ?? null,
       windowSeconds: Number(BigInt(config.window_len) / NS_PER_SECOND),
-      buckets: config.num_buckets,
       timelockSeconds: Number(BigInt(config.timelock_delay) / NS_PER_SECOND),
     };
   });
@@ -201,7 +198,6 @@ export async function readSnapshot(rpc: Rpc, { now = Date.now, expectedWasmSha25
           symbol: describeAsset(asset).symbol,
           perTxCap,
           windowLimit,
-          epochBudget,
           headroom,
           usage,
           perTx: formatAmount(asset, perTxCap),

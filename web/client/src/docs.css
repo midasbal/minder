@@ -260,6 +260,24 @@
   line-height: 1.6;
 }
 
+@media (max-width: 54rem) {
+  /* The header is two rows here, so a heading jumped to must clear more of it. */
+  .doc-h2,
+  .doc-h3 {
+    scroll-margin-top: 8rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .toc a {
+    padding-block: 0.5rem;
+  }
+
+  .toc ul a {
+    padding-block: 0.55rem;
+  }
+}
+
 @media (max-width: 64rem) {
   .docs {
     grid-template-columns: minmax(0, 1fr);
@@ -275,5 +293,16 @@
 
   .toc ul {
     display: none;
+  }
+
+  /* The contents become a wrapped row of links, so they do not push the page down. */
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.1rem 1.25rem;
+  }
+
+  .toc > li {
+    margin-top: 0;
   }
 }

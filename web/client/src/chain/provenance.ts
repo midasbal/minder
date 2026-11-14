@@ -70,7 +70,7 @@ export interface Sourced {
   reason: string | null;
 }
 
-export type Recovery = { ok: true; signed: Signed } | { ok: false; error: string };
+type Recovery = { ok: true; signed: Signed } | { ok: false; error: string };
 
 export interface Proof {
   signer: string;

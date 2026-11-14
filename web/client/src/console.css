@@ -1,6 +1,8 @@
 /* The live console: the two panels either side of the policy boundary. */
 
 .panel {
+  /* A container, so its layout follows its own width (the stage changes it from two columns to one). */
+  container: panel / inline-size;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -398,13 +400,6 @@
   gap: 0.3rem;
 }
 
-/* Keyless and the code hash side by side when there is room. */
-.vitals {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 0 1.5rem;
-}
-
 .headline--hash {
   font-size: 0.8rem;
   line-height: 1.5;
@@ -487,7 +482,8 @@
   color: var(--live);
 }
 
-@media (max-width: 40rem) {
+/* Narrow panel (a phone, or the tablet's half-width column): one preset per row, the verdict labels above their text. */
+@container panel (max-width: 30rem) {
   .presets {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -545,7 +541,7 @@
 
 .safety {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12.5rem), 1fr));
   gap: 0.7rem;
 }
 
@@ -636,7 +632,7 @@
 
 .payments {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
   gap: 0.8rem;
   margin: 0;
   padding: 0;
@@ -737,7 +733,7 @@
 
 .proofs {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
   gap: 1rem;
   margin: 0;
   padding: 0;
@@ -819,10 +815,6 @@
   .tracks {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .proofs {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .result__note,
@@ -845,7 +837,7 @@
 
 .rt-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
   gap: 1.1rem;
 }
 
@@ -927,12 +919,11 @@
 
 .rt-steps {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
   gap: 0.7rem;
   margin: 1rem 0;
   padding: 0;
   list-style: none;
-  counter-reset: none;
 }
 
 .rt-step {
@@ -1034,5 +1025,39 @@
   .fd-step {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.3rem;
+  }
+}
+
+/* ---- Small and touch screens ---- */
+
+@media (max-width: 40rem) {
+  /* The smallest labels, a little larger where they are read on a phone. */
+  .safe__source,
+  .facts__source,
+  .ptable thead th,
+  .rt-step__n {
+    font-size: 0.72rem;
+  }
+}
+
+@media (pointer: coarse) {
+  /* iOS zooms the page into a field whose text is under 16px. */
+  .input {
+    font-size: 1rem;
+  }
+
+  /* Touch targets of at least 44px. */
+  .panel__bar .btn,
+  .provenance__head .btn {
+    min-height: 2.75rem;
+  }
+
+  .method span {
+    padding-block: 0.8rem;
+  }
+
+  .more summary,
+  .raw summary {
+    padding-block: 0.7rem;
   }
 }

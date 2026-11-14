@@ -4,7 +4,7 @@ import { sep } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 
-export interface AppOptions {
+interface AppOptions {
   /** Directory holding the built frontend. Served when it exists. */
   clientDir: string;
   /** Request logging. On by default; the tests turn it off. */

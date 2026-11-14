@@ -113,7 +113,7 @@ function Refusals({ refusals }: { refusals: ProtocolRefusal[] }) {
             </p>
             <details className="more">
               <summary>The raw RPC error</summary>
-              <pre className="raw__code">{prettyJson(refusal.rawRpcResponse)}</pre>
+              <pre className="raw__code" tabIndex={0}>{prettyJson(refusal.rawRpcResponse)}</pre>
               <p className="rt-attack__note">
                 No block, so no transaction on the explorer. The signed transaction would have had the hash{' '}
                 <code className="break">{refusal.signedTransactionHash}</code>.

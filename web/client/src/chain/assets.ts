@@ -6,17 +6,17 @@ import { formatUnits } from './units';
 export const AGENT_PUBLIC_KEY = 'ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF';
 
 /** Circle's USDC on Sepolia: the contract names tokens by address only, so the symbol is ours. */
-export const USDC_ADDRESS = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238';
+const USDC_ADDRESS = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238';
 
 export type AssetId = 'Near' | { Evm: number } | { Evm20: { chain_id: number; token: number[] } };
 
-export interface AssetInfo {
+interface AssetInfo {
   label: string;
   symbol: string;
   decimals: number;
 }
 
-export function tokenAddress(bytes: readonly number[]): string {
+function tokenAddress(bytes: readonly number[]): string {
   return `0x${bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
@@ -44,7 +44,7 @@ export function assetKey(asset: AssetId): string {
 
 export type MethodId = 'request_local_transfer' | 'request_evm_payment' | 'request_evm_token_payment';
 
-export interface MethodSpec {
+interface MethodSpec {
   id: MethodId;
   /** The short name on the selector. */
   name: string;

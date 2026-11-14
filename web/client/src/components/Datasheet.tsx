@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-export interface SheetRow {
+interface SheetRow {
   key: string;
   value: ReactNode;
   /** A verified value is the one place besides a verdict that wears the allow colour. */

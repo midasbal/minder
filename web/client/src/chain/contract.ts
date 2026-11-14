@@ -5,7 +5,7 @@ import { RpcFailure, type Rpc, type RpcTrace } from './rpc';
 
 export const CONTRACT_ACCOUNT = 'gate.minder-gate-owner-bf5fcd.testnet';
 
-export interface ViewOutcome<T> {
+interface ViewOutcome<T> {
   value: T;
   blockHeight: number;
   trace: RpcTrace & { args: unknown; method: string };

@@ -1,4 +1,4 @@
-export interface TocEntry {
+interface TocEntry {
   id: string;
   title: string;
   children?: TocEntry[];

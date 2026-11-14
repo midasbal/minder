@@ -48,8 +48,6 @@ export interface ProtocolRefusal {
 }
 
 export interface RedTeam {
-  contract: string;
-  startedAt: string;
   denials: OnChainAttempt[];
   windowExplanation: string;
   window: OnChainAttempt[];
@@ -81,8 +79,6 @@ export function parseRedTeam(raw: unknown): RedTeam {
   const root = raw as Obj;
   const window = root.window as Obj;
   return {
-    contract: text(root, 'contract', 'red-team'),
-    startedAt: text(root, 'startedAt', 'red-team'),
     denials: list(root, 'onChainDenials', 'red-team').map((entry, i) => attempt(entry, `onChainDenials[${i}]`)),
     windowExplanation: text(window, 'explanation', 'window'),
     window: list(window, 'entries', 'window').map((entry, i) => attempt(entry, `window[${i}]`)),
@@ -101,7 +97,7 @@ export function parseRedTeam(raw: unknown): RedTeam {
   };
 }
 
-export type DrillStep = 'freeze' | 'denied-while-frozen' | 'propose-unfreeze' | 'execute-unfreeze';
+type DrillStep = 'freeze' | 'denied-while-frozen' | 'propose-unfreeze' | 'execute-unfreeze';
 
 export interface DrillEntry {
   id: DrillStep;

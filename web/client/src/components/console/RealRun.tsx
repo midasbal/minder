@@ -184,7 +184,7 @@ function PaymentProof({ payment, index, proof }: { payment: RecordedPayment; ind
             <Row name="Chain id">{recovery.signed.chainId}</Row>
           </dl>
         )}
-        <pre className="raw__code">{payment.rawTx}</pre>
+        <pre className="raw__code" tabIndex={0}>{payment.rawTx}</pre>
         {payment.sepoliaTxHash !== null && (
           <p className="proof__tx">
             This is the transaction{' '}
