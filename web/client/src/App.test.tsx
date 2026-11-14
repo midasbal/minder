@@ -9,7 +9,7 @@ import { App } from './App';
 import { LIVE_RUN, nearTxUrl, sepoliaTxUrl } from './chain/liverun';
 import { ALL_IDS, TOC } from './docs/toc';
 import { FAQ } from './faq';
-import { AUDIT_URL, CONTRACT_ID, EXPLORER_URL, README_URL, REPO_URL, VERIFY_SCRIPT_URL } from './links';
+import { AUDIT_URL, AUTHOR_X_URL, CONTRACT_ID, EXPLORER_URL, README_URL, REPO_URL, VERIFY_SCRIPT_URL } from './links';
 
 /** The server-rendered HTML of the whole app at a URL: the chrome and the page. */
 function render(url: string): string {
@@ -56,6 +56,22 @@ describe('the persistent chrome', () => {
       assert.ok(html.includes(`href="${EXPLORER_URL}"`), 'the contract on the explorer');
       assert.ok(html.includes('NEAR testnet'));
       assert.match(html, /relay: checking/);
+    });
+  }
+
+  for (const url of ROUTES) {
+    it(`has the author's X link in the footer on ${url}, after the other links, opening in a new tab`, () => {
+      const html = render(url);
+      const footer = html.slice(html.indexOf('<footer'), html.indexOf('</footer>'));
+      assert.match(
+        footer,
+        new RegExp(`<a href="${AUTHOR_X_URL.replace(/[.]/g, '\\.')}" target="_blank" rel="noopener noreferrer">X<span class="ext" aria-hidden="true"> <!-- -->↗</span><span class="sr-only"> \\(opens in a new tab\\)</span></a>`),
+      );
+      assert.equal(AUTHOR_X_URL, 'https://x.com/wjmdiary');
+      const labels = [...footer.matchAll(/<a [^>]*>([^<]+)/g)].map((match) => match[1]);
+      assert.deepEqual(labels, ['Docs', 'Source', 'Contract on explorer', 'X']);
+      assert.ok(footer.indexOf('class="chip"') > footer.indexOf(AUTHOR_X_URL), 'the relay chip follows the links, in the same group');
+      assert.match(footer, /<div class="site-footer__meta"><nav class="site-footer__links" aria-label="Footer">/);
     });
   }
 

@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 
-import { EXPLORER_URL, REPO_URL } from '../links';
+import { AUTHOR_X_URL, EXPLORER_URL, REPO_URL } from '../links';
 import { useRelayHealth, type RelayStatus } from '../useRelayHealth';
 import { ExternalLink } from './ExternalLink';
 
@@ -24,16 +24,19 @@ export function Footer() {
           <p className="site-footer__line">NEAR testnet</p>
         </div>
 
-        <nav className="site-footer__links" aria-label="Footer">
-          <Link to="/docs">Docs</Link>
-          <ExternalLink href={REPO_URL}>Source</ExternalLink>
-          <ExternalLink href={EXPLORER_URL}>Contract on explorer</ExternalLink>
-        </nav>
+        <div className="site-footer__meta">
+          <nav className="site-footer__links" aria-label="Footer">
+            <Link to="/docs">Docs</Link>
+            <ExternalLink href={REPO_URL}>Source</ExternalLink>
+            <ExternalLink href={EXPLORER_URL}>Contract on explorer</ExternalLink>
+            <ExternalLink href={AUTHOR_X_URL}>X</ExternalLink>
+          </nav>
 
-        <span className="chip" data-state={relay} role="status">
-          <span className={relay === 'online' ? 'chip__dot live-dot' : 'chip__dot'} aria-hidden="true" />
-          {RELAY_LABEL[relay]}
-        </span>
+          <span className="chip" data-state={relay} role="status">
+            <span className={relay === 'online' ? 'chip__dot live-dot' : 'chip__dot'} aria-hidden="true" />
+            {RELAY_LABEL[relay]}
+          </span>
+        </div>
       </div>
     </footer>
   );

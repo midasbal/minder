@@ -5,6 +5,9 @@ export const AUDIT_URL = `${REPO_URL}/blob/main/AUDIT.md`;
 export const README_URL = `${REPO_URL}#readme`;
 export const VERIFY_SCRIPT_URL = `${REPO_URL}/blob/main/scripts/verify-deployment.sh`;
 
+/** The author's account on X. */
+export const AUTHOR_X_URL = 'https://x.com/wjmdiary';
+
 export const CONTRACT_ID = 'gate.minder-gate-owner-bf5fcd.testnet';
 export const OWNER_ID = 'minder-gate-owner-bf5fcd.testnet';
 export const GUARDIAN_ID = 'minder-gate-agent-26d088.testnet';

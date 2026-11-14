@@ -109,10 +109,11 @@ describe('wide content scrolls inside its own box', () => {
   });
 });
 
+const collapsesTo = (selector: string, within: RegExp) =>
+  assert.ok(find(selector, within).some((rule) => /^(minmax\(0,\s*1fr\)|1fr)$/.test(value(rule, 'grid-template-columns') ?? '')), `${selector} becomes one column ${within}`);
+
 describe('every layout with columns has a way down to one', () => {
-  const single = /^(minmax\(0,\s*1fr\)|1fr)$/;
-  const collapses = (selector: string, within: RegExp) =>
-    assert.ok(find(selector, within).some((rule) => single.test(value(rule, 'grid-template-columns') ?? '')), `${selector} becomes one column ${within}`);
+  const collapses = collapsesTo;
 
   it('collapses the hero, the footer, the header, the stage and the docs on narrow screens', () => {
     collapses('.hero', /max-width: 62rem/);
@@ -183,6 +184,23 @@ describe('small and touch screens', () => {
     const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1" \/>/);
     assert.ok(!/maximum-scale|user-scalable/.test(html));
+  });
+});
+
+describe('the footer', () => {
+  it('centres the right-hand group against the two-line brand, and stacks it on narrow screens', () => {
+    assert.equal(prop('.site-footer__inner', 'align-items'), 'center');
+    assert.equal(prop('.site-footer__inner', 'grid-template-columns'), '1fr auto');
+    assert.equal(prop('.site-footer__inner', 'align-items', /max-width: 54rem/), 'start');
+    collapsesTo('.site-footer__inner', /max-width: 54rem/);
+  });
+
+  it('spaces the links and the relay chip with one gap, so the rhythm is even', () => {
+    const meta = find('.site-footer__meta')[0]!;
+    const links = find('.site-footer__links').find((rule) => declares(rule, 'gap'))!;
+    assert.equal(value(meta, 'gap'), value(links, 'gap'));
+    assert.equal(value(meta, 'align-items'), 'center');
+    assert.equal(value(meta, 'flex-wrap'), 'wrap');
   });
 });
 
