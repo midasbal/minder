@@ -1,0 +1,148 @@
+{
+  "network": "testnet",
+  "contract": "gate.minder-gate-owner-bf5fcd.testnet",
+  "agentKey": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+  "vendorEvmAddress": "0xE3390E9D6Fc9456B7E7cDf4678D918Dd4a2870d5",
+  "vendorNearAccount": "vendor.minder-gate-owner-bf5fcd.testnet",
+  "recordedAt": "2026-11-14T10:47:54.366Z",
+  "payments": [
+    {
+      "kind": "near_transfer",
+      "method": "request_local_transfer",
+      "amount": "50000000000000000000000",
+      "amountDisplay": "0.05 NEAR",
+      "recipient": "vendor.minder-gate-owner-bf5fcd.testnet",
+      "nearTxHash": "8UMiuKQNp9ExEe5AkQm4md16ps3k8wcYFk8Pc12E1GRS",
+      "nearExplorer": "https://testnet.nearblocks.io/txns/8UMiuKQNp9ExEe5AkQm4md16ps3k8wcYFk8Pc12E1GRS",
+      "status": "success",
+      "recipientDelta": "50000000000000000000000",
+      "timestamp": "2026-11-14T09:32:37.010Z"
+    },
+    {
+      "kind": "evm_eth",
+      "method": "request_evm_payment",
+      "amount": "200000000000000",
+      "amountDisplay": "0.0002 ETH",
+      "recipient": "0xE3390E9D6Fc9456B7E7cDf4678D918Dd4a2870d5",
+      "nearTxHash": "8VkMZXPG7KPJSmykkXxtozLMQZc9E9RxgFTEnQ6Vw69U",
+      "nearExplorer": "https://testnet.nearblocks.io/txns/8VkMZXPG7KPJSmykkXxtozLMQZc9E9RxgFTEnQ6Vw69U",
+      "rawTx": "0x02f87483aa36a702843b9aca008502540be40082520894e3390e9d6fc9456b7e7cdf4678d918dd4a2870d586b5e620f4800080c080a0d78cde626af6ba8bb6e8ca4b347b94ebb760c281b637a1523ff4393b9549f3b2a0365b547f41303b35bac9ab6ee7e951d6a2182871eb23df5f2b6ad49d3a8a1266",
+      "sepoliaTxHash": "0xc7e3f81c7b5a9550c08a8048c7132fcd72384329b47ec5ff7b0adda05a0fe368",
+      "sepoliaExplorer": "https://sepolia.etherscan.io/tx/0xc7e3f81c7b5a9550c08a8048c7132fcd72384329b47ec5ff7b0adda05a0fe368",
+      "status": "success",
+      "sepoliaStatus": "0x1",
+      "sepoliaGasUsed": "21000",
+      "sepoliaBlock": "12132600",
+      "recipientDelta": "200000000000000",
+      "allowanceBurn": "1528031656187600000000",
+      "timestamp": "2026-11-14T10:46:12.289Z"
+    },
+    {
+      "kind": "evm_erc20",
+      "method": "request_evm_token_payment",
+      "token": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+      "amount": "500000",
+      "amountDisplay": "0.5 USDC",
+      "recipient": "0xE3390E9D6Fc9456B7E7cDf4678D918Dd4a2870d5",
+      "nearTxHash": "GW6eqnveLxSyB2UQEHUjUMUdLV2PZqGSCA3nZMD8Y6gT",
+      "nearExplorer": "https://testnet.nearblocks.io/txns/GW6eqnveLxSyB2UQEHUjUMUdLV2PZqGSCA3nZMD8Y6gT",
+      "rawTx": "0x02f8b483aa36a703843b9aca008502540be40083030d40941c7d4b196cb0c7b01d743fbc6116a902379c723880b844a9059cbb000000000000000000000000e3390e9d6fc9456b7e7cdf4678d918dd4a2870d5000000000000000000000000000000000000000000000000000000000007a120c001a055fc3ce3141281bc8f519e204867b8fc83f59385d330ac9025f3d3abf8ab348ca03731b7682e615b40dfb012b39cd3e4dea0478997c37bea19631fcfcae9df4a4c",
+      "sepoliaTxHash": "0xa0a389053b589b2ac355711e8072f0c51956fbdbbe7bd854e4ded2e038fe70c7",
+      "sepoliaExplorer": "https://sepolia.etherscan.io/tx/0xa0a389053b589b2ac355711e8072f0c51956fbdbbe7bd854e4ded2e038fe70c7",
+      "status": "success",
+      "sepoliaStatus": "0x1",
+      "sepoliaGasUsed": "151779",
+      "sepoliaBlock": "12132603",
+      "recipientDelta": "500000",
+      "allowanceBurn": "1673434643820100000000",
+      "timestamp": "2026-11-14T10:46:51.600Z"
+    }
+  ],
+  "provenance": {
+    "allMatch": true,
+    "signer": "v1.signer-prod.testnet",
+    "derivationPath": "minder-evm-1",
+    "configuredSender": "0x73cd4718d7577318d76ab78db13a9ec7cecb7f3f",
+    "derivedAddressLocal": "0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F",
+    "derivedAddressFromSignerView": "0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F",
+    "recoveredFromRawTx": {
+      "eth": "0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F",
+      "usdc": "0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F"
+    }
+  },
+  "mandate": {
+    "agent_key": "ed25519:GysmbJj8RtV39PxNepF2ysGx3byLGvJvsofqe8JK5gfF",
+    "expiry": "1797231443760942299",
+    "epoch": 2,
+    "revoked": false,
+    "scope": {
+      "allowed_assets": [
+        "Near",
+        {
+          "Evm": 11155111
+        },
+        {
+          "Evm20": {
+            "chain_id": 11155111,
+            "token": [
+              28,
+              125,
+              75,
+              25,
+              108,
+              176,
+              199,
+              176,
+              29,
+              116,
+              63,
+              188,
+              97,
+              22,
+              169,
+              2,
+              55,
+              156,
+              114,
+              56
+            ]
+          }
+        }
+      ],
+      "allowed_near_recipients": [
+        "vendor.minder-gate-owner-bf5fcd.testnet"
+      ],
+      "allowed_evm_recipients": [
+        "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5"
+      ],
+      "per_tx_cap": "1000000000000000000000000"
+    }
+  },
+  "evmRecipients": [
+    "0xe3390e9d6fc9456b7e7cdf4678d918dd4a2870d5"
+  ],
+  "allowance": {
+    "afterRegrantYocto": "250000000000000000000000",
+    "endYocto": "246798533699992300000000",
+    "ethCallBurnYocto": "1528031656187600000000",
+    "usdcCallBurnYocto": "1673434643820100000000"
+  },
+  "budgetUsage": {
+    "Near": {
+      "committed": "50000000000000000000000",
+      "reserved": "0",
+      "budget_epoch": "1"
+    },
+    "Evm": {
+      "committed": "3820000000000000",
+      "reserved": "0",
+      "budget_epoch": "1"
+    },
+    "Evm20Usdc": {
+      "committed": "1000000",
+      "reserved": "0",
+      "budget_epoch": "1"
+    }
+  },
+  "note": "Canonical run. An earlier attempt to 0x4996...9abe reverted on Sepolia: that recipient was an empty account, which costs about 207k gas to receive value, against a 21000 limit, and the USDC call ran out of its 100000 token gas limit. After raising token_gas_limit to 200000 and sending to a funded EOA, both succeed."
+}
