@@ -98,8 +98,6 @@ describe('the dark tokens', () => {
       'ink-3': '#6b6e60',
       line: 'rgba(228, 230, 218, 0.12)',
       'line-2': 'rgba(228, 230, 218, 0.22)',
-      'grid-dim': 'rgba(228, 230, 218, 0.05)',
-      'grid-lit': 'rgba(228, 230, 218, 0.16)',
       allow: '#5bbe7e',
       'allow-bg': 'rgba(91, 190, 126, 0.14)',
       deny: '#e06a4c',
@@ -171,7 +169,7 @@ describe('where each colour may appear', () => {
   });
 
   it('yellow only on interaction and liveness', () => {
-    const allowed = /:hover|:focus|aria-current|\.live-dot|::selection|\.btn--primary|\.skip|\.grid-bg__glow/;
+    const allowed = /:hover|:focus|aria-current|\.live-dot|::selection|\.btn--primary|\.skip/;
     for (const rule of leaf) {
       if (/var\(--live(-bg)?\b/.test(rule.body)) assert.match(rule.selector, allowed, rule.selector);
     }

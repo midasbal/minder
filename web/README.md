@@ -25,17 +25,17 @@ web/
       App.tsx             layout and routes
       links.ts            repository, explorer and account links
       motion.ts           shared Framer Motion variants
-      probe.ts            the cursor probe: pointer position to CSS variables, once per frame
+      field.ts            the sensing surface: the lattice, the physics and the canvas drawing
       useRelayHealth.ts   the footer's relay status
-      components/         Header, Footer, GridBackground, PolicyGate, Datasheet, Rail, Buttons,
+      components/         Header, Footer, SensingField, PolicyGate, Datasheet, Rail, Buttons,
                           ExternalLink, ScrollManager
       pages/              Landing, AppShell, NotFound
       docs/               Docs and its sections (Overview ... Reference), contents, reading helpers
-      styles.css          the dark theme: tokens, grid, header, footer, buttons, the app shell
+      styles.css          the dark theme: tokens, header, footer, buttons, the app shell
       landing.css, docs.css
       App.test.tsx        renders every route to HTML and checks the chrome and the content
       theme.test.tsx      the colour rules, enforced against the stylesheets: tokens, contrast, roles
-      probe.test.tsx      the cursor probe against a fake window
+      field.test.tsx      the sensing surface against a fake window and a recording canvas
   server/
     src/app.ts            /health, static files, the app catch-all, JSON 404
     src/index.ts          reads PORT and HOST, starts, shuts down on SIGTERM

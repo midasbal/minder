@@ -183,10 +183,10 @@ describe('the landing page', () => {
   });
 });
 
-describe('the grid behind every page', () => {
-  it('is on every route, hidden from assistive technology, with the probe off until a pointer moves', () => {
+describe('the sensing surface behind every page', () => {
+  it('is a canvas on every route, hidden from assistive technology', () => {
     for (const url of ROUTES) {
-      assert.match(render(url), /<div class="grid-bg" data-probe="off" aria-hidden="true">/, url);
+      assert.match(render(url), /<canvas class="field" aria-hidden="true"><\/canvas>/, url);
     }
   });
 });

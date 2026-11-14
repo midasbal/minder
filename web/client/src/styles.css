@@ -18,8 +18,6 @@
 
   --line: rgba(228, 230, 218, 0.12);
   --line-2: rgba(228, 230, 218, 0.22);
-  --grid-dim: rgba(228, 230, 218, 0.05);
-  --grid-lit: rgba(228, 230, 218, 0.16);
 
   --allow: #5bbe7e;
   --allow-bg: rgba(91, 190, 126, 0.14);
@@ -29,15 +27,12 @@
   --live: #ffc93c;
   --live-bg: rgba(255, 201, 60, 0.12);
 
-  /* A raised panel, a little translucent so the grid and its probe show through. */
+  /* A raised panel, a little translucent so the surface behind it shows through. */
   --panel: color-mix(in srgb, var(--bg-raised) 86%, transparent);
 
   --gutter: clamp(1.25rem, 5vw, 5rem);
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-
-  --mx: -9999px;
-  --my: -9999px;
 
   color-scheme: dark;
 }
@@ -149,60 +144,16 @@ code {
   color: var(--ink-2);
 }
 
-/* ---- The engineering grid, and the probe that lights it ---- */
+/* ---- The sensing surface behind every page (drawn in field.ts) ---- */
 
-.grid-bg {
+.field {
   position: fixed;
   inset: 0;
   z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
-  overflow: hidden;
-}
-
-.grid-bg__base,
-.grid-bg__lit {
-  position: absolute;
-  inset: 0;
-  background-size:
-    34px 34px,
-    34px 34px,
-    170px 170px,
-    170px 170px;
-}
-
-.grid-bg__base {
-  background-image:
-    linear-gradient(var(--grid-dim) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-dim) 1px, transparent 1px),
-    linear-gradient(var(--grid-dim) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-dim) 1px, transparent 1px);
-}
-
-.grid-bg__lit {
-  background-image:
-    linear-gradient(var(--grid-lit) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-lit) 1px, transparent 1px),
-    linear-gradient(var(--grid-lit) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-lit) 1px, transparent 1px);
-  -webkit-mask-image: radial-gradient(circle 280px at var(--mx) var(--my), #000, transparent 70%);
-  mask-image: radial-gradient(circle 280px at var(--mx) var(--my), #000, transparent 70%);
-}
-
-.grid-bg__glow {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle 280px at var(--mx) var(--my), var(--live-bg), transparent 70%);
-}
-
-.grid-bg__lit,
-.grid-bg__glow {
-  opacity: 0;
-  transition: opacity 0.35s ease;
-}
-
-.grid-bg[data-probe='on'] .grid-bg__lit,
-.grid-bg[data-probe='on'] .grid-bg__glow {
-  opacity: 1;
 }
 
 /* ---- Live dots ---- */
