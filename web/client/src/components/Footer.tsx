@@ -31,7 +31,7 @@ export function Footer() {
         </nav>
 
         <span className="chip" data-state={relay} role="status">
-          <span className="chip__dot" aria-hidden="true" />
+          <span className={relay === 'online' ? 'chip__dot live-dot' : 'chip__dot'} aria-hidden="true" />
           {RELAY_LABEL[relay]}
         </span>
       </div>

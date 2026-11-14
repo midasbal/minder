@@ -9,8 +9,8 @@
 
 .docs__nav {
   position: sticky;
-  top: 6rem;
-  max-height: calc(100vh - 8rem);
+  top: 5.5rem;
+  max-height: calc(100vh - 7.5rem);
   overflow-y: auto;
   padding-right: 0.5rem;
 }
@@ -32,41 +32,41 @@
 
 .toc a {
   display: block;
+  padding-block: 0.15rem;
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 0.74rem;
   font-weight: 500;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   text-decoration: none;
-  color: var(--silver);
-  padding-block: 0.15rem;
+  color: var(--ink-2);
+  transition: color 0.18s ease;
 }
 
 .toc ul {
   margin-top: 0.3rem;
-  border-left: 1px solid var(--hairline);
+  border-left: 1px solid var(--line);
 }
 
 .toc ul a {
   padding: 0.2rem 0 0.2rem 0.85rem;
   margin-left: -1px;
-  border-left: 1px solid transparent;
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
+  border-left: 2px solid transparent;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
   text-transform: none;
-  color: var(--silver-dim);
 }
 
 .toc a:hover {
-  color: var(--accent);
+  color: var(--live);
 }
 
 .toc a[aria-current='location'] {
-  color: var(--accent);
+  color: var(--ink);
 }
 
 .toc ul a[aria-current='location'] {
-  border-left-color: var(--accent);
+  border-left-color: var(--live);
 }
 
 .docs__body {
@@ -76,8 +76,9 @@
 
 .docs__body p,
 .docs__body li {
-  font-size: 1.18rem;
-  line-height: 1.65;
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--ink);
 }
 
 .docs__body p {
@@ -95,30 +96,31 @@
 }
 
 .docs__body li::marker {
-  color: var(--accent);
+  color: var(--ink-2);
 }
 
 .docs__body a:not(.btn) {
-  color: var(--accent);
-  text-underline-offset: 0.2em;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line-2);
   text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  transition:
+    color 0.18s ease,
+    text-decoration-color 0.18s ease;
 }
 
-.docs__body strong {
-  font-weight: 400;
-  color: var(--silver);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--accent) 65%, transparent);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 0.22em;
+.docs__body a:not(.btn):hover {
+  color: var(--live);
+  text-decoration-color: var(--live);
 }
 
 /* Sections and headings. */
 
 .doc-section {
-  margin-top: clamp(4rem, 8vw, 6.5rem);
+  margin-top: clamp(3.5rem, 7vw, 5.5rem);
   padding-top: 1.75rem;
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid var(--line);
 }
 
 .docs__body > header + .doc-section {
@@ -130,25 +132,23 @@
   align-items: baseline;
   gap: 1.1rem;
   scroll-margin-top: 6rem;
-  font-weight: 400;
-  font-size: clamp(2rem, 3.6vw, 3rem);
-  line-height: 1.08;
-  letter-spacing: -0.012em;
+  font-size: clamp(1.5rem, 2.8vw, 2.1rem);
+  line-height: 1.15;
 }
 
 .doc-h2__number {
   font-family: var(--mono);
   font-size: 0.78rem;
-  letter-spacing: 0.16em;
-  color: var(--accent);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
 }
 
 .doc-h3 {
   scroll-margin-top: 6rem;
-  margin: 2.75rem 0 0.5rem;
-  font-weight: 400;
-  font-size: clamp(1.5rem, 2.4vw, 1.9rem);
-  line-height: 1.15;
+  margin: 2.5rem 0 0.5rem;
+  font-size: clamp(1.15rem, 1.9vw, 1.4rem);
+  line-height: 1.25;
 }
 
 .doc-h3--plain {
@@ -160,7 +160,8 @@
 .table-wrap {
   margin: 1.5rem 0;
   overflow-x: auto;
-  border-top: 1px solid var(--hairline-strong);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
 }
 
 .table {
@@ -171,31 +172,44 @@
 
 .table th,
 .table td {
-  padding: 0.95rem 1.25rem 0.95rem 0;
+  padding: 0.85rem 1.1rem;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid var(--hairline);
-  font-size: 1.02rem;
-  line-height: 1.5;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.96rem;
+  line-height: 1.55;
+}
+
+.table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.table tbody tr {
+  transition: background-color 0.18s ease;
+}
+
+.table tbody tr:hover {
+  background: var(--live-bg);
 }
 
 .table thead th {
   font-family: var(--mono);
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--silver-dim);
+  color: var(--ink-2);
+  background: var(--bg-inset);
 }
 
 .table tbody th {
   width: 30%;
-  font-weight: 400;
-  color: var(--silver);
+  font-weight: 500;
+  color: var(--ink);
 }
 
 .table td {
-  color: var(--silver-dim);
+  color: var(--ink-2);
 }
 
 .break {
@@ -205,19 +219,20 @@
 
 .pre {
   margin: 1.25rem 0;
-  padding: 1.1rem 1.3rem;
+  padding: 1rem 1.2rem;
   overflow-x: auto;
   font-family: var(--mono);
   font-size: 0.8rem;
   line-height: 1.65;
-  background: color-mix(in srgb, var(--canvas) 72%, black);
-  border: 1px solid var(--hairline-strong);
-  border-left: 2px solid var(--accent);
+  color: var(--ink);
+  background: var(--bg-inset);
+  border: 1px solid var(--line-2);
 }
 
 .pre code {
   padding: 0;
   background: none;
+  border: 0;
   font-size: inherit;
   overflow-wrap: normal;
 }
@@ -225,23 +240,23 @@
 .note {
   margin: 1.75rem 0;
   padding: 1.1rem 1.4rem 0.4rem;
-  border: 1px solid var(--hairline-strong);
-  border-left: 2px solid var(--accent);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
 }
 
 .note__title {
   margin: 0 0 0.5rem;
   font-family: var(--mono);
   font-size: 0.72rem;
-  font-weight: 500;
-  letter-spacing: 0.16em;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--ink);
 }
 
 .docs__body .note p,
 .docs__body .note li {
-  font-size: 1.05rem;
+  font-size: 1rem;
   line-height: 1.6;
 }
 
@@ -255,7 +270,7 @@
     position: static;
     max-height: none;
     padding: 1rem 1.25rem 1.25rem;
-    border: 1px solid var(--hairline);
+    border: 1px solid var(--line);
   }
 
   .toc ul {

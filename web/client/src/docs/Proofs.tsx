@@ -18,7 +18,8 @@ export function Proofs() {
         <p>
           Kani 0.68.0 does bounded model checking: it proves a property for <em>every</em> input within stated bounds.
           The proofs are of the shipped source files, included by path, not copies. There are 18 proofs of the encoder,
-          the sliding window and the firewall decision, and 25 of the timelock classifier, 43 in all.
+          the sliding window and the firewall decision, and 25 of the timelock classifier: 18 + 25 = 43. The design
+          document states the two counts separately; the total is their sum.
         </p>
         <Table caption="What the Kani proofs establish" head={['Subject', 'Property']}>
           <tr>

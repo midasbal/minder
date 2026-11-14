@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 
 import { ExternalLink } from './ExternalLink';
 
-type Variant = 'primary' | 'ghost';
+type Variant = 'primary' | 'secondary';
 
 export function LinkButton({ to, variant, children }: { to: string; variant: Variant; children: ReactNode }) {
   return (

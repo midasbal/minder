@@ -1,313 +1,422 @@
-/* The landing page: the hero, then a run of numbered chapters. */
+/* The landing page: the hero with the policy gate, then plain, numbered sections. */
 
 .landing {
   display: flex;
   flex-direction: column;
-  gap: clamp(5rem, 11vw, 10rem);
+  gap: clamp(4rem, 8vw, 7rem);
 }
+
+/* ---- Hero ---- */
 
 .hero {
-  display: flex;
-  flex-direction: column;
-  gap: clamp(2rem, 4vw, 3.5rem);
-}
-
-.chapter {
   display: grid;
-  grid-template-columns: minmax(0, 11rem) minmax(0, 1fr);
-  gap: clamp(1.5rem, 4vw, 4rem);
-  padding-top: clamp(1.75rem, 3vw, 2.5rem);
-  border-top: 1px solid var(--hairline);
-}
-
-.chapter__index {
-  color: var(--accent);
-}
-
-.chapter__index::after {
-  content: ' /';
-  color: var(--silver-dim);
-}
-
-.chapter__title {
-  font-weight: 400;
-  font-size: clamp(2rem, 4.4vw, 3.5rem);
-  line-height: 1.05;
-  letter-spacing: -0.012em;
-  max-width: 17em;
-}
-
-.prose {
-  margin-top: 1.5rem;
-  max-width: 36em;
-  font-size: clamp(1.2rem, 1.6vw, 1.45rem);
-  line-height: 1.5;
-}
-
-.fineprint {
-  margin-top: 1.5rem;
-  max-width: 40em;
-  font-size: 1rem;
-  color: var(--silver-dim);
-}
-
-.fineprint a {
-  color: var(--accent);
-  text-underline-offset: 0.2em;
-  text-decoration-thickness: 1px;
-}
-
-/* The containment visual inside chapter 02 reuses the app's stage. */
-
-.stage--flow {
-  margin-top: clamp(2.5rem, 5vw, 4rem);
-}
-
-.idents {
-  list-style: none;
-  margin: 0.5rem 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.idents li {
-  padding-left: 0.85rem;
-  border-left: 2px solid var(--hairline-strong);
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  line-height: 1.5;
-}
-
-.idents li code {
-  padding: 0;
-  background: none;
-  font-size: inherit;
-}
-
-.idents--plain li {
-  font-family: var(--serif);
-  font-size: 1.15rem;
-}
-
-/* Chapter 03: the static badge. */
-
-.badge {
-  margin-top: 2.25rem;
-  display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
   align-items: center;
-  column-gap: 1.5rem;
-  row-gap: 0.35rem;
-  max-width: 100%;
-  padding: 1.35rem 1.85rem;
-  border: 1px dashed var(--hairline-strong);
+  gap: clamp(2.5rem, 6vw, 5.5rem);
 }
 
-.badge__count {
-  grid-row: span 2;
-  font-size: clamp(3.6rem, 7vw, 5.5rem);
-  line-height: 0.9;
-  color: var(--accent);
+.hero__title {
+  font-size: clamp(1.9rem, 3.5vw, 2.5rem);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
 }
 
-.badge__label {
-  align-self: end;
+.hero__sub {
+  margin-top: 1.4rem;
+  max-width: 34em;
+  font-size: 1.1rem;
+  color: var(--ink-2);
+}
+
+.hero .cta-row {
+  margin-top: 2rem;
+}
+
+/* ---- The policy gate ---- */
+
+.gate-wrap {
+  min-width: 0;
+}
+
+.gate-wrap__caption {
+  margin-top: 0.7rem;
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.gate {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+}
+
+.gate__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
   font-family: var(--mono);
-  font-size: 0.8rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+
+.gate__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
   font-weight: 500;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.badge__note {
-  align-self: start;
-  max-width: 22em;
-  font-size: 1rem;
-  color: var(--silver-dim);
+.gate__id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Chapter 04: the figures. */
-
-.stats {
-  list-style: none;
-  margin: clamp(2rem, 4vw, 3rem) 0 0;
-  padding: 0;
+.gate__body {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border-top: 1px solid var(--hairline-strong);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
 }
 
-.stat {
+.gate__col {
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
-  padding: 1.6rem 1.6rem 0.4rem;
-  border-right: 1px solid var(--hairline);
+  gap: 0.7rem;
+  padding: 1rem;
 }
 
-.stat:first-child {
-  padding-left: 0;
+.gate__label {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
 }
 
-.stat:last-child {
-  border-right: 0;
+.node {
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--line-2);
 }
 
-.stat__value {
-  font-size: clamp(3rem, 6vw, 5rem);
-  line-height: 1;
-  letter-spacing: -0.02em;
-  color: var(--accent);
+.node__title {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--ink);
 }
 
-.stat__of {
-  margin-left: 0.15em;
-  font-size: 0.42em;
-  letter-spacing: 0;
-  color: var(--silver-dim);
+.node__sub {
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--ink-2);
 }
 
-.stat__label {
+.gate__policy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1rem;
+  background: var(--bg-inset);
+  border-inline: 1px solid var(--line-2);
+}
+
+.gate__policy .gate__label {
+  text-align: center;
+}
+
+/* Key and value rows with a dotted leader between them. */
+
+.kv {
+  margin: 0;
+}
+
+.kv__row {
+  display: flex;
+  align-items: baseline;
+  padding: 0.28rem 0;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.kv__row dt {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  color: var(--ink-2);
+}
+
+.kv__row dt::after {
+  content: '';
+  flex: 1;
+  margin: 0 0.5rem;
+  border-bottom: 1px dotted var(--ink-3);
+  transform: translateY(-0.2em);
+}
+
+.kv__row dd {
+  margin: 0;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.decisions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.decision {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1rem;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--line);
+  transition:
+    background-color 0.18s ease,
+    border-left-color 0.18s ease;
+}
+
+.decision:last-child {
+  border-bottom: 0;
+}
+
+.decision:hover,
+.sheet__row:hover {
+  background: var(--live-bg);
+  border-left-color: var(--live);
+}
+
+.decision__text {
+  min-width: 0;
+}
+
+.decision__request {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.decision__reason {
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+/* A verdict. The tint sits on the inset surface so the text clears 4.5:1. */
+
+.stamp {
+  flex: none;
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  border: 1px solid currentColor;
+}
+
+.stamp--allow {
+  color: var(--allow);
+  background: linear-gradient(var(--allow-bg), var(--allow-bg)), var(--bg-inset);
+}
+
+.stamp--deny {
+  color: var(--deny);
+  background: linear-gradient(var(--deny-bg), var(--deny-bg)), var(--bg-inset);
+}
+
+/* ---- Sections ---- */
+
+.section {
+  padding-top: clamp(1.75rem, 3vw, 2.5rem);
+  border-top: 1px solid var(--line);
+}
+
+.section__label {
   font-family: var(--mono);
   font-size: 0.74rem;
   font-weight: 500;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: var(--ink-2);
 }
 
-.stat__note {
-  font-size: 1rem;
-  line-height: 1.45;
-  color: var(--silver-dim);
+.section__title {
+  margin-top: 1rem;
+  max-width: 24em;
+  font-size: clamp(1.5rem, 2.8vw, 2.1rem);
+  line-height: 1.15;
 }
 
-/* Chapter 05: the path from request to signed transaction. */
+.section__lead {
+  margin-top: 1.25rem;
+  max-width: 44rem;
+  font-size: 1.1rem;
+  color: var(--ink-2);
+}
 
-.path {
-  list-style: none;
-  margin: clamp(2rem, 4vw, 3rem) 0 0;
-  padding: 0;
+/* ---- Datasheets ---- */
+
+.sheets {
+  margin-top: 2rem;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(1rem, 2.5vw, 1.75rem);
 }
 
-.path__step {
-  position: relative;
+.sheet {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 1.5rem 1.5rem 0 0;
-  border-top: 1px solid var(--hairline-strong);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
 }
 
-.path__step::before {
-  content: '';
-  position: absolute;
-  top: -5px;
-  left: 0;
-  width: 9px;
-  height: 9px;
-  background: var(--accent);
+.sheet__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--line);
 }
 
-.path__index {
+.sheet__title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.sheet__tag {
   font-family: var(--mono);
   font-size: 0.72rem;
-  letter-spacing: 0.16em;
-  color: var(--silver-dim);
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
 }
 
-.path__name {
-  font-size: 1.6rem;
-  line-height: 1.1;
+.sheet__rows {
+  flex: 1;
+  margin: 0;
 }
 
-.path__step:nth-child(2) .path__name {
-  color: var(--accent);
-  font-style: italic;
+.sheet__row {
+  display: flex;
+  align-items: baseline;
+  padding: 0.7rem 1.1rem;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  transition:
+    background-color 0.18s ease,
+    border-left-color 0.18s ease;
 }
 
-.path__text {
-  font-size: 1.05rem;
-  line-height: 1.45;
-  color: var(--silver-dim);
+.sheet__row dt {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  color: var(--ink-2);
 }
 
-/* The closing band. */
+.sheet__row dt::after {
+  content: '';
+  flex: 1;
+  min-width: 1rem;
+  margin: 0 0.6rem;
+  border-bottom: 1px dotted var(--ink-3);
+  transform: translateY(-0.2em);
+}
+
+.sheet__row dd {
+  margin: 0;
+  text-align: right;
+  color: var(--ink);
+}
+
+.sheet__row dd.is-verified {
+  color: var(--allow);
+  font-weight: 500;
+}
+
+.sheet__foot {
+  padding: 0.8rem 1.1rem;
+  background: var(--bg-inset);
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.sheet__foot a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line-2);
+  text-underline-offset: 0.2em;
+  transition:
+    color 0.18s ease,
+    text-decoration-color 0.18s ease;
+}
+
+.sheet__foot a:hover {
+  color: var(--live);
+  text-decoration-color: var(--live);
+}
+
+/* ---- Closing ---- */
 
 .closing {
-  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 1.25rem;
-  padding: clamp(2.5rem, 6vw, 5rem) clamp(1.5rem, 5vw, 4.5rem);
-  border: 1px solid var(--hairline-strong);
-}
-
-.closing::before {
-  content: '';
-  position: absolute;
-  inset-block: -1px;
-  left: -1px;
-  width: 4px;
-  background: var(--accent);
+  gap: 1.1rem;
+  padding: clamp(2rem, 5vw, 3.5rem);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
 }
 
 .closing__title {
-  font-weight: 400;
-  font-style: italic;
-  font-size: clamp(3rem, 9vw, 7.5rem);
-  line-height: 0.98;
-  letter-spacing: -0.02em;
-  color: var(--accent);
+  font-size: clamp(2rem, 5vw, 3.4rem);
+  line-height: 1.05;
 }
 
 .closing__text {
-  max-width: 28em;
-  font-size: clamp(1.2rem, 2vw, 1.6rem);
-  color: var(--silver);
+  max-width: 30em;
+  font-size: 1.15rem;
+  color: var(--ink-2);
 }
 
 .closing .cta-row {
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
 }
 
-@media (max-width: 54rem) {
-  .chapter {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 1rem;
-  }
-
-  .stats {
+@media (max-width: 62rem) {
+  .hero {
     grid-template-columns: minmax(0, 1fr);
   }
+}
 
-  .stat,
-  .stat:first-child {
-    padding: 1.4rem 0;
-    border-right: 0;
-    border-bottom: 1px solid var(--hairline);
-  }
-
-  .stat:last-child {
-    border-bottom: 0;
-  }
-
-  .path {
+@media (max-width: 40rem) {
+  .sheets {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .path__step {
-    padding: 0 0 1.75rem 1.5rem;
-    border-top: 0;
-    border-left: 1px solid var(--hairline-strong);
+  .gate__body {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .path__step::before {
-    top: 0;
-    left: -5px;
+  .gate__policy {
+    border-inline: 0;
+    border-block: 1px solid var(--line-2);
+  }
+
+  .decision {
+    flex-wrap: wrap;
   }
 }
