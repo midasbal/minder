@@ -155,7 +155,7 @@ committed tree reproduced the deployed hash with the default cargo home and with
 rustc 1.94.1 and cargo-near 0.23.0. Other compiler or cargo-near versions have not been tried, and a mismatch
 with a different toolchain is not by itself evidence that the deployed code differs.
 
-The same claims are checked in your browser by the [live console](https://minder-production-28c77cab.up.railway.app/app) (source in `web/`): it reads the access keys
+The same claims are checked in your browser by the [live console](https://minder-near.up.railway.app/app) (source in `web/`): it reads the access keys
 and the deployed code from public NEAR nodes and hashes the code locally; it reads the live policy and headroom;
 it answers dry runs against the live contract; and for each cross-chain payment it recovers the signer from the
 raw Sepolia transaction and shows it equals the contract's configured sender and the address Chain Signatures
@@ -165,10 +165,10 @@ derives for this contract.
 
 - **Contract:** [`gate.minder-gate-owner-bf5fcd.testnet`](https://testnet.nearblocks.io/address/gate.minder-gate-owner-bf5fcd.testnet)
   on NEAR testnet. Its EVM sender on Sepolia is `0x73Cd4718d7577318D76Ab78db13a9Ec7CEcb7F3F`.
-- **The live console and docs:** <https://minder-production-28c77cab.up.railway.app>. Attack the agent at
-  [`/app`](https://minder-production-28c77cab.up.railway.app/app), read the contract's real limits, and check the
+- **The live console and docs:** <https://minder-near.up.railway.app>. Attack the agent at
+  [`/app`](https://minder-near.up.railway.app/app), read the contract's real limits, and check the
   recorded payments' signatures in your browser; the documentation is at
-  [`/docs`](https://minder-production-28c77cab.up.railway.app/docs). Or run `web/` locally (see
+  [`/docs`](https://minder-near.up.railway.app/docs). Or run `web/` locally (see
   [Build and test](#build-and-test)): the page reads the live testnet contract straight from your browser, so a
   local run shows the same live data.
 - **Design and evidence:** [`contract/DESIGN.md`](contract/DESIGN.md) is the source for the guarantees and figures above.
